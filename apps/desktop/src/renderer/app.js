@@ -803,7 +803,7 @@ pet.on('pet:voice-audio', (payload) => {
   if (payload && payload.volume !== undefined) {
     audio.setVolume(payload.volume);
     // 留一行日志：用户说“调了没变化”时，先确认音量到底有没有随音频下来
-    console.info([voice] 音量 );
+    console.info(`[voice] 音量 ${payload.volume}`);
   }
   audio.play(payload.bytes, payload.format).catch((error) => {
     console.warn('[voice] 播放宠物语音失败', error);
