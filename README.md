@@ -17,6 +17,25 @@ Python sidecar        事件总线 · 人格/情绪 · 记忆 · 语音 · 屏�
 
 ---
 
+## 下载
+
+安装包与绿色包在 [Releases](https://github.com/asgaerg/desktop-pet/releases)：
+
+| 文件 | 大小 | 说明 |
+|---|---|---|
+| `DesktopPet-0.1.0-online-setup.exe` | 278 MB | 在线版安装包（推荐） |
+| `DesktopPet-0.1.0-online-portable.zip` | 354 MB | 在线版绿色包，解压即用 |
+| `DesktopPet-0.1.0-offline-setup.exe` | 1,630 MB | 离线版，自带 1.55 GB 语音模型 |
+| `DesktopPet-0.1.0-offline-portable.zip` | 1,778 MB | 离线版绿色包 |
+
+> ⚠️ **会有安全提示，这是正常的**：exe 没有代码签名，所以
+> Windows SmartScreen 会显示「未知发布者」→ 点「更多信息」→「仍要运行」；
+> 杀软可能把 `resources\pet\pet.exe`（PyInstaller 打的 Python 程序）误报成病毒 → 加白名单。
+> **安装包要放在纯英文路径**（如 `C:\Temp`）再运行，放含中文的目录会失败。
+>
+> 下载后请对照 [SHA256SUMS.txt](docs/SHA256SUMS.txt) 校验：
+> `Get-FileHash .\DesktopPet-0.1.0-online-setup.exe -Algorithm SHA256`
+
 ## 先说清楚：现在只是个壳
 
 **桌面这一层是通的，内容基本没有。**
