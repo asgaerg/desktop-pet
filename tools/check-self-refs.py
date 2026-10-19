@@ -46,7 +46,9 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
-ROOT = Path(r"F:\ai项目")
+# ⚠️ 别写死绝对路径（项目搬家过一次：F:\ai项目 -> F:\ai）。
+# 写死的话所有文件都"不存在"，门禁会报一堆假问题 —— 比不跑更误导人。
+ROOT = Path(__file__).resolve().parent.parent
 BRAIN = ROOT / "apps" / "brain" / "pet"
 
 # ⚠️ 允许引用但不在**本类**定义的名字，附理由。

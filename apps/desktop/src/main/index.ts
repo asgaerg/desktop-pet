@@ -46,7 +46,7 @@ import { SHORTCUTS } from './shortcuts.js';
 import { FocusedKeyPtt, GlobalShortcutPtt, DEFAULT_PTT_VK, vkName } from './pushToTalk.js';
 import { QuitCoordinator, setQuitStateDir } from './quitCoordinator.js';
 import { SingleInstanceGuard, setStateDir } from './singleInstance.js';
-import { decideBubble } from './bubbleDecision.js';
+import { decideBubble, decideBubblePlacement } from './bubbleDecision.js';
 import { popupPetMenu, dispatchPetMenuAction, type PetMenuHandlers } from './petMenu.js';
 import {
   buildPetMenuTemplate,
@@ -469,6 +469,46 @@ let petMenuHandlers: PetMenuHandlers | null = null;
  */
 let ttsHealthy = true;
 
+/**
+ * 每次发言是不是"用户主动要的"，按 `say.id` 记住。
+ *
+ * ## 为什么需要记
+ *
+ * `userInitiated` 只有 `pet.say.start` 带（Python 侧在 `_generate` 里算），
+ * 后面的 `say.delta` / `say.end` **都不带**。而"趴着（全屏）时要不要弹气泡"
+ * 是按消息逐条判的 —— 只认 start 的话，start 过了、第一条 delta 就被判成
+ * "不是用户要的"，气泡当场被 hide。
+ *
+ * 症状（2026-10-19 用户报的就是它）：按了截图对话，气泡闪一下就没了，
+ * 字一个都没看到。
+ *
+ * 所以 start 时记下来，delta / end 沿用同一个 id 的值，end 之后稍后清掉。
+ */
+const userInitiatedBySay = new Map<string, boolean>();
+
+/** 记一下这条发言的性质；同一个 id 只留最新的。 */
+function rememberUserInitiated(id: string | undefined, userInitiated: boolean): void {
+  if (!id) return;
+  // 极端情况下（模型一直不 end）别让 Map 无限长
+  if (userInitiatedBySay.size > 64) userInitiatedBySay.clear();
+  userInitiatedBySay.set(id, userInitiated);
+}
+
+/** 这条消息属于"用户主动要的"吗（start 带值，delta/end 查表）。 */
+function lookupUserInitiated(
+  kind: string,
+  id: string | undefined,
+  explicit: boolean | undefined,
+): boolean {
+  if (kind === 'say.start') {
+    const flag = Boolean(explicit);
+    rememberUserInitiated(id, flag);
+    return flag;
+  }
+  if (id && userInitiatedBySay.has(id)) return Boolean(userInitiatedBySay.get(id));
+  return Boolean(explicit);
+}
+
 function forwardToBubble(message: { type?: string }): boolean {
   if (!bubbleWindow) return false;
   const type = message.type ?? '';
@@ -545,17 +585,44 @@ function forwardToBubble(message: { type?: string }): boolean {
     startupNote(`[气泡] ${decision.why} —— 本条显示文字`);
   }
 
-  // 宠物不可见 / 趴着（别的应用全屏）时不弹气泡：那时候用户不在看桌面
-  if (!petWindow?.visible || petWindow.isCompact) {
+  /*
+   * 宠物不可见 / 趴着（别的应用全屏）时**默认**不弹气泡：那时候用户不在看桌面。
+   *
+   * 例外是"用户主动要的"那一句（`userInitiated`）：按了截图对话、打了字、说了话
+   * 之后，回复必须给文字。2026-10-19 用户报的正是这个 ——
+   * 「宠物控制状态明明是点击隐藏，可是气泡却没有出现」：他在全屏看漫画时按了
+   * 截图对话，宠物趴着（compact=true）把气泡跳过了，于是只有声音没有字。
+   *
+   * 判定抽在 `decideBubblePlacement` 里，测试能直接喂参数打。
+   */
+  const pet = petWindow;
+  const sayId = (message as { id?: string }).id;
+  const userInitiated = lookupUserInitiated(
+    kind,
+    sayId,
+    (message as { userInitiated?: boolean }).userInitiated,
+  );
+  // say.end 之后这条 id 的用途就结束了；延迟清，避免 delta 迟到时查不到。
+  if (kind === 'say.end' && sayId) {
+    setTimeout(() => userInitiatedBySay.delete(sayId), 10_000);
+  }
+  const placement = decideBubblePlacement({
+    petVisible: Boolean(pet?.visible),
+    compact: Boolean(pet?.isCompact),
+    userInitiated,
+  });
+  if (!placement.show) {
     startupNote(
-      `[气泡] 跳过定位：visible=${String(petWindow?.visible)} compact=${String(petWindow?.isCompact)}`,
+      `[气泡] 跳过定位：${placement.why}（visible=${String(pet?.visible)} compact=${String(
+        pet?.isCompact,
+      )} userInitiated=${String(userInitiated)}）`,
     );
     bubbleWindow.hide();
     return true;
   }
 
   // 每次显示前重新定位：宠物可能刚被拖过、或刚从探头状态回来
-  const anchor = petWindow.artScreenAnchor;
+  const anchor = pet?.artScreenAnchor;
   if (anchor) {
     bubbleWindow.place(anchor);
     startupNote(

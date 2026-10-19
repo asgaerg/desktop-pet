@@ -405,7 +405,18 @@ const downToFrontend = downlink.filter((t) => !MAIN_ONLY.has(t));
 // 那是死代码，比漏判更糟（它会让人以为"这条消息这里会处理"）。
 {
   /** 请求-回执类：有调用方在等，由 `await` 消费，不需要 case */
-  const REQUEST_REPLY = new Set(['memory.result']);
+  const REQUEST_REPLY = new Set([
+    'memory.result',
+    /*
+     * 模块开关（2026-10-19 补）。
+     *
+     * 设置页的「模块」那一栏是 wait api.modules() / wait api.setModule() 拿结果，
+     * 大脑发的每条 modules.state 都带 
+equestId（gateway 里四处全是 reply），
+     * 没有任何"主动推送"的用法 —— 所以没有 case 可写，写一个就是死代码。
+     */
+    'modules.state',
+  ]);
   // ⚠️ 用 `downToFrontend`（已排除 MAIN_ONLY）—— 主进程内部消息不进渲染层
   const critical = downToFrontend.filter((type) => type !== 'ready' && !REQUEST_REPLY.has(type));
   /*

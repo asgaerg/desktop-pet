@@ -974,6 +974,15 @@ class Conversation:
         current_turn_id = 0
         say_id = self.new_say_id()
         await self.bus.publish("pet.thinking", msg("pet.thinking", id=say_id))
+        # `userInitiated` = 这一句是不是用户主动要的。
+        #
+        # 前端用它破"全屏（紧凑）态不弹气泡"那条规则：那时候用户一般不在看桌面，
+        # 所以自主开口只出声；但用户自己按了「截图对话」、或打字/说话之后的回复，
+        # 必须给字 —— 否则表现就是"按了截图对话，只有声音没有字"（2026-10-19 反馈）。
+        #
+        # `idle=False` 本来就是"用户说的"（打字 / 语音）；
+        # 截图对话虽然 idle=True，但它的 trigger 带着 user_initiated=True。
+        user_initiated = (not idle) or bool((trigger or {}).get("user_initiated"))
         await self.bus.publish(
             "pet.say.start",
             msg(
@@ -981,6 +990,7 @@ class Conversation:
                 id=say_id,
                 emotion=self.emotion.dominant,
                 priority="low" if idle else "normal",
+                userInitiated=user_initiated,
             ),
         )
 
@@ -3957,6 +3967,9 @@ class Gateway:
                 #    表现是它看得见屏幕但不说内容。这种字典键写错门禁查不出来。
                 {
                     "source": "snap",
+                    # 用户自己按的「截图对话」——这次回复必须给文字，
+                    # 哪怕宠物正趴在屏幕边上（全屏态）。见 _generate 里 userInitiated 的说明。
+                    "user_initiated": True,
                     "context_hint": hint,
                     # ⚠️ 同一份描述**再放进 user 轮**。看起来重复，但两处的用途不同：
                     #    system 里那份是背景（可能被记忆压过去），

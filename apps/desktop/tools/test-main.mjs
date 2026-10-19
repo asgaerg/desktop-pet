@@ -167,7 +167,7 @@ const {
 } = requireCjs(target('petMenuTemplate'));
 
 // 气泡显隐的决策（沉浸模式的核心，见 bubbleDecision.ts）
-const { decideBubble } = requireCjs(target('bubbleDecision'));
+const { decideBubble, decideBubblePlacement } = requireCjs(target('bubbleDecision'));
 
 // VK -> Electron accelerator（PTT 全局热键用，见 pushToTalk.ts）
 const { DEFAULT_PTT_VK, vkName, TOGGLE_DEBOUNCE_MS } =
@@ -3062,6 +3062,64 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
       '合成失败的 why 要说清是合成失败（不是"TTS 已关闭"）',
       whyFailed.includes('合成失败'),
       `实际 ${whyFailed} —— 排查时会误以为用户关了 TTS`,
+    );
+  }
+
+  /*
+   * 气泡要不要**摆出来**（`decideBubblePlacement`，2026-10-19 加）。
+   *
+   * ## 这个用例的来历
+   *
+   * 用户报：「宠物控制状态明明是点击隐藏，可是气泡却没有出现」。
+   * 查日志：20:12 那条截图对话回复，宠物正趴着（`compact=true`，他在全屏看漫画），
+   * 于是 `forwardToBubble` 里那条**无条件**跳过规则把气泡 hide 了 ——
+   * 语音照放，字一个没有。
+   *
+   * 规则改成：**用户自己按的（userInitiated）必须给字**，
+   * 自主开口在全屏时仍然安静。
+   */
+  {
+    check(
+      '常规：宠物可见、没趴着 -> 弹',
+      decideBubblePlacement({ petVisible: true, compact: false }).show === true,
+      '常规情况反而不弹了',
+    );
+
+    check(
+      '宠物被隐藏 -> 一律不弹',
+      decideBubblePlacement({ petVisible: false, compact: false }).show === false,
+      '宠物藏起来了还弹气泡',
+    );
+
+    check(
+      '宠物趴着（全屏）+ 自主开口 -> 不弹（别打扰）',
+      decideBubblePlacement({ petVisible: true, compact: true, userInitiated: false }).show ===
+        false,
+      '全屏时自主开口也弹了 —— 会打扰用户',
+    );
+
+    check(
+      '宠物趴着 + **用户主动要的**（截图对话/打字）-> 弹（2026-10-19 修）',
+      decideBubblePlacement({ petVisible: true, compact: true, userInitiated: true }).show ===
+        true,
+      '用户自己按了截图对话却看不到字 —— 正是这次报的 bug',
+    );
+
+    check(
+      '省略 userInitiated 时按"不是用户要的"处理（不改没传这个字段时的行为）',
+      decideBubblePlacement({ petVisible: true, compact: true }).show === false,
+      '省略字段就变成弹了',
+    );
+
+    const whyCompact = decideBubblePlacement({
+      petVisible: true,
+      compact: true,
+      userInitiated: false,
+    }).why;
+    check(
+      '不弹的 why 要说明是"趴着 + 不是用户要的"',
+      whyCompact.includes('趴着') && whyCompact.includes('用户'),
+      `实际 ${whyCompact} —— 排查时分不清是隐藏还是全屏`,
     );
   }
 

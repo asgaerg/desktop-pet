@@ -55,7 +55,10 @@ from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
-ROOT = Path(r"F:\ai项目")
+# ⚠️ 别写死绝对路径：项目搬过一次家（F:\ai项目 -> F:\ai），
+# 写死之后这个门禁在**新路径上直接抛 FileNotFoundError** —— 看起来像"检查挂了"，
+# 实际是脚本自己找不到文件。按 `__file__` 推导，搬去哪儿都对。
+ROOT = Path(__file__).resolve().parent.parent
 YAML = ROOT / "config" / "persona.yaml"
 PY = ROOT / "apps" / "brain" / "pet" / "memory.py"
 

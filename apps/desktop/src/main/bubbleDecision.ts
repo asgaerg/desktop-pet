@@ -129,3 +129,50 @@ export function decideBubble(input: BubbleDecisionInput): BubbleDecision {
     }`,
   };
 }
+
+/** 气泡「摆不摆出来」的输入（比 `decideBubble` 更靠后：文字已经决定要显示了）。 */
+export interface BubblePlacementInput {
+  /** 宠物窗口当前可见吗（用户把它藏了就一律不弹） */
+  petVisible: boolean;
+  /**
+   * 宠物是不是"趴着"（紧凑态：别的应用全屏时它缩到边上）。
+   *
+   * 2026-10-19 之前这里**无条件**把气泡跳过，理由是"全屏时用户不在看桌面"。
+   * 对自主开口成立；对用户自己按的截图对话就不成立了 ——
+   * 他刚按了快捷键、正等着看回复，结果只有声音没有字。
+   */
+  compact: boolean;
+  /**
+   * 这一句是不是用户主动要的（截图对话 / 打字 / 语音）。
+   * 省略按 `false`，保持原来的行为。
+   */
+  userInitiated?: boolean;
+}
+
+/** 决策结果：`show=false` 时连定位都别做，直接 hide。 */
+export interface BubblePlacementDecision {
+  show: boolean;
+  /** 给人看的短语（会进 startup.log） */
+  why: string;
+}
+
+/**
+ * 气泡要不要真的弹出来。
+ *
+ * ```
+ * 宠物被藏起来                    -> 不弹（用户明确不想看它）
+ * 趴着 + 自主开口                 -> 不弹（全屏时别打扰）
+ * 趴着 + 用户主动要的（截图/打字） -> 弹  ← 2026-10-19 修的就是这条
+ * 正常                            -> 弹
+ * ```
+ */
+export function decideBubblePlacement(
+  input: BubblePlacementInput,
+): BubblePlacementDecision {
+  if (!input.petVisible) return { show: false, why: '宠物被隐藏了' };
+  if (input.compact && !input.userInitiated) {
+    return { show: false, why: '宠物趴着（别的应用全屏）且不是用户要的' };
+  }
+  if (input.compact) return { show: true, why: '趴着，但这条是用户主动要的' };
+  return { show: true, why: '常规' };
+}

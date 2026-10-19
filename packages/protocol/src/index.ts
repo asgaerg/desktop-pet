@@ -737,6 +737,13 @@ export interface PetSayStartMsg {
   id: string;
   emotion?: Emotion;
   priority?: Priority;
+  /**
+   * 这一句是不是**用户主动要的**（他按了截图对话 / 打了字 / 说了话）。
+   *
+   * 用来区分"自主开口"：全屏（紧凑）态下默认不弹气泡，因为那时用户不在看桌面；
+   * 但用户自己触发的回复必须弹 —— 否则表现就是"我按了截图对话，只有声音没有字"。
+   */
+  userInitiated?: boolean;
 }
 
 export interface PetSayDeltaMsg {
