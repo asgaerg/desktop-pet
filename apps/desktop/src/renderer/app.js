@@ -796,6 +796,15 @@ pet.on('pet:voice-audio', (payload) => {
    * 它说了算 —— 主进程在转发点猜时机会漏（实测音频在播还挂「思考中」）。
    */
   window.pet?.notifyVoiceSpeaking?.();
+  /*
+   * 音量：主进程会把当前配置里的 `providers.tts.volume`（0..100）随每段音频带下来。
+   * 放在 play() 之前设置 —— 这样第一段语音就是目标音量，不会先响一嗓子再变小。
+   */
+  if (payload && payload.volume !== undefined) {
+    audio.setVolume(payload.volume);
+    // 留一行日志：用户说“调了没变化”时，先确认音量到底有没有随音频下来
+    console.info([voice] 音量 );
+  }
   audio.play(payload.bytes, payload.format).catch((error) => {
     console.warn('[voice] 播放宠物语音失败', error);
   });

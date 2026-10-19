@@ -954,6 +954,34 @@
             </select>
           </div>
 
+          <!--
+            音量（2026-10-19 用户要求「可调节声音大小」）。
+
+            ⚠️ 它调的是**播放音量**，不是合成参数。
+            为什么不在合成端调：
+              · edge-tts 的 volume 是 `'+10%'` 这种**字符串**（相对量）
+              · 本地 SAPI 的 -Volume 是 `0..100` 的整数
+              · 云端 openai 路线压根没有这个参数
+            三套单位各不相同，共用一个滑杆必然有一边是错的。
+            统一在播放端乘一个增益，三条路线就全都听话了。
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">音量</span>
+              <span class="setting-desc">
+                宠物说话有多大声。<strong>0 = 静音</strong>，100 = 满音量。
+                <br />
+                点下面的<strong>保存</strong>后，它下一次开口就按新音量；
+                正在说的那一句不打断。
+              </span>
+              <div id="tts-volume-hint" class="hint"></div>
+            </div>
+            <div class="setting-control">
+              <input id="tts-volume" type="range" min="0" max="100" step="5" value="100" />
+              <span class="suffix" id="tts-volume-value">100</span>
+            </div>
+          </div>
+
           <div class="setting">
             <div class="setting-text">
               <span class="setting-title">&nbsp;</span>

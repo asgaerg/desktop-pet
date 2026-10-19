@@ -134,6 +134,10 @@ const ui = {
   ttsSave: el('tts-save'),
   ttsSaveState: el('tts-save-state'),
   ttsTest: el('tts-test'),
+  // 音量（2026-10-19 用户要求「可调节声音大小」）—— 播放端增益，见 settings.html 的说明
+  ttsVolume: el('tts-volume'),
+  ttsVolumeValue: el('tts-volume-value'),
+  ttsVolumeHint: el('tts-volume-hint'),
   // 快捷键一览（2026-10-12 从托盘菜单搬来，见 settings.html 里的说明）
   shortcutList: el('shortcut-list'),
   // 桌宠
@@ -2238,6 +2242,22 @@ loadAsrInfo();
  * 所以这里按 provider 切换输入框，不能共用一个。
  */
 
+/**
+ * 把音量滑杆的值同步到右边的数字（以及"静音"提示）。
+ *
+ * 2026-10-19 加。为什么单独一个函数：`renderTts`（配置回填）和滑杆的
+ * `input` 事件都要调它 —— 两处各写一遍迟早不一致。
+ */
+function syncTtsVolumeLabel() {
+  if (!ui.ttsVolume) return;
+  const raw = Number(ui.ttsVolume.value);
+  const volume = Math.max(0, Math.min(100, Math.round(Number.isFinite(raw) ? raw : 100)));
+  if (ui.ttsVolumeValue) ui.ttsVolumeValue.textContent = String(volume);
+  if (ui.ttsVolumeHint) {
+    ui.ttsVolumeHint.textContent = volume === 0 ? '静音：只显示文字，不出声' : '';
+  }
+}
+
 function renderTts(cfg) {
   if (!cfg) return;
   // ⚠️ 用户动过之后就不再覆盖控件（见 ttsTouched 的说明）；
@@ -2382,6 +2402,13 @@ function renderTtsState(cfg) {
   } else {
     ui.ttsState.textContent = '当前：不出声（只显示文字）';
   }
+
+  // 音量（2026-10-19）：用户拖过之后就别再覆盖他的值，和其它控件一个规矩
+  if (!ttsTouched && ui.ttsVolume) {
+    const volume = Number.isFinite(Number(cfg.volume)) ? Number(cfg.volume) : 100;
+    ui.ttsVolume.value = String(Math.max(0, Math.min(100, Math.round(volume))));
+  }
+  syncTtsVolumeLabel();
 }
 
 /**
@@ -2487,6 +2514,17 @@ async function saveTts(opts) {
   }
   // （原来这里还有 `p === 'windows'` 分支取本机音色；本地选项已删，不需要了）
 
+  /*
+   * 音量（2026-10-19 加）。
+   *
+   * ⚠️ 无论哪种合成方式都带这个字段 —— 它是**播放端增益**，与合成引擎无关。
+   * 主进程会把它夹到 0..100 再写进 persona.yaml 的 `providers.tts.volume`。
+   */
+  if (ui.ttsVolume) {
+    const raw = Number(ui.ttsVolume.value);
+    payload.volume = Math.max(0, Math.min(100, Math.round(Number.isFinite(raw) ? raw : 100)));
+  }
+
   if (!opts?.quiet && ui.ttsSaveState) ui.ttsSaveState.textContent = '保存中…';
   try {
     const r = await api.ttsSet(payload);
@@ -2510,6 +2548,20 @@ async function saveTts(opts) {
 if (ui.ttsSave) {
   ui.ttsSave.addEventListener('click', () => {
     void saveTts();
+  });
+}
+
+/*
+ * 音量滑杆（2026-10-19 加）。
+ *
+ * `input` 而不是 `change`：拖动时数字要跟着动（用户要求"可调节声音大小"，
+ * 拖的过程中看不到数值就很难调准）。真正落盘还是靠「保存」按钮 ——
+ * 每拖一格就写一次 persona.yaml 会把 YAML 写花（尤其是并行点击时）。
+ */
+if (ui.ttsVolume) {
+  ui.ttsVolume.addEventListener('input', () => {
+    ttsTouched = true;
+    syncTtsVolumeLabel();
   });
 }
 

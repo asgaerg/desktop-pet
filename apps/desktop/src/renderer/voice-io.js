@@ -26,6 +26,18 @@ export class VoiceIO {
     this.stream = null;
     this.node = null;
     this.source = null;
+    /**
+     * 播放音量（0..1）与它对应的增益节点（2026-10-19 "可调节声音大小"）。
+     *
+     * ⚠️ 为什么增益放在**播放端**，不在合成端：
+     * 三条合成路线的音量参数是**三套单位** ——
+     *   edge   `'+10%'`（相对量字符串）
+     *   SAPI   `0..100`（整数）
+     *   云端   根本没有这个参数
+     * 在播放端乘一个系数，三条路线就都听话了，也不会出现"两处各调一次"。
+     */
+    this.playbackVolume = 1;
+    this.gain = null;
     /** 待发送的样本缓冲：凑满一帧再发，避免每几毫秒发一个小包 */
     this.pending = [];
     this.pendingCount = 0;
@@ -248,11 +260,15 @@ export class VoiceIO {
     try {
       this.node?.disconnect();
       this.source?.disconnect();
+      this.gain?.disconnect();
     } catch {
       /* 断开失败无所谓 */
     }
     this.node = null;
     this.source = null;
+    // ⚠️ 增益节点属于**那个已经关掉的 AudioContext**，必须一起丢掉：
+    // 留着它，下一次 play() 会往一个已关闭的 context 上接节点（静音且不报错）。
+    this.gain = null;
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     // AudioContext 不关会一直占着音频设备
@@ -260,6 +276,25 @@ export class VoiceIO {
     this.context = null;
     this.pending = [];
     this.pendingCount = 0;
+  }
+
+  /**
+   * 设置播放音量（0..100，100 = 原音量，0 = 静音）。
+   *
+   * 2026-10-19 用户要求「可调节声音大小」。只改增益，不动已解码的音频 ——
+   * 所以正在播的那一句也会立刻变大小声。
+   */
+  setVolume(percent) {
+    const raw = Number(percent);
+    const clamped = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 100));
+    this.playbackVolume = clamped / 100;
+    if (this.gain) {
+      try {
+        this.gain.gain.value = this.playbackVolume;
+      } catch {
+        /* 节点已经被 context 释放 */
+      }
+    }
   }
 
   /**
@@ -290,7 +325,20 @@ export class VoiceIO {
 
     const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(context.destination);
+    /*
+     * 音量（2026-10-19 加）：走一个 GainNode，而不是直接接 destination。
+     *
+     * 增益节点**复用**（不是每段语音新建一个）：这样 `setVolume()` 改一次，
+     * 正在播的那一段也会立刻跟着变 —— 用户拖动滑杆时能马上听出区别。
+     * 直接接 destination 的话，音量只能在"下一段语音"生效。
+     */
+    if (!this.gain) {
+      this.gain = context.createGain();
+      this.gain.gain.value = this.playbackVolume;
+      this.gain.connect(context.destination);
+    }
+    this.gain.gain.value = this.playbackVolume;
+    source.connect(this.gain);
     source.start();
     this.playback = source;
     /*

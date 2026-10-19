@@ -470,6 +470,42 @@ let petMenuHandlers: PetMenuHandlers | null = null;
 let ttsHealthy = true;
 
 /**
+ * 当前 TTS 播放音量（0..100），随每段语音带给渲染层。
+ *
+ * 2026-10-19 用户要求「可调节声音大小」。真源是 `persona.yaml` 的
+ * `providers.tts.volume`（设置页「语音 → 音量」滑杆写它）。
+ *
+ * ⚠️ 为什么在**播放端**生效：三条合成路线的音量参数是**三套单位**
+ * （edge 是 `'+10%'` 字符串、SAPI 是 0..100 整数、云端没有这个参数），
+ * 在合成端调必然有一边是错的。统一乘在播放增益上，三条路线都听话。
+ *
+ * 缓存 2 秒：一句话可能分成多段发下来，没必要每段都去读一次 YAML；
+ * 改完设置最迟 2 秒生效（保存时主动清缓存，见 `invalidateTtsVolume`）。
+ */
+let ttsVolumeCache: { at: number; value: number } | null = null;
+
+/** 设置保存后调用：下一段语音立刻按新音量。 */
+function invalidateTtsVolume(): void {
+  ttsVolumeCache = null;
+}
+
+function currentTtsVolume(): number {
+  const now = Date.now();
+  if (ttsVolumeCache && now - ttsVolumeCache.at < 2000) return ttsVolumeCache.value;
+  let value = 100;
+  try {
+    const raw = readDeepScalar(CONFIG_ROOT, ['providers', 'tts', 'volume'], true);
+    value = raw === null || raw === undefined ? 100 : Number(raw);
+  } catch {
+    /* 读不到配置就按满音量，别让宠物突然没声 */
+  }
+  if (!Number.isFinite(value)) value = 100;
+  value = Math.max(0, Math.min(100, Math.round(value)));
+  ttsVolumeCache = { at: now, value };
+  return value;
+}
+
+/**
  * 每次发言是不是"用户主动要的"，按 `say.id` 记住。
  *
  * ## 为什么需要记
@@ -1843,7 +1879,12 @@ function connectSocket(port: number, brain: string): void {
     if (!isCurrent()) return;
     audioPairer.acceptBinary(new Uint8Array(payload));
     for (const item of audioPairer.drain()) {
-      petWindow?.sendToRenderer('pet:voice-audio', { bytes: item.bytes, format: item.format });
+      petWindow?.sendToRenderer('pet:voice-audio', {
+        bytes: item.bytes,
+        format: item.format,
+        // 音量随音频一起下发（2026-10-19「可调节声音大小」）
+        volume: currentTtsVolume(),
+      });
       /*
        * 🔴 语音**真的开始播了** ->「说话中」（2026-10-17 修）。
        *
@@ -2216,6 +2257,7 @@ function connectSocket(port: number, brain: string): void {
           petWindow?.sendToRenderer('pet:voice-audio', {
             bytes: item.bytes,
             format: item.format,
+            volume: currentTtsVolume(),
           });
           /*
            * ⚠️ 「语音开始播放 -> 说话中」的钩子**不在这里** —— 元信息先到、
@@ -4203,7 +4245,8 @@ function restartPushToTalk(): void {
   /*
    * **独立的全局键**（不聚焦时用的切换式）。
    *
-   * ⚠️ 和 k 是两个不同的键：
+   * ⚠️ 和 
+k 是两个不同的键：
    *   vk        = 聚焦时按住说（可以是右 Alt 这种修饰键，靠 before-input-event）
    *   globalVk  = 不聚焦时切换（**必须是普通键**，accelerator 表达不了修饰键）
    *
@@ -5790,6 +5833,8 @@ function registerSettingsIpc(): void {
 
       // ② 热更新 —— 改完立刻生效（Python 会按指纹重建引擎）
       send({ type: 'config.update', patch: { providers: { tts: patch } } });
+      // 音量缓存清掉：保存后下一句就按新音量，不用等 2 秒
+      if (patch.volume !== undefined) invalidateTtsVolume();
       log(
         `语音合成：provider=${patch.provider ?? '(未改)'} voice=${patch.voice ?? '(未改)'} ` +
           `rate=${patch.rate ?? '(未改)'} volume=${patch.volume ?? '(未改)'}`,
