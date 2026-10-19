@@ -5734,6 +5734,43 @@ def test_subjectivity(suite: SelfTest) -> None:
         _assert(describe_for_prompt(SnapResult(ok=False)) == "", "失败时不该产出 hint")
         return "提示词要求具体且禁复述；降级会提醒别装懂；失败不产出 hint"
 
+    @suite.check("截图对话：用户主动触发的那一次也要把原图写进原文记忆")
+    def _() -> str:
+        """
+        2026-10-19 用户反馈：
+
+            「现在用户自主截图对话的画面还不能放在记忆管理的原文记忆中查看」
+
+        原因是 `_snap_and_chat` 调 `speak_autonomously` 时**漏传了 image**：
+        只有 autosnap 循环那条路传了。结果正好反过来 ——
+        它自己偷看的那次有图，"用户主动按快捷键看的"反而没有。
+
+        这条查的是源码不变量（真跑要截图 + 密钥，不适合放进自检）：
+          · 两条截图路径都必须传 `image=result.image`
+          · mime 不许在调用处硬编码：截图产物是 PNG，由 store 按魔数归一化
+        """
+        import inspect
+
+        from .gateway import Gateway
+        from .store import PetDatabase
+
+        snap = inspect.getsource(Gateway._snap_and_chat)
+        _assert("speak_autonomously" in snap, "_snap_and_chat 没走主动发言管线")
+        _assert(
+            "image=result.image" in snap,
+            "用户触发的截图没把原图传下去 —— 原文记忆里不会有图",
+        )
+
+        auto = inspect.getsource(Gateway._run_autosnap_forever)
+        _assert("image=result.image" in auto, "自主截图那条路没传原图")
+
+        store_src = inspect.getsource(PetDatabase.add_turn)
+        _assert(
+            'image_mime = "image/png"' in store_src,
+            "store 没有按字节魔数修正 mime（PNG 会被标成 jpeg）",
+        )
+        return "两条截图路径都传原图；mime 由 store 按魔数归一化"
+
     @suite.check("强化：importance 真的会涨，且封顶 1.0")
     def _() -> str:
         import shutil

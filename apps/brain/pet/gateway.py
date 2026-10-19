@@ -3811,7 +3811,8 @@ class Gateway:
                         "stage_direction": stage_direction_for_self(result),
                         "screen": result.description,
                     },
-                    # 原图进原文记忆（BLOB，用户要求"图片放进数据库存储"）
+                    # 原图进原文记忆（BLOB，用户要求"图片放进数据库存储"）。
+                    # mime 不用操心：`store.remember_turn` 会按字节魔数归一化。
                     image=result.image,
                     image_mime="image/jpeg",
                 )
@@ -3962,7 +3963,18 @@ class Gateway:
                     #    user 轮这份是"现在就做这件事"的指令（模型一定会读）。
                     "stage_direction": stage_direction_for(result),
                     "screen": result.description,
-                }
+                },
+                # 原图进原文记忆（BLOB）—— 和自主截图那条路保持一致。
+                #
+                # ⚠️ 2026-10-19 用户反馈：「现在用户自主截图对话的画面还不能放在
+                #    记忆管理的原文记忆中查看」。原因就是这个调用**漏传了 image**：
+                #    `speak_autonomously` 只有拿到 image 才会挂 `_pending_image`，
+                #    而 `_remember_assistant` 又只认这个字段 —— 于是用户在菜单里
+                #    按「截图对话」触发的那一次，原文记忆里 has_image 永远是 0，
+                #    只有自主截图（autosnap 循环）那一份带图。
+                #    两条路必须传同样的东西，否则"用户主动看的"反而查不到。
+                image=result.image,
+                image_mime="image/jpeg",
             )
         except Exception:  # noqa: BLE001 —— 说话失败不该影响别的
             log.exception("截图对话开口失败")
