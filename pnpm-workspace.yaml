@@ -1,0 +1,19 @@
+# pnpm 工作区定义与依赖构建脚本放行名单。
+#
+# 注意一：pnpm 不读 package.json 的 "workspaces" 字段（那是 npm/yarn 的写法），
+#         必须用这个文件，否则 workspace:* 依赖解析不了、也不会安装子包的依赖。
+#
+# 注意二：allowBuilds 是 pnpm 11 的写法，漏了它 install 会以
+#         ERR_PNPM_IGNORED_BUILDS 失败。这两个包的 postinstall 是必需的：
+#           · electron —— 靠它下载 Electron 运行时二进制；
+#           · esbuild  —— 靠它落地平台原生二进制。
+
+packages:
+  - 'packages/*'
+  - 'apps/desktop'
+
+allowBuilds:
+  electron: true
+  esbuild: true
+  iohook: set this to true or false
+  uiohook-napi: set this to true or false

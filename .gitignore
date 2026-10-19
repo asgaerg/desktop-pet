@@ -1,0 +1,97 @@
+# ============================================================================
+# 桌面宠物（DesktopPet）—— 不提交的东西
+#
+# 这个仓库**故意只放源码 + 素材 + 文档**：
+#   · 依赖、构建产物、安装包、模型、运行期数据一律不进库
+#   · 密钥/凭据/记忆库 绝不进库（tools/check-pack-secrets.py 之外的第二道闸）
+#
+# 判断标准：**它能不能由仓库内容重新生成？** 能 -> 忽略。
+# ============================================================================
+
+# ---------------------------------------------------------------- 依赖
+node_modules/
+.pnpm-store/
+.venv/
+venv/
+
+# ---------------------------------------------------------------- 构建产物
+apps/desktop/dist/
+apps/desktop/.test-build/
+# 渲染层里这个文件由 sprite.ts 编译而来，不入库 —— 避免它与源码不一致
+apps/desktop/src/renderer/sprite.js
+# 联网搜索的 MCP 服务器（32 MB 的 Go 二进制，由 tools/ 下脚本重新构建）
+apps/brain/pet/*.exe
+# PyInstaller 冻结的 sidecar（273 MB）与其中间产物（14 MB+ 的 .pkg/.pyz）
+apps/brain/dist/
+build/pyinstaller/work/
+build/pyinstaller/dist/
+# electron-builder 的输出
+release/
+release-offline/
+dist/
+out/
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+
+# ---------------------------------------------------------------- 运行期数据 / 用户数据
+# pet-data 里是：记忆库、日志、备份、bge 模型（91 MB）、
+# faster-whisper 模型（1.5 GB）、simple.dll 等第三方运行时。
+# 全部可由文档里的步骤重新获取，且**包含用户的私人记忆**，不进库。
+apps/desktop/pet-data/
+apps/desktop/pet-fs-*/
+pet-fs-*/
+pet-selftest-mem-*/
+apps/brain/.tmp-test/
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# 单实例锁与聚焦请求（运行时产物）
+apps/desktop/pet-data/instance-state/
+
+# 用户数据（记忆）不该进仓库。默认位置其实在 ~/.desktop-pet，这里再兜一层，
+# 防止有人把 memory.path 改成项目内 —— 那会把"宠物听过的事"提交上去。
+.desktop-pet/
+memory*.jsonl
+*.profile.json
+
+# ---------------------------------------------------------------- 密钥 / 凭据
+# 真凭据永远不该进库。示例文件用 *.example 命名。
+credentials.json
+settings.json
+*.pem
+*.key
+*.p12
+.env
+.env.*
+!*.env.example
+
+# ---------------------------------------------------------------- 本地备份与一次性素材
+.backup/
+.tmp-design/
+.ref-pet-source/
+.build-cache/
+
+# 第一轮修复工作区文件权限时留下的回滚记录（权限所限删不掉，也无害）
+.dsh-acl-recovery/
+
+# ---------------------------------------------------------------- 工具链里的大件
+# Go 运行时（1.2 GB）是为了给 websearch-mcp.exe 交叉编译用的，不该进库
+tools/goruntime/
+# 临时截图/诊断产物（我自己排查时生成的）
+build/_*.png
+build/_*.json
+build/_*.log
+build/_*.mjs
+build/installer-screen.png
+
+
+# 沙箱/工具在仓库根留下的临时目录（里面有 t.sqlite3 这类命令输出缓存，不该进库）
+/tmp*/
+
+# pip 下载时的临时解包目录
+pip-unpack-*/

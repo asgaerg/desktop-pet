@@ -1,0 +1,12 @@
+{
+  "provider": "openai",
+  "model": "deepseek-chat",
+  "prompt_source": "persona.yaml",
+  "conversation": "用户：我在用 Electron 做那个桌宠，界面弄成深色的\n宠物：哦？深色好看\n用户：对，而且我特别不喜欢那种客服腔的回复，太假了\n宠物：懂了\n用户：对了今天天气怎么样",
+  "raw_output": "用户在用 Electron 做桌宠项目\n用户偏好深色界面\n用户不喜欢客服腔的回复",
+  "parsed_facts": [
+    "用户在用 Electron 做桌宠项目",
+    "用户偏好深色界面",
+    "用户不喜欢客服腔的回复"
+  ]
+}

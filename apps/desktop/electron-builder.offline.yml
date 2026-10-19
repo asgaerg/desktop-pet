@@ -1,0 +1,49 @@
+# electron-builder 配置 —— 离线版（带 large-v3-turbo 语音模型）
+#
+# 用法（在 apps/desktop 下）：
+#   npx electron-builder --win --config electron-builder.offline.yml
+#
+# 和在线版的唯一区别：多带一个 1.55 GB 的 ASR 模型。
+# 装完即可断网使用本地识别（设置 → 语音 → 本地）。
+#
+# ⚠️ 模型放在 resources 里是**只读**的，而加载器会往 asr-models/.locks 写东西。
+# 所以两者的关系是：
+#   · resources 里这份是"出厂自带"
+#   · 首次启动由主进程把它复制到 DATA_DIR（可写），之后都读那份
+#   —— 复制逻辑在 src/main/index.ts 的 ensureBundledModels()
+
+extends: ./electron-builder.online.yml
+
+# extends 不合并数组，所以这里要把在线版的清单**整份重写**再追加模型
+extraResources:
+  - from: ../../config
+    to: config
+  - from: ../brain/dist/pet
+    to: pet
+  - from: ../brain/pet/websearch-mcp.exe
+    to: pet/websearch-mcp.exe
+  # 只带运行时真正会调的脚本（整目录搬会把开发脚本/备份也带进去）
+  - from: tools/probe-fullscreen.ps1
+    to: apps/desktop/tools/probe-fullscreen.ps1
+  - from: tools/probe-key.ps1
+    to: apps/desktop/tools/probe-key.ps1
+  - from: tools/win-tts.ps1
+    to: apps/desktop/tools/win-tts.ps1
+  - from: pet-data/vendor
+    to: apps/desktop/pet-data/vendor
+    # 和在线版一致：只带资源，排除一切数据文件（含词典目录里那份旧记忆库）
+    filter:
+      - '**/*'
+      - '!**/mig-*/**'
+      - '!**/*.db'
+      - '!**/*.db-wal'
+      - '!**/*.db-shm'
+      - '!**/*.log'
+  - from: pet-data/models
+    to: apps/desktop/pet-data/models
+  # 离线版唯一多出来的一项：语音识别模型（HuggingFace 缓存格式，目录名不能改）
+  - from: pet-data/asr-models/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo
+    to: apps/desktop/pet-data/asr-models/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo
+
+nsis:
+  artifactName: DesktopPet-${version}-offline-setup.${ext}

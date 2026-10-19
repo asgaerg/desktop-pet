@@ -1,0 +1,1318 @@
+/*
+ * 记忆管理窗口的样式。
+ *
+ * ---- 参考的观感：图书管理系统 ----
+ *
+ * 用户要求「三页可以参考图书管理等系统的 ui，方便显示数据与信息」。
+ * 那类系统的共同特征，这里逐条落实：
+ *
+ *   ① **表格式**：一行一条记录、列左对齐、行高一致 —— 方便纵向扫读同一列；
+ *   ② **顶部工具栏**：搜索框 + 主操作按钮 + 计数，一条横向带；
+ *   ③ **底部分页**：翻页按钮 + 页码说明；
+ *   ④ **密度高**：字号小一点、行距紧一点，一屏尽量多看几行；
+ *   ⑤ **斑马纹/悬停高亮**：长表格里不跟丢当前行。
+ *
+ * ---- 为什么不用设置页那套卡片 ----
+ *
+ * 设置页是表单（每项独立成卡，引导逐项填写）；这里是数据表
+ * （连续的行更需要对齐与密度，卡片会把行距撑开、一屏看不了几行）。
+ * 两种界面目标不同，样式也就不该复用。
+ */
+
+:root {
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+  --bg: #f5f6f8;
+  --bg-soft: #fafbfc;
+  --card: #ffffff;
+  --card-soft: #fbfcfd;
+  --hover: #f3f5f9;
+  --sunken: #eef0f4;
+  --border: #e4e7ec;
+  --border-strong: #d3d7de;
+  --text: #3c4149;
+  --text-dim: #98a0a8;
+  --text-soft: #5b616b;
+  --accent: #2f6fed;
+  --ok: #22a06b;
+  --bad: #d93843;
+  --warn: #f0a500;
+  --tag-blue-bg: #e8effd;
+  --tag-blue-bd: #d5e2fb;
+  --tag-green-bg: #e6f4ec;
+  --tag-green-fg: #1f7a4d;
+  --tag-red-bg: #fbeaec;
+  --tag-red-bd: #f5d5d8;
+  --tag-red-fg: #b32833;
+
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+
+  /* 与设置页保持同一套配色 —— 两个窗口是同一个产品的两部分 */
+  --row-hover: #f3f5f9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* 滚动交给表格区，页头/标签/分页固定 */
+}
+
+/* ------------------------------------------------------------------ 页头 */
+
+.top {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  padding: 14px 20px 10px;
+  flex: 0 0 auto;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.stats {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.stats b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ 标签页 */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.tab {
+  padding: 9px 18px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  /* 底边线在切换时不要有位移感 */
+  margin-bottom: -1px;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ 面板 */
+
+main {
+  flex: 1 1 auto;
+  min-height: 0; /* 关键：不加这条，内部滚动区会把 body 撑高 */
+  display: flex;
+  flex-direction: column;
+  padding: 14px 20px 0;
+}
+
+.panel {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.panel.active {
+  display: flex;
+}
+
+.lead {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.65;
+  flex: 0 0 auto;
+}
+
+.lead strong {
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------ 工具栏 */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex: 0 0 auto;
+}
+
+.toolbar.wrap {
+  flex-wrap: wrap;
+}
+
+/* 搜索框吃掉剩余宽度（表格界面里搜索是主要动作） */
+.toolbar > input[type='text'] {
+  flex: 1 1 220px;
+  min-width: 120px;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.count {
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ 表格 */
+
+/*
+ * `table-wrap` 是**唯一**的滚动区。
+ *
+ * `min-height: 0` 是必需的：flex 子项的默认 `min-height: auto` 会让它
+ * 按内容撑开、永远不出现滚动条 —— 表一长就把分页挤出屏幕。
+ */
+.table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+/* 固定注入那页左右两栏各占一半高度，所以矮一些 */
+.table-wrap.short {
+  min-height: 140px;
+}
+
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.grid th {
+  position: sticky; /* 表头吸顶：滚长表格时还知道每列是什么 */
+  top: 0;
+  z-index: 1;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 12px;
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.grid td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--hover);
+  vertical-align: top;
+  font-size: 12.5px;
+  line-height: 1.5;
+  /* 长文本要能折行 —— 但配合下面的 `-webkit-line-clamp` 限制行数 */
+  word-break: break-word;
+}
+
+.grid tbody tr:hover {
+  background: var(--row-hover);
+}
+
+/* 空表提示：整行居中 */
+.grid td.empty {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 28px 10px;
+}
+
+/* 列宽 */
+.c-id {
+  width: 56px;
+}
+.c-time {
+  width: 104px;
+}
+.c-who {
+  width: 68px;
+}
+.c-title {
+  width: 160px;
+}
+.c-pin {
+  width: 88px;
+}
+.c-act {
+  width: 116px;
+}
+
+/*
+ * 内容列限制最多显示几行。
+ *
+ * 原文里可能有整段几百字的内容，不限制的话一行就把表格撑到屏幕外，
+ * 「一屏多看几行」这个目标就没了。完整内容通过「查看」按钮看。
+ */
+.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/**
+ * 展开态：显示全文（2026-10-07 用户要求「记忆里面看不了完整的文字」）。
+ *
+ * ⚠️ 必须把 `display` 从 `-webkit-box` 改回 `block` —— 只把 `-webkit-line-clamp`
+ * 设成 `unset` 是**不够的**：`-webkit-box` 布局下过长的内容仍会被压在少数几行里
+ * 横向溢出（而不是正常折行），看着像"展开了但更乱"。
+ */
+.clamp.expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+  /* 展开后给一条左侧标记 —— 否则一屏里分不清哪条是展开的 */
+  border-left: 2px solid var(--accent);
+  padding-left: 7px;
+  margin-left: -9px;
+}
+
+/* 可点击展开：鼠标变手型，悬停时文字提亮一点作为可交互的暗示 */
+.clamp-clickable {
+  cursor: pointer;
+}
+
+.clamp-clickable:hover {
+  color: var(--text);
+}
+
+/*
+ * 只在**真的被截断**时才提示"可展开"（判据见 `markTruncated`）。
+ *
+ * 用 ::after 挂一个小三角而不是插 DOM 节点 —— 保持表格里是纯文本，
+ * 复制/选中时不会把提示也带进去。
+ */
+.clamp-clickable.is-truncated::after {
+  content: ' ⌄';
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+.clamp.expanded::after {
+  content: ' ⌃';
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+.clamp-2 {
+  -webkit-line-clamp: 2;
+}
+
+/* ------------------------------------------------------------------ 表格里的控件 */
+
+.btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #eef0f4;
+  font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: #2f6fed;
+}
+
+/* 表格里的小按钮：再矮一档 */
+.btn.mini {
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+
+.btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #eef0f4;
+}
+
+input[type='text'],
+textarea {
+  padding: 6px 10px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+  transition:
+    border-color 120ms ease-out,
+    box-shadow 120ms ease-out;
+}
+
+input[type='text']:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.18);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 76px;
+  line-height: 1.6;
+  font-family: inherit;
+}
+
+/*
+ * 复选框：与设置页同一套自绘（默认的浅色方框在深色主题里是一块白点）。
+ * 用伪元素画勾，不引入图标文件 —— 理由见 settings.css 里那段长注释。
+ */
+input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin: 0 2px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-soft);
+  cursor: pointer;
+  position: relative;
+  vertical-align: -2px;
+}
+
+input[type='checkbox']:hover {
+  border-color: var(--accent);
+}
+
+input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0.5px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: rotate(45deg) scale(0);
+  transition: transform 120ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+input[type='checkbox']:checked::after {
+  transform: rotate(45deg) scale(1);
+}
+
+input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.28);
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.inline-check:hover {
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------ 分页 */
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 14px;
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------------------------ 两栏（固定注入页） */
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.col h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.col .muted {
+  margin: 8px 0 0;
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------------------------ 新建表单 */
+
+.new-form {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.new-form.hidden {
+  display: none;
+}
+
+.new-form .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ------------------------------------------------------------------ 复现窗口（微信样式） */
+
+/*
+ * 浮层：半透明黑遮罩 + 居中白/深色窗口。
+ *
+ * 遮罩用 `position: fixed` 而不是嵌在流里 —— 复现是"盖在上面看"的动作，
+ * 不该影响底下列表的布局（否则关闭后滚动位置会跳）。
+ */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(23, 26, 33, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-box {
+  width: min(680px, calc(100vw - 48px));
+  height: min(620px, calc(100vh - 48px));
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(23, 26, 33, 0.28);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.modal-head h2 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.modal-head .row {
+  display: flex;
+  gap: 8px;
+}
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+/*
+ * ---- 聊天区 ----
+ *
+ * 微信的底色是一层比页面稍亮的灰（对话流本身自带背景感），
+ * 这里用同一个思路：聊天区比窗口底色亮一点，气泡才"浮"得起来。
+ */
+.chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 时间戳：居中一条淡灰小字（微信的分隔样式） */
+.chat-time {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  margin: 10px 0 4px;
+}
+
+.chat-time:first-child {
+  margin-top: 0;
+}
+
+/*
+ * 一行消息。
+ *
+ * `flex-direction` 由 `row-reverse` 决定左右 —— 自己的话在右（微信规则）。
+ * 不额外写两套 `.chat-row.me` / `.chat-row.other`，因为方向是唯一的差别。
+ */
+.chat-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  /* 同侧连续消息收紧间距（微信在换人说话时才拉开） */
+  margin-bottom: 2px;
+}
+
+.chat-row.me {
+  flex-direction: row-reverse;
+}
+
+.chat-row.gap {
+  margin-top: 12px;
+}
+
+/* 头像：微信是圆角方块，不是正圆 */
+.chat-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  background: var(--hover);
+  user-select: none;
+}
+
+.chat-row.me .chat-avatar {
+  background: var(--tag-green-bg);
+}
+
+.chat-body {
+  max-width: 74%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-row.me .chat-body {
+  align-items: flex-end;
+}
+
+/*
+ * 气泡。
+ *
+ * 微信的配色：自己=绿色（#22a06b 那系的深色版），对方=白/浅灰。
+ * 深色主题下用等比压暗的版本，保持"绿 vs 灰"的区分度 ——
+ * 这是微信聊天最容易识别的特征，不该为了主题统一而抹掉。
+ */
+.chat-bubble {
+  padding: 8px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--hover);
+  color: var(--text);
+  /* 微信气泡的尖角在靠近头像那一侧 */
+  border-top-left-radius: 2px;
+}
+
+.chat-row.me .chat-bubble {
+  background: #1f7a4d;
+  color: #e6f4ec;
+  border-top-left-radius: 8px;
+  border-top-right-radius: 2px;
+}
+
+/* 悬停时露出"移除这一段"—— 平时不显示，避免聊天界面被按钮弄脏 */
+.chat-tools {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.chat-row:hover .chat-tools {
+  opacity: 1;
+}
+
+.chat-empty {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------ 其它 */
+
+/* 窄数字框（上下文条数、扩充条数）—— 3 位数以内 */
+.tiny-num {
+  width: 58px;
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+/* 多选框那一列 */
+.c-check {
+  width: 36px;
+  text-align: center;
+}
+
+/* 选中条：勾了至少一条才出现 */
+.selbar {
+  background: var(--hover);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 7px 10px;
+  /*
+   * 横向排列（2026-10-07 补）。
+   *
+   * 原文 tab 那条只有两个按钮，靠默认的 inline 排列就看得出；
+   * 检索层这条多了"真删选中的"+ 一段说明文字，不排成一行会挤成一团。
+   */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* 可用间距的说明文字（选中的那行末尾） */
+.muted.tiny {
+  font-size: 11.5px;
+  opacity: 0.72;
+}
+
+/*
+ * 危险操作按钮（真删）。
+ *
+ * ⚠️ 与 `.btn.primary`（"固定"那种正向操作）在**颜色语义上必须分开** ——
+ * 这个界面里"固定/还原"随时能改回来，而"删除"不可还原，
+ * 长得一样会让用户按习惯点下去。
+ */
+.btn.danger {
+  border-color: var(--tag-red-fg);
+  background: var(--tag-red-bg);
+  color: var(--bad);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--tag-red-bd);
+  border-color: var(--tag-red-fg);
+}
+
+/* ---------------------------------------------------------- 真删确认框 */
+
+/*
+ * ⚠️ 类名用 `del-` 前缀：`.modal` / `.modal-box` 被复现窗口占了（L491+），
+ * `cost-*` 被 AI 合并确认框占了 —— 复用会互相覆盖（踩过一次）。
+ */
+.del-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(23, 26, 33, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.del-box {
+  width: min(520px, 88vw);
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--card-soft);
+  border: 1px solid var(--tag-red-fg);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+
+.del-box h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  color: var(--bad);
+}
+
+.del-warn {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.del-list {
+  margin: 0 0 12px;
+  padding-left: 20px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  max-height: 34vh;
+  overflow: auto;
+}
+
+.del-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* 轮数那一列 */
+.c-turns {
+  width: 60px;
+}
+
+/* 日期输入框：与主题一致（系统默认那个浅色日历图标有点跳，但不改它 ——
+   自绘一个日历控件不值得，而且系统控件用户更熟） */
+input[type='date'] {
+  padding: 5px 9px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
+input[type='date']:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.18);
+}
+
+/* 选中行给个明确的底色（多选时"我勾了哪些"必须一眼可见） */
+.grid tbody tr.selected {
+  background: var(--tag-blue-bg);
+}
+
+.grid tbody tr.selected:hover {
+  background: var(--tag-blue-bd);
+}
+
+/* 内容列里的内联小按钮（「固定这句」） */
+.row-inline {
+  margin-top: 5px;
+  display: flex;
+  gap: 6px;
+}
+
+/* ------------------------------------------------------------------ 滚动条 */
+
+/*
+ * 与设置页同一套：轨道透明、滑块圆角半透明。
+ * 系统默认那条（带上下箭头、浅色槽）在这种满屏表格的界面里尤其扎眼。
+ *
+ * ⚠️ 2026-10-18 用户反馈「深色主题下右边的滑块看不见」：
+ * 原来滑块是 `rgba(23,26,33,.1)`（深蓝黑 10%），在深色背景上跟背景几乎同色。
+ * 改成**半透明灰**：浅色/深色两套主题都不用各写一条，而且看得见位置。
+ */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(128, 128, 128, 0.12);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(170, 170, 170, 0.6);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(205, 205, 205, 0.85);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+
+/* ==========================================================================
+   检索层（③）与记忆压缩（④）—— 2026-10-05 新增
+   ==========================================================================
+
+   这两个页面的控件都是"数据表 + 一组候选卡片"，所以复用上面的
+   `.grid` / `.btn` / `.toolbar`，只补这几类专属元素：
+     · `.countbar`     —— 表格上方的计数条
+     · `.pill`         —— 状态胶囊（已固定 / 最近 / 已压缩）
+     · `.kind-badge`   —— 类型小标签
+     · `.group-card`   —— 压缩候选组（一组一卡）
+     · `.compress-bar` —— 压缩页的工具栏
+     · `.prompt-box`   —— AI 提示词输入（可折叠）
+     · `.row-merged`   —— 已压缩的行（压暗，一眼能分辨）
+   ========================================================================== */
+
+.countbar {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin: 6px 0 4px;
+  font-size: 12px;
+}
+
+/* 状态胶囊。用 border + 淡背景而不是纯色块 —— 表格里颜色太多会吵 */
+.pill {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 17px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.pill-fixed {
+  border-color: rgba(34, 160, 107, 0.45);
+  color: var(--ok);
+  background: rgba(34, 160, 107, 0.08);
+}
+
+.pill-archived {
+  opacity: 0.6;
+}
+
+/* 已压缩：用"斜纹"而不是纯灰 —— 一眼看出"它还在，只是不参与检索了" */
+.pill-merged {
+  border-color: rgba(217, 56, 67, 0.35);
+  color: var(--bad);
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(217, 56, 67, 0.08) 0 4px,
+    transparent 4px 8px
+  );
+}
+
+.row-merged td {
+  opacity: 0.72;
+}
+
+.row-merged td:nth-child(3) {
+  text-decoration: line-through;
+  text-decoration-color: rgba(217, 56, 67, 0.5);
+}
+
+/* 类型标签：不同 kind 用不同色相，方便扫读时区分"事实 / 常说的话 / 人设" */
+.kind-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 17px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.kind-fact {
+  border-color: rgba(47, 111, 237, 0.4);
+  color: var(--accent);
+}
+
+.kind-phrase {
+  border-color: rgba(245, 166, 35, 0.4);
+  color: var(--warn);
+}
+
+.kind-habit,
+.kind-persona {
+  border-color: rgba(34, 160, 107, 0.4);
+  color: var(--ok);
+}
+
+/* 窄列：时间 / 类型 / 命中次数 / 状态 / 操作 —— 内容列吃掉剩余宽度 */
+.grid .col-time { width: 96px; }
+.grid .col-kind { width: 78px; }
+.grid .col-hits { width: 54px; text-align: right; }
+.grid .col-state { width: 84px; }
+.grid .col-act { width: 96px; text-align: right; }
+
+.section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 18px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.section-title .btn {
+  margin-left: auto;
+}
+
+.compress-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.compress-bar .inline-check {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.prompt-box {
+  margin: 8px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.prompt-box > summary {
+  padding: 7px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.prompt-box > textarea {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+/* 候选组卡片 */
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.group-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  padding: 9px 11px;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.group-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.group-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 2px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 代表条：高亮 —— 它是压缩后**保留**的那条，用户最需要看清 */
+.group-list li.is-keep {
+  color: var(--ok);
+}
+
+.group-list li.is-keep::after {
+  content: '保留';
+  margin-left: 6px;
+  font-size: 10px;
+  border: 1px solid rgba(34, 160, 107, 0.4);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.muted.tiny {
+  font-size: 11px;
+}
+
+/* ==========================================================================
+   AI 费用确认弹窗（2026-10-05）
+
+   用户要求：「ai 压缩的话，需要进行对应的确认提示弹窗哦，
+   不然 api 余额蒸发还不知道干什么了」
+
+   ⚠️ 用自建模态而不是 `window.confirm`：后者只能显示纯文本（排不出价格表），
+   而且**在 Electron 里会阻塞渲染进程**。
+   ========================================================================== */
+
+.cost-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(23, 26, 33, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.cost-box {
+  width: 520px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 60px);
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px 14px;
+  box-shadow: 0 12px 40px rgba(23, 26, 33, 0.22);
+}
+
+.cost-box h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.cost-box .lead {
+  margin: 0 0 10px;
+}
+
+.cost-sub {
+  margin: 14px 0 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.cost-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.cost-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+}
+
+.cost-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(60, 65, 73, 0.16);
+}
+
+.cost-table td.num,
+.cost-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-table td.strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 当前所处时段：高亮，因为用户要"自己对比价格" */
+.cost-table tr.cost-now {
+  background: rgba(34, 160, 107, 0.07);
+}
+
+.cost-table tr.cost-now td:first-child {
+  color: var(--ok);
+}
+
+.cost-btns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 深色主题（2026-10-14 加，设置页「界面主题」里切换）
+ * ══════════════════════════════════════════════════════════════════
+ * 只认主进程注入的 `<html data-theme="dark">`。
+ * ⚠️ 想改深色配色**只改这里**，不要去改上面的浅色值 ——
+ *    两份定义分居 `:root` 与这里，改错一边的表现是
+ *    "切到深色之后有个别地方还是浅的"，很难归因。
+ */
+html[data-theme='dark'] {
+  --bg: #1c1d24;
+  --bg-soft: #17181e;
+  --card: #24262f;
+  --card-soft: #2a2d38;
+  --hover: #2a2d38;
+  /*
+   * 🔴 `--row-hover` 必须在深色块里覆盖（2026-10-16 用户截图报）。
+   *
+   * 它在 `:root` 里是浅色值 `#f3f5f9`（行悬停底），而深色块**漏了覆盖**
+   * —— 于是深色下鼠标悬停记忆行，整行变成白底，配浅色文字完全看不清。
+   * 这与菜单图标太暗、输入框聚焦白底是同一族病：主题变量只写了 :root，
+   * 深色块忘了一起换。
+   */
+  --row-hover: #2a2d38;
+  --sunken: #16171d;
+  --border: #343744;
+  --border-strong: #3a3d4a;
+  --text: #e8e9ee;
+  --text-dim: #9a9db0;
+  --text-soft: #cfd2dd;
+  --accent: #6aa9ff;
+  --ok: #6ee7a8;
+  --bad: #ff7b7b;
+  --warn: #e0b45c;
+  --tag-blue-bg: #2b3550;
+  --tag-blue-bd: #33405f;
+  --tag-green-bg: #2a3a2e;
+  --tag-green-fg: #95ec69;
+  --tag-red-bg: #3a2226;
+  --tag-red-bd: #4a2a2f;
+  --tag-red-fg: #ffb4b4;
+}
+
+/* 截图查看器（2026-10-18）：全屏遮罩 + 居中大图，点任意处关闭 */
+.image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.78);
+  cursor: zoom-out;
+}
+
+.image-viewer img {
+  max-width: 92vw;
+  max-height: 86vh;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
+.image-viewer-tip {
+  font-size: 12px;
+  opacity: 0.7;
+}

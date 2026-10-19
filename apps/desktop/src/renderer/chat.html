@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP 与宠物主页面一致：**渲染层不联网**（connect-src 'self' 只够读同目录资源）。
+      所有网络都由主进程发起。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'"
+    />
+    <title>桌面宠物 · 对话</title>
+    <link rel="stylesheet" href="chat.css" />
+  </head>
+  <body>
+    <!--
+      对话条：只保留**输入框 + 发送按钮**，外加左侧一个极小的状态点。
+
+      为什么状态点留着：用户明确说"把这个窗口干掉，仅保留对话的输入框和发送按钮"，
+      但同时要能看出"它到底连上没有"。一个 6px 的点 + 模型名是最小成本，
+      鼠标悬停才展开详情（title），不占版面。
+
+      ---- ⚠️ 拖拽区必须**看得见**且够大（2026-10-12 修）----
+
+      第一版只在 `.bar` 上加了 `-webkit-app-region: drag`，
+      以为"整条除了输入框都能拖"。实测（`probe-chat-drag-region.py`（历史实测脚本）
+      逐像素扫描）可拖区**只有 24px（8%）**，而且分散成 4 条缝：
+
+          1.. 11   bar     drag     左内边距 8px
+         13.. 17   dot     none     <- 状态点自己不是 drag
+         19.. 25   bar     drag     两侧 gap 共 7px
+         27..229   input   no-drag
+        231..235   bar     drag
+        237..291   send    no-drag
+        293..297   bar     drag
+
+      用户要精确点到那几像素才能拖，实际表现就是「**拖不动**」——
+      他试的是"深色条的空白"，而那只有 8px。
+
+      所以现在给一条**明确的抓手**：22px 宽的竖条 + 三条小横线（≡），
+      用户一眼就知道抓哪里。靠"缝"来拖是不可发现的。
+    -->
+    <div id="bar" class="bar">
+      <!-- 拖拽抓手：只有它是 drag，其余元素都 no-drag（见上面的说明） -->
+      <div id="grip" class="grip" title="拖我移动输入框（右键宠物菜单 →「对话条复位到右下角」）">
+        <span></span><span></span><span></span>
+      </div>
+      <span id="dot" class="dot" data-level="info" title="正在启动…"></span>
+      <input
+        id="input"
+        class="input"
+        type="text"
+        placeholder="跟它说点什么…"
+        autocomplete="off"
+        spellcheck="false"
+        maxlength="2000"
+      />
+      <button id="send" class="send" title="发送（Enter）">发送</button>
+    </div>
+
+    <script type="module" src="chat.js"></script>
+  </body>
+</html>

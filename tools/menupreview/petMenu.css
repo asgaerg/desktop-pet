@@ -1,0 +1,443 @@
+/*
+ * 宠物右键菜单样式 —— 全部数字从设计稿量出来（2026-10-12）。
+ *
+ * ⚠️ 出处：`probe-menu-metrics.py`（历史实测脚本）+ `probe-menu-colors.py`（历史实测脚本）
+ *    读 `F:\美术资源\桌宠右键菜单 UI.pdf` 的矢量路径。
+ *
+ * ┌─ 量出来的数字 ────────────────────────────────────────────┐
+ * │ 面板          300 x 437      圆角 R=14                    │
+ * │ 面板底/描边    302 x 439      #eceef2（四周各 1px）        │
+ * │ 行高          36                                          │
+ * │ 图标          12~14px，左边缘 x66（面板内边距 6 + 12）     │
+ * │ 文字          x90.5 起，字块高 12.0~12.1 -> 字号 13        │
+ * │ 右侧箭头      x323.74（16x11 左右）                        │
+ * │ 开关          34 x 20，右边缘 x332                         │
+ * │ 分隔线        288 x 1，x54（左右各留 6）                   │
+ * └───────────────────────────────────────────────────────────┘
+ *
+ * ┌─ 量出来的配色 ────────────────────────────────────────────┐
+ * │ 普通文字   #3c4149        禁用文字   #98a0a8              │
+ * │ 分隔线     #eef0f4        强调分隔线 #2f6fed              │
+ * │ 品牌蓝     #2f6fed        退出红     #d93843              │
+ * │ 图标(开)   #2f6fed        图标(关)   #c2c7ce              │
+ * │ 沉浸黄(开) #ffcb2e        沉浸黄(关) #f0a500              │
+ * │ 活泼度星   #f5a623                                        │
+ * │ 开关(开)   轨道 #2f6fed + 圆点 #ffffff                    │
+ * │ 开关(关)   轨道 #e4e7ec（外面还有一圈 #d3d7de 的描边）     │
+ * │ 聚焦底     #f3f5f9                                        │
+ * └───────────────────────────────────────────────────────────┘
+ *
+ * ## 用户对「聚焦」的规则（原话 + 追问确认）
+ *
+ * > 「聚焦时的图标和文字颜色变化**只在选项关闭时才变化**，
+ * >   开启时**不变化**图标和文字颜色，右边的开关同理，
+ * >   只有在开启和关闭时才显示两种状态」
+ *
+ * 追问后确认：「**要变，图标和文字都变，不过只有在鼠标悬停聚焦的那一列才变**」，
+ * 开关「**不用**」变。
+ *
+ * 所以落成三条规则：
+ *   ① `.row[data-focus]` 只给**背景**（`#f3f5f9`）—— 无论开关状态
+ *   ② 聚焦 + **关闭** -> 图标与文字都变（黄色的暗一档、蓝/灰的见下）
+ *   ③ 聚焦 + **开启** -> 图标与文字**原样不动**
+ *      （设计稿第 1 页的「聊天模式」就是这种：蓝底蓝字，聚焦只加底色）
+ */
+
+/*
+ * ⚠️ 图标 mask 是**生成物**，单独一个文件（`tools/build-icon-css.py` 产出）。
+ *
+ * 用 `@import` 而不是把内容贴进来：保持"生成物 / 手写物"分离，
+ * 图标重抠之后只要重跑生成脚本再刷新页面就同步了。
+ *
+ * ⚠️ `@import` 必须在所有其它规则**之前**（CSS 规范要求）。
+ */
+@import url('icon-masks.css');
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 32px;
+  background: #f0f1f4;
+  font-family: system-ui, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  /* 菜单是给鼠标用的，拖选文字只会碍事 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 三栏并排（对应设计稿的三页） */
+.stage {
+  display: flex;
+  gap: 32px;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.frame {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.caption {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/*
+ * 面板：300 x 437，圆角 14。
+ *
+ * ⚠️ 高度**不写死 437**，而是由内容撑出来 —— 因为菜单项会随状态变化
+ * （比如"沉浸模式正在托管对话框"那种长文案），写死高度会在文案变化时
+ * 被裁掉或留白。设计稿的 437 是"11 行 + 3 条分隔线"的结果，不是约束。
+ *
+ * 但**宽度写死 300** —— 设计稿的宽度是设计决定（对齐、留白都按它算的）。
+ */
+.panel {
+  width: 300px;
+  /* 描边 1px（设计稿的 302x439 那圈，四周各大 1px） */
+  border: 1px solid #eceef2;
+  border-radius: 14px;
+  background: #ffffff;
+  /* 投影：设计稿里面板周围有一圈很淡的灰 */
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+  /*
+   * 内边距 6px（上下）—— 设计稿第一条分隔线在 y54，面板顶是 y48，
+   * 也就是**顶上留了 6px**。
+   */
+  padding: 6px 0;
+  overflow: hidden;
+}
+
+/*
+ * 一行。
+ *
+ * ⚠️ 高度 36、左右内边距 6 —— 图标左边缘因此落在 x66（面板 x48 + 6 + 12）。
+ *
+ * `.row` 里的水平内边距是 **6px**，但图标还要再往里 12px：
+ * 设计稿图标 x66..78，而内容区从 x54 开始。所以图标自己带 `margin-left: 12px`。
+ */
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  /* 左边距 6（面板内边距）+ 图标再进 12 = 面板外沿 +18 */
+  padding: 0 16px 0 18px;
+  color: #3c4149;
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+
+/*
+ * 聚焦（鼠标悬停）—— **只加底色**。
+ *
+ * ⚠️ 底色是**圆角小方块**（设计稿里 x54..342，比面板窄 6px，圆角约 8px），
+ * 不是整行通铺。用 `::before` 做，因为 `.row` 自己有左右内边距。
+ *
+ * 触发方式：既支持 `:hover`（真菜单里用），也支持 `[data-focus]`
+ * （预览页里让三页同时显示聚焦态）。
+ */
+.row[data-focus]::before,
+.row:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0 6px;
+  border-radius: 8px;
+  background: #f3f5f9;
+  /* 垫在内容下面 */
+  z-index: 0;
+}
+
+.row > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 图标 ─────────────────────────────────────────────────────────── */
+
+/*
+ * ⚠️ 图标是**内联 SVG 的 mask**，不是字体图标也不是图片。
+ *
+ * 为什么用 mask：设计稿的图标是**单色矢量**，而 mask 能让它
+ * **跟随 `background-color`** —— 那样"开启/关闭/聚焦"三种颜色
+ * 只需要改一个 `color`，不用准备三套图片。
+ *
+ * 形状与逐个图标的 `--icon` 来自 `icon-masks.css`（**生成物**，
+ * 由 `tools/build-icon-css.py` 从抠出来的 SVG 产出）。
+ */
+.ico {
+  flex: 0 0 auto;
+  /*
+   * 🔴 **图标占固定槽位 16px，本身在槽里居左**。
+   *
+   * 设计稿里各图标宽度不同（moon 11.98、paw 9.80、pad 15.51），
+   * 但**文字位置是固定的**（x90.5 = 面板内 42.5）。
+   *
+   * ⚠️ 第一版让 `.ico` 自己用 `--iw` 当宽度，于是**文字跟着图标宽度飘**
+   *    （实测 x40~45，而设计稿是一条竖线对齐的）——
+   *    那是"看得出不齐但说不上哪不对"的那类问题。
+   *
+   * 所以：**槽位固定 16px**（够放下最宽的 pad 15.51），
+   * 图标在槽内居左、按自己的原始尺寸画，文字从槽右边固定距离开始。
+   */
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  -webkit-mask-image: var(--icon);
+  mask-image: var(--icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  /* 居左（不是居中）—— 设计稿的图标左边缘都在同一条竖线上 */
+  -webkit-mask-position: left center;
+  mask-position: left center;
+  /* 用各自的原始尺寸（`icon-masks.css` 里的 viewBox），不拉伸 */
+  -webkit-mask-size: var(--iw, 14px) var(--ih, 14px);
+  mask-size: var(--iw, 14px) var(--ih, 14px);
+  /*
+   * 默认跟随文字色 —— 设计稿里大多数图标与文字同色
+   * （例外：沉浸模式黄、活泼度橙，见下面的单独规则）
+   */
+  color: inherit;
+}
+
+/* ── 文字 ─────────────────────────────────────────────────────────── */
+
+.label {
+  /*
+   * 图标槽右边缘在面板内 34（18 + 16），文字要到 42.5 -> 间隔 8.5。
+   *
+   * ⚠️ 这个数**不再是"图标宽 + 间隔"**（那样文字会飘），
+   *    而是"固定槽位右边缘 + 固定间隔"。
+   */
+  margin-left: 8.5px;
+  /* 长文案（沉浸模式那行）不换行、超出省略 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+}
+
+/* ── 右侧：箭头 / 数值 / 开关 ─────────────────────────────────────── */
+
+/* 子菜单箭头：设计稿 x323.74，约 5x8.5 的「>」 */
+.chev {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 8.5px;
+  margin-left: 8px;
+  /* 用两条边框拼出「>」，无需图片 */
+  border-right: 1.6px solid #b4bac2;
+  border-bottom: 1.6px solid #b4bac2;
+  transform: rotate(-45deg);
+  /* 视觉居中：旋转后重心偏一点 */
+  margin-right: 1px;
+}
+
+/* 活泼度的数值「0.60」：设计稿 x285.66，灰色 #8a9099 */
+.value {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 13px;
+  color: #8a9099;
+  /* 与箭头之间的间隔（设计稿：数值右边缘 x310 -> 箭头 x323.7） */
+  margin-right: 13px;
+}
+
+/*
+ * 开关：34 x 20（设计稿 x298..332、y 相对行顶 +1）。
+ *
+ * ⚠️ 两态的构成**不一样**（从路径看出来的）：
+ *   开启  轨道 #2f6fed + 圆点 #ffffff（圆点在**右侧**）
+ *   关闭  外圈 #d3d7de（36x22）+ 轨道 #e4e7ec + 圆点 #ffffff（圆点在**左侧**）
+ *
+ * 关闭态那个 `#d3d7de` 的 36x22 外圈是**描边**——
+ * 所以关闭时开关看起来比开启时"大一圈"。不还原的话关闭态会显得太轻。
+ */
+/*
+ * ⚠️ `.switch` 用 `margin-left: auto` 顶到最右 —— 设计稿里
+ * 开关右边缘 x332 = 面板右边 348 - 16（行的右内边距）。
+ * 而带箭头/数值的行靠 `flex: 1` 的 `.label` 把右边的东西推过去。
+ */
+.switch {
+  flex: 0 0 auto;
+  margin-left: auto;
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: #e4e7ec;
+  /* 关闭态的外圈（设计稿的 36x22 #d3d7de） */
+  box-shadow: 0 0 0 1px #d3d7de;
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+
+/* 圆点 */
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  transition: left 0.16s ease;
+}
+
+.switch[data-on='true'] {
+  background: #2f6fed;
+  /* 开启态**没有**那圈 #d3d7de（设计稿里开启只给了轨道 + 圆点） */
+  box-shadow: none;
+}
+
+.switch[data-on='true']::after {
+  left: 16px;
+}
+
+/* ── 分隔线 ───────────────────────────────────────────────────────── */
+
+/*
+ * 288 x 1，x54（面板 300 宽、左右各留 6）。
+ * 颜色 `#eef0f4`；「设置…」上面那条是**品牌蓝** `#2f6fed`（设计稿里唯一的强调线）。
+ */
+.sep {
+  height: 1px;
+  margin: 1.5px 6px;
+  background: #eef0f4;
+}
+
+.sep[data-accent='true'] {
+  background: #2f6fed;
+}
+
+/* ── 三态配色 ─────────────────────────────────────────────────────── */
+
+/*
+ * ## 🔴 规则（用户原话 + 追问确认）
+ *
+ * 「聚焦时的图标和文字颜色变化**只在选项关闭时才变化**，
+ *   开启时不变化图标和文字颜色」
+ *
+ * 「**要变，图标和文字都变，不过只有在鼠标悬停聚焦的那一列才变**」
+ *
+ * 所以：`data-on="false"` 且聚焦 -> 变；`data-on="true"` 且聚焦 -> 不变。
+ */
+
+/* ═══ 开启态 ═══ */
+.row[data-on='true'] {
+  color: #2f6fed;
+}
+
+.row[data-on='true'] .label {
+  color: #2f6fed;
+}
+
+/* 沉浸模式的黄（设计稿 #ffcb2e，其它行的图标跟文字同色） */
+.row[data-on='true'] .ico[data-icon='moon'] {
+  color: #ffcb2e;
+}
+
+/* ═══ 关闭态 ═══ */
+.row[data-on='false'] {
+  /* 关闭时文字变灰（设计稿 #98a0a8） */
+  color: #98a0a8;
+}
+
+.row[data-on='false'] .ico {
+  /* 图标另有一个更浅的灰（设计稿 #c2c7ce）—— 比文字还浅 */
+  color: #c2c7ce;
+}
+
+.row[data-on='false'] .label {
+  color: #98a0a8;
+}
+
+/*
+ * ═══ 关闭 + 聚焦 -> 图标和文字都变 ═══
+ *
+ * 设计稿给的两个例子方向**一致**（都比关闭态**深**）：
+ *   沉浸模式图标  #c2c7ce -> #f0a500（暗黄）
+ *   聊天模式文字  #98a0a8 -> #3c4149（深灰）
+ *
+ * 所以规则是：**关闭 + 聚焦 = 加深**，且图标和文字都变。
+ * （页 3 的聊天模式图标量出来仍是蓝的，但那是设计稿的小不一致 ——
+ *  用户追问后明确说「图标和文字都变」，所以按用户说的做。）
+ */
+.row[data-on='false'][data-focus] .label,
+.row[data-on='false']:hover .label {
+  color: #3c4149;
+}
+
+/*
+ * 图标：黄色系（沉浸模式）加深到 #f0a500；
+ * 其余保持蓝 → 但"关闭"时原本是灰的，聚焦要变成什么？
+ *
+ * 设计稿只给了聊天模式那一个例子（图标仍蓝）。
+ * 所以取"品牌蓝" —— 那是**有意义的**：聚焦时告诉用户"这个能点"。
+ */
+.row[data-on='false'][data-focus] .ico,
+.row[data-on='false']:hover .ico {
+  color: #2f6fed;
+}
+
+/* 沉浸模式的黄单独处理（设计稿的 #f0a500 比 #2f6fed 更贴） */
+.row[data-on='false'][data-focus] .ico[data-icon='moon'],
+.row[data-on='false']:hover .ico[data-icon='moon'] {
+  color: #f0a500;
+}
+
+/*
+ * ⚠️ **开关在聚焦时不变**（用户确认「不用」）。
+ * 所以这里**不写** `.row:hover .switch` 之类的规则 —— 留这段注释是为了
+ * 让将来的人知道那是**刻意的**，不是漏了。
+ */
+
+/* ── 普通行的图标色（无开关的行） ─────────────────────────────────── */
+
+/*
+ * 设计稿里普通行的图标是灰的 `#8a9099`（比文字 `#3c4149` 浅）。
+ * 例外两个：沉浸模式黄（只在开启时）、活泼度橙。
+ */
+.row:not([data-on]) .ico {
+  color: #8a9099;
+}
+
+/* 活泼度的星星：设计稿是橙 `#f5a623`（无论开关） */
+.row .ico[data-icon='spark'] {
+  color: #f5a623;
+}
+
+/* ── 危险行（退出） ───────────────────────────────────────────────── */
+
+/*
+ * 设计稿：文字与图标都是红 `#d93843`。
+ */
+.row[data-danger='true'],
+.row[data-danger='true'] .label,
+.row[data-danger='true'] .ico {
+  color: #d93843;
+}
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════
+ * 图标形状**不在这里** —— 见文件顶部的 @import url('icon-masks.css')。
+ *
+ * 那个文件由 	ools/build-icon-css.py 从 	ools/menupreview/icons/*.svg
+ * 生成，而 SVG 是从设计稿 PDF 的矢量路径里抠出来的
+ * （	ools/extract-menu-icons.py）——
+ *
+ *   · **形状与设计稿完全一致**（不是手画的近似）
+ *   · 单色，所以 ackground-color: currentColor 能让它跟着
+ *     开启 / 关闭 / 聚焦三态变色
+ *   · 每个图标带自己的 --iw / --ih（设计稿里各图标本来就不一样大）
+ *
+ * ⚠️ **不要在这里再手写 .ico[data-icon=...]** ——
+ *    那会与生成物冲突，而且下次重跑生成脚本时两边会漂移。
+ */

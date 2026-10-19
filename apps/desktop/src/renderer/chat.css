@@ -1,0 +1,258 @@
+/*
+ * 对话条窗口的样式（2026-10-14 按右键菜单同一套设计语言重做配色）。
+ *
+ * 设计语言（与 petMenu.css 一致，值都从设计稿量出）：
+ *   卡片白 / 描边 #eceef2 / 分隔 #eef0f4 / 聚焦底 #f3f5f9
+ *   正文 #3c4149 / 次要 #98a0a8 / 图标灰 #c2c7ce
+ *   品牌蓝 #2f6fed / 退出红 #d93843
+ *
+ * 这个窗口是**透明 + 无边框**的：只画一根圆角对话条，其余透出桌面。
+ * 所以 body 背景必须是 transparent，而且不能有 margin（多 1px 就会在
+ * 屏幕上留一条不透明的边）。
+ */
+
+:root {
+  /*
+   * ⚠️ **底色必须不透明**（2026-10-16 修「四角有灰」）。
+   *
+   * 原来是 `rgba(255, 255, 255, 0.94)` + `backdrop-filter: blur(10px)` ——
+   * 这是给"毛玻璃"效果配的，但**透明窗口里 backdrop 后面什么都没有**：
+   * 实测（离屏截图量角点）四角是 243~251 的灰。半透明底叠在用户桌面上
+   * 也是一圈灰。气泡窗口 2026-10-04 修过一模一样的问题（见 bubble.css
+   * 的说明：改成不透明底色后，圆角外就是纯粹的"什么都没有"）。
+   * 所以照气泡的方案：底色不透明 + 去掉 backdrop-filter。
+   */
+  --bg: rgb(255, 255, 255);
+  --border: #eceef2;
+  --focus-bg: #f3f5f9;
+  /*
+   * 输入框**聚焦时**的底色（2026-10-16 加）。
+   *
+   * 🔴 原来 `.input:focus` 里写死了 `background: #ffffff` —— 浅色下是
+   * "输入框聚焦变亮"的效果，深色下就成了**白底 + 白字**（文字还是
+   * `--text`=#e8e9ee），完全看不见。用户报的正是这个。
+   * 所以提出来做成角色变量：浅色保持白（原效果不变），深色给一块
+   * 比 `--focus-bg` 略亮一点的深灰 —— 有"聚焦变亮"的层次，又不刺眼。
+   */
+  --input-focus-bg: #ffffff;
+  --text: #3c4149;
+  --text-dim: #98a0a8;
+  --icon-dim: #c2c7ce;
+  --accent: #2f6fed;
+  --accent-down: #2a63d4;
+  --ok: #22a06b;
+  --bad: #d93843;
+  --warn: #f0a500;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* 拖拽窗口由主进程 setBounds 负责；这里禁止文本选择，避免拖输入框时选中文字 */
+  user-select: none;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  padding: 7px 8px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  /*
+   * 🔴 `backdrop-filter: blur(10px)` 已移除（2026-10-16）。
+   *
+   * 它是配半透明底做"毛玻璃"用的。两件事让它必须走：
+   *   ① 透明窗口里 backdrop 后面**没有东西**，Chromium 采样不到桌面，
+   *      实测会画出一层灰（用户截图四角的灰）；
+   *   ② 底色已改成不透明（见 :root 的说明），毛玻璃根本看不见。
+   */
+  /*
+   * 阴影收得很淡（2026-10-16）：原来的 `0 8px 24px × 0.14` 在透明窗口里
+   * 是胶囊四周一圈明显的灰（实测角点 243）。留一点点作深度暗示，
+   * 再淡就会看不出"漂在桌面上"，再深就是用户报的那种灰圈。
+   */
+  box-shadow: 0 2px 8px rgba(23, 26, 33, 0.1);
+  /*
+   * ⚠️ 这里**不再**设 -webkit-app-region: drag。
+   *
+   * 第一版设在 .bar 上，以为整条除了输入框都能拖。实测（逐像素扫描，
+   * 见 `probe-chat-drag-region.py`（历史实测脚本））可拖区只有 24px（8%），
+   * 分散成 4 条最宽 8px 的缝 —— 用户实际表现为「拖不动」。
+   *
+   * 现在改成一条**看得见的抓手**（.grip），可拖区 22x44，一眼能看见。
+   */
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * 状态点：7px 的小圆点。
+ * 保留它是为了"一眼看出连上没有"，鼠标悬停才显示详情（title）。
+ */
+.dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.dot[data-level='ok'] {
+  background: var(--ok);
+}
+
+.dot[data-level='bad'] {
+  background: var(--bad);
+}
+
+/* ------------------------------------------------------------------ */
+/* 拖拽抓手（2026-10-12 修「拖不动」）                                  */
+/* ------------------------------------------------------------------ */
+/*
+ * ## 为什么需要一条**看得见**的抓手
+ *
+ * 第一版把 `-webkit-app-region: drag` 设在 `.bar` 上，以为"整条除了输入框
+ * 都能拖"。实测（`probe-chat-drag-region.py`（历史实测脚本）逐像素扫描）：
+ *
+ *     整条宽 300px，可拖只有约 24px（8%）
+ *        1.. 11   bar     drag     左内边距 8px
+ *       13.. 17   dot     none     <- 状态点自己不是 drag
+ *       19.. 25   bar     drag     两侧 gap 共 7px
+ *       27..229   input   no-drag
+ *      231..235   bar     drag
+ *      237..291   send    no-drag
+ *      293..297   bar     drag
+ *
+ * 用户要精确点到那几像素，实际表现就是「**拖不动**」。
+ * 靠"缝"来拖是不可发现的 —— 所以改成一条明确的 22x44 抓手。
+ */
+.grip {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /*
+   * ⚠️ **只有抓手是 drag**。输入框、按钮、状态点都 no-drag。
+   */
+  -webkit-app-region: drag;
+  cursor: grab;
+  border-radius: 8px 0 0 8px;
+  transition: background 0.12s ease;
+}
+
+/* 三条小横线（≡）：让"这里能抓"一眼可见 */
+.grip span {
+  display: block;
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--icon-dim);
+  /*
+   * ⚠️ 小横线**自己也要设 drag**。`app-region` 不继承，只在 `.grip` 上设的话，
+   * 抓到线上（那 2px）会落进 `no-drag` 的元素里 —— 而那正是最容易点中的地方。
+   */
+  -webkit-app-region: drag;
+  transition: background 0.12s ease;
+}
+
+/* 悬停反馈与菜单行的聚焦底同色 */
+.grip:hover {
+  background: var(--focus-bg);
+}
+
+.grip:hover span {
+  background: var(--text-dim);
+}
+
+.dot[data-level='warn'] {
+  background: var(--warn);
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--focus-bg);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+  /* 输入区要能选中/编辑，所以从整条拖拽区里排除出去 */
+  -webkit-app-region: no-drag;
+  user-select: text;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.input::placeholder {
+  color: var(--text-dim);
+}
+
+.input:focus {
+  border-color: var(--accent);
+  /* ⚠️ 别写死 #ffffff —— 深色下会变成白底白字（见 :root 里 --input-focus-bg 的说明） */
+  background: var(--input-focus-bg);
+}
+
+.send {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.12s ease;
+}
+
+.send:hover {
+  background: var(--accent-down);
+}
+
+.send:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* 深色主题（2026-10-14）：只认主进程注入的 <html data-theme="dark"> */
+html[data-theme='dark'] {
+  /* 不透明（同 :root 的说明——半透明在透明窗口里四角会发灰） */
+  --bg: rgb(30, 31, 39);
+  --border: #343744;
+  --focus-bg: #2a2d38;
+  /*
+   * 深色下聚焦底色：比常态的 --focus-bg(#2a2d38) 略亮一档 ——
+   * 保留浅色那套"聚焦时输入框变亮"的层次，但不会白到把白字吃掉。
+   */
+  --input-focus-bg: #343847;
+  --text: #e8e9ee;
+  --text-dim: #9a9db0;
+  --icon-dim: #b8bccb;
+  --accent: #6aa9ff;
+  --accent-down: #8bbdff;
+  --ok: #6ee7a8;
+  --bad: #ff7b7b;
+  --warn: #e0b45c;
+}

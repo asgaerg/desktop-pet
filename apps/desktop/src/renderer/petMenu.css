@@ -1,0 +1,633 @@
+:root {
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+  --bg: #f5f6f8;
+  --bg-soft: #fafbfc;
+  --card: #ffffff;
+  --card-soft: #fbfcfd;
+  --hover: #f3f5f9;
+  --sunken: #eef0f4;
+  --border: #e4e7ec;
+  --border-strong: #d3d7de;
+  --text: #3c4149;
+  --text-dim: #98a0a8;
+  --text-soft: #5b616b;
+  --accent: #2f6fed;
+  --ok: #22a06b;
+  --bad: #d93843;
+  --warn: #f0a500;
+  --tag-blue-bg: #e8effd;
+  --tag-blue-bd: #d5e2fb;
+  --tag-green-bg: #e6f4ec;
+  --tag-green-fg: #1f7a4d;
+  --tag-red-bg: #fbeaec;
+  --tag-red-bd: #f5d5d8;
+  --tag-red-fg: #b32833;
+
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+  --icon: #8a9099;
+  --icon-dim: #c2c7ce;
+  --menu-line: #eceef2;
+  --star: #f5a623;
+  --immersive-on: #ffcb2e;
+  /* ── 开关的四个角色色（2026-10-14 加）──────────────────────────
+   * 为什么单独列出来而不是复用 `--border` / `--accent`：
+   * 关闭态的灰和开启态的蓝在**深色下必须各取一套** —— 直接沿用浅色
+   * 那套会在深底上"糊成一团"（用户反馈：深色里开关看着不对）。
+   *   · `--switch-on`          开启：轨道
+   *   · `--switch-off-track`   关闭：轨道
+   *   · `--switch-off-ring`    关闭：外圈描边（浅色设计稿里那圈 #d3d7de）
+   *   · `--switch-knob`        圆点 —— 两种主题都用近白，
+   *     否则深色下圆点会变成"深点压在蓝轨道上"，看不出是个开关
+   */
+  --switch-on: #2f6fed;
+  --switch-off-track: #e4e7ec;
+  --switch-off-ring: #d3d7de;
+  --switch-knob: #ffffff;
+}
+
+/*
+ * 宠物右键菜单（自绘窗口）的样式。
+ *
+ * ⚠️ **所有数字都是从设计稿量出来的**，不是目测：
+ *    出处 `F:\美术资源\桌宠右键菜单 UI.pdf`
+ *    量法 `probe-menu-metrics.py`（历史实测脚本）/ `probe-menu-colors.py`（历史实测脚本）
+ *
+ * ┌─ 量出来的数字 ────────────────────────────────────────────┐
+ * │ 面板          300 x 437（437 是"11 行 + 3 条线"的结果）    │
+ * │ 圆角 R=14      描边 1px var(--menu-line)（四周各 1px）              │
+ * │ 行高          36（实现取 38，见 .row 的说明）              │
+ * │ 图标槽        16px，左边缘 = 面板内 18                     │
+ * │ 文字          x 面板内 42.5，字号 13                       │
+ * │ 右侧箭头      x323.74（约 5 x 8.5 的「>」）                │
+ * │ 开关          34 x 20，右边缘 = 面板右边 - 16              │
+ * │ 分隔线        x 面板内 6，左右各留 6                       │
+ * └──────────────────────────────────────────────────────────┘
+ *
+ * ┌─ 量出来的配色 ────────────────────────────────────────────┐
+ * │ 普通文字   var(--text)        禁用文字   var(--text-dim)              │
+ * │ 分隔线     var(--sunken)        强调分隔线 var(--accent)              │
+ * │ 品牌蓝     var(--accent)        退出红     var(--bad)              │
+ * │ 图标(开)   var(--accent)        图标(关)   var(--icon-dim)              │
+ * │ 沉浸黄(开) var(--immersive-on)        沉浸黄(关) var(--warn)              │
+ * │ 活泼度星   var(--star)        数值灰     var(--icon)              │
+ * │ 开关(开)   轨道 var(--accent) + 圆点 var(--card)                    │
+ * │ 开关(关)   轨道 var(--border) + 外面一圈 var(--border-strong)                │
+ * │ 聚焦底     var(--hover)                                        │
+ * └──────────────────────────────────────────────────────────┘
+ *
+ * ## 用户对「聚焦」的规则（原话 + 追问确认）
+ *
+ * > 「聚焦时的图标和文字颜色变化**只在选项关闭时才变化**，
+ * >   开启时不变化图标和文字颜色，右边的开关同理」
+ *
+ * 追问后确认：「**要变，图标和文字都变，不过只有在鼠标悬停聚焦的那一列才变**」，
+ * 开关「**不用**」变。
+ *
+ * 所以落成三条规则（下面「三态配色」一节）：
+ *   ① 聚焦只加**背景**（var(--hover)）—— 无论开关状态
+ *   ② 聚焦 + **关闭** -> 图标与文字都变
+ *   ③ 聚焦 + **开启** -> 图标与文字**原样不动**
+ *
+ * ## ⚠️ 图标形状**不在这里** —— 见同目录的 `petMenu.icons.css`
+ *
+ * 那份是 `tools/build-icon-css.py` 的**生成物**（从设计稿 PDF 的矢量路径
+ * 抠出来的真图标），本页面用**两个 `<link>`** 引进来，而不是 `@import`：
+ *
+ *   · `@import` 必须在所有其它规则之前，容易被人挪到中间而静默失效；
+ *   · 两个 link 都会被 `pet://` 协议注入 `?v=<mtime>`（`injectStamps` 只处理
+ *     HTML 里的 href/src），换图标后能真正穿透缓存。
+ */
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 窗口本身：透明、无内边距
+ *
+ * ⚠️ 这个窗口是 `transparent: true` + `frame: false`。body 默认有白底，
+ *    不显式设透明的话，**卡片四周会出现一块白色方块**
+ *    （宠物窗口/状态条/气泡都踩过同一个坑）。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  /*
+   * ⚠️ 不能出现滚动条：菜单的高度是**算好之后再设窗口尺寸**的，
+   * 多一条滚动条会让测量值与窗口对不上（差 8~15px）。
+   */
+  overflow: hidden;
+  font-family: system-ui, 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  /* 菜单是给鼠标用的：拖选文字只会碍事，还会把 hover 态选中成蓝底 */
+  user-select: none;
+  -webkit-user-select: none;
+  /*
+   * 菜单窗口没有系统边框，用户能看见的只有那张卡片 ——
+   * 光标保持箭头（默认），只有行上才提示可点（见 .row）。
+   */
+  cursor: default;
+}
+
+/* 面板的容器；`position: relative` 是为了让面板的绝对定位以它为基准 */
+#root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 面板
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/*
+ * 主面板：**宽度写死 300**（设计稿的宽度是设计决定：对齐与留白都按它算）。
+ *
+ * ⚠️ 高度**不写死** —— 由内容撑出来。菜单项会随状态变化
+ *   （比如"沉浸模式正在托管对话框"那种长文案、麦克风列表长短），
+ *   写死高度会在文案变化时被裁掉或留白。
+ *   设计稿的 437 是"11 行 + 3 条分隔线"的**结果**，不是约束。
+ *
+ * 位置由 `petMenu.js` 算完写进 `style`（left/top）—— 因为窗口尺寸也是
+ * 算出来的（见那边"为什么全部布局都在渲染层做"）。
+ */
+.panel {
+  position: absolute;
+  width: 300px;
+  /* 描边 1px（设计稿的 302x439 那圈，四周各大 1px） */
+  border: 1px solid var(--menu-line);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+  /* 上下内边距 6px（设计稿第一条分隔线在 y54，面板顶 y48 —— 顶上留 6px） */
+  padding: 6px 0;
+  /*
+   * ⚠️ `overflow: hidden` 让子元素不会溢出圆角。
+   * 聚焦底是 `::before` 的圆角小方块，靠它裁也不越界。
+   */
+  overflow: hidden;
+}
+
+/*
+ * ⚠️ 出现动画**很短（90ms）**。
+ *
+ * 系统原生菜单是"瞬间出现"的，做成长动画会明显比原生"慢半拍"；
+ * 但完全不动又像卡了一下。90ms 的淡入 + 轻微放大是"感觉到它出现了、
+ * 又不觉得等"的那个量。
+ */
+.panel[data-visible='true'] {
+  animation: menu-in 90ms ease-out;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/*
+ * 子菜单面板（`data-level="1"`）：同一个窗口里的浮出卡片。
+ *
+ * ## 与主面板的两处刻意不同
+ *
+ * ① **宽度不写死** —— 子菜单项是长文案（"边缘探头（拖到屏幕边缘时侧身窥视）"
+ *    "联网搜索（它自己上网查，会把内容发到搜索引擎）"），写死 300 会全部
+ *    被省略号截断，用户看不全就没法判断该不该点。
+ *    所以按内容撑，但有上限（见下面的 max-width）。
+ * ② **行内不占图标槽** —— 子菜单项没有图标（设计稿只给了主菜单的图标），
+ *    留一个空的 16px 槽只会让文字白白右移、可读宽度更小。
+ */
+.panel[data-level='1'] {
+  width: max-content;
+  min-width: 168px;
+  /*
+   * 上限 400：再长就换省略号。
+   * 不设上限的话，将来某条更长的文案会把窗口撑出屏幕（窗口尺寸是按
+   * 面板宽度算出来的）。
+   *
+   * ⚠️ 从 380 提到 400 是因为「自言自语 · 注意力在自己，会自主截图，20 分钟后安静」
+   * 这一条（2026-10-17 用户指定的写法，24 个字）。380 的时候它被截成
+   * 「自言自语 · 注意力在自己，会自…」—— 用户当场截图指出来了。
+   * 实测这一行文字宽 331px，加左右内边距后要 400 才够。
+   * 真要再长，**先减字**，别继续抬这个数：窗口是按面板宽度算的，
+   * 抬到 500 以上就会在小屏幕上顶到边缘。
+   */
+  max-width: 400px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 一行
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/*
+ * ⚠️ 行高取 **38** 而不是设计稿量到的 36。
+ *
+ * 因为面板的整高是设计稿的 437、而它由"11 行 + 3 条线 + 上下各 6"构成：
+ * 36 x 11 + 3 x 3 + 12 = 417 ≠ 437。差 20px —— 说明设计稿里行的**实际间距**
+ * 比字形框量出来的 36 大。38 是让总高与设计稿对齐的值
+ * （11 x 38 + 3 x 3 + 12 = 439 ≈ 437，四舍五入的差在设计稿描边里）。
+ *
+ * ⚠️ 左右内边距 18 / 16：设计稿的图标左边缘在面板内 18、
+ *    开关右边缘在面板右边往内 16。
+ */
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 16px 0 18px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+
+/*
+ * 聚焦（鼠标悬停 / 键盘高亮）—— **只加底色**。
+ *
+ * ⚠️ 底色是**圆角小方块**（设计稿里比面板窄 6px、圆角约 8px），
+ *    不是整行通铺。用 `::before` 做，因为 `.row` 自己有左右内边距。
+ *
+ * 触发方式三种，**行为完全一致**（键盘操作必须和鼠标看起来一样，
+ * 否则用户不知道回车会点到哪一行）：
+ *   · `:hover`           鼠标悬停
+ *   · `[data-focus]`     鼠标移动后脚本标记（子菜单展开时也用）
+ *   · `[data-kbd]`       键盘上下键移动的高亮
+ */
+.row[data-focus]::before,
+.row[data-kbd]::before,
+.row:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0 6px;
+  border-radius: 8px;
+  background: var(--hover);
+  /* 垫在内容下面 */
+  z-index: 0;
+}
+
+/* 行的内容必须在聚焦底之上 */
+.row > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── 图标 ─────────────────────────────────────────────────────────────── */
+
+/*
+ * ⚠️ 图标是**单色矢量 mask**，不是字体图标也不是图片。
+ *
+ * 用 mask 的好处：它跟随 `background-color`（= `currentColor`），
+ * 所以"开启 / 关闭 / 聚焦"三种颜色只要改一个 `color`，
+ * 不用准备三套图片 —— 而设计稿的图标**确实要跟着状态变色**。
+ */
+.ico {
+  flex: 0 0 auto;
+  /*
+   * 🔴 图标占**固定槽位 16px，本身在槽里居左**。
+   *
+   * 设计稿里各图标宽度不同（moon 11.98 / paw 9.80 / pad 15.51），
+   * 但**文字位置是固定的**（面板内 42.5）。
+   *
+   * ⚠️ 第一版让 `.ico` 用图标自己的宽度，于是**文字跟着图标宽度飘**
+   *    （实测 x 在 40~45 之间跳，而设计稿是一条竖线对齐的）——
+   *    那正是"看得出不齐但说不上哪不对"的问题。
+   */
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  -webkit-mask-image: var(--icon);
+  mask-image: var(--icon);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  /* 居左（不是居中）—— 设计稿的图标左边缘都在同一条竖线上 */
+  -webkit-mask-position: left center;
+  mask-position: left center;
+  /* 用各自的原始尺寸（`--iw/--ih` 由生成脚本给出），不拉伸 */
+  -webkit-mask-size: var(--iw, 14px) var(--ih, 14px);
+  mask-size: var(--iw, 14px) var(--ih, 14px);
+  /* 默认跟随文字色（例外见「三态配色」） */
+  color: inherit;
+}
+
+/* ── 文字 ─────────────────────────────────────────────────────────────── */
+
+/*
+ * ⚠️ 左边距是"**固定槽位右边缘 + 固定间隔**"（16 + 8.5 = 24.5，
+ *    从行的左内边距 18 起算就是面板内 42.5）——
+ *    不是"图标宽 + 间隔"，那样文字会跟着图标飘（见 .ico 的说明）。
+ */
+.label {
+  margin-left: 8.5px;
+  /* 将来文案再长也不换行（换行会让行高连锁变化，菜单高度就不可控了） */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+}
+
+/* 子菜单行的文字从最左边开始（那里没有图标槽） */
+.panel[data-level='1'] .label {
+  margin-left: 0;
+}
+
+/* ── 右侧：箭头 / 数值 / 开关 / 勾 ────────────────────────────────────── */
+
+/* 子菜单箭头：设计稿约 5 x 8.5 的「>」，用两条边框拼出来（无需图片） */
+.chev {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 8.5px;
+  margin-left: 8px;
+  border-right: 1.6px solid var(--icon-dim);
+  border-bottom: 1.6px solid var(--icon-dim);
+  transform: rotate(-45deg);
+  /* 旋转后重心偏一点，右移 1px 视觉上才居中 */
+  margin-right: 1px;
+}
+
+/* 数值（设计稿里是活泼度的「0.60」）：灰色、贴右、与箭头留 13px */
+.value {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--icon);
+  margin-right: 13px;
+}
+
+/*
+ * 开关：34 x 20（设计稿 x298..332）。
+ *
+ * ⚠️ 两态的构成**不一样**（从 PDF 的路径看出来的）：
+ *   开启  轨道 #2f6fed + 白点（点在**右侧**）
+ *   关闭  外圈 #d3d7de（36x22）+ 轨道 #e4e7ec + 白点（点在**左侧**）
+ *
+ * 关闭态那个 36x22 的外圈是**描边** —— 所以关闭时开关看起来比开启时
+ * "大一圈"。不还原的话关闭态会显得太轻、像没画完。
+ */
+.switch {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--switch-off-track);
+  box-shadow: 0 0 0 1px var(--switch-off-ring);
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--switch-knob);
+  transition: left 0.16s ease;
+}
+
+.switch[data-on='true'] {
+  background: var(--switch-on);
+  /* 开启态**没有**那圈外描边（设计稿里开启只给了轨道 + 圆点） */
+  box-shadow: none;
+}
+
+.switch[data-on='true']::after {
+  left: 16px;
+}
+
+/*
+ * 单选项的「已选」标记（子菜单里的档位 / 麦克风 / 活泼度）。
+ *
+ * ⚠️ 设计稿没画子菜单，所以这里按**系统菜单的惯例**：已选的那一项
+ *    右侧打一个蓝勾，而不是像 checkbox 那样给个开关 ——
+ *    它们是"多选一"，用开关会让用户以为能同时开好几个。
+ */
+.mark {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 12px;
+  height: 12px;
+  /* 用两条边框拼一个勾，避免为一个勾引入图片或字体 */
+  border-right: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  transform: rotate(45deg) translate(-2px, -2px);
+  opacity: 0;
+}
+
+.mark[data-on='true'] {
+  opacity: 1;
+}
+
+/* 子菜单行没有图标槽时，`.mark` / `.value` 自己顶到右边 */
+.panel[data-level='1'] .row {
+  padding-left: 14px;
+}
+
+/* ── 分隔线 ───────────────────────────────────────────────────────────── */
+
+/*
+ * 左右各留 6px（设计稿 x 面板内 6），色 #eef0f4。
+ * 「设置…」上面那条是**品牌蓝**（设计稿里唯一的强调线，`accent`）。
+ */
+.sep {
+  height: 1px;
+  margin: 1.5px 6px;
+  background: var(--sunken);
+}
+
+.sep[data-accent='true'] {
+  background: var(--accent);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 三态配色
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* ═══ 开启态 ═══ */
+.row[data-on='true'] {
+  color: var(--accent);
+}
+
+.row[data-on='true'] .label {
+  color: var(--accent);
+}
+
+/* 沉浸模式的黄（设计稿 var(--immersive-on)；其它行的图标跟文字同色） */
+.row[data-on='true'] .ico[data-icon='moon'] {
+  color: var(--immersive-on);
+}
+
+/* ═══ 关闭态 ═══ */
+.row[data-on='false'] {
+  color: var(--text-dim);
+}
+
+.row[data-on='false'] .ico {
+  /* 图标另有一个更浅的灰（var(--icon-dim)）—— 比文字还浅 */
+  color: var(--icon-dim);
+}
+
+.row[data-on='false'] .label {
+  color: var(--text-dim);
+}
+
+/*
+ * ═══ 关闭 + 聚焦 -> 图标和文字都变 ═══
+ *
+ * 设计稿给的两个例子方向一致（都比关闭态**深**）：
+ *   沉浸模式图标 var(--icon-dim) -> #f0a500（暗黄）
+ *   聊天模式文字 #98a0a8 -> #3c4149（深灰）
+ *
+ * 所以规则是"关闭 + 聚焦 = 加深"，且图标和文字都变。
+ * 图标统一变成品牌蓝 —— 那在告诉用户"这一行现在能点"。
+ */
+.row[data-on='false'][data-focus] .label,
+.row[data-on='false'][data-kbd] .label,
+.row[data-on='false']:hover .label {
+  color: var(--text);
+}
+
+.row[data-on='false'][data-focus] .ico,
+.row[data-on='false'][data-kbd] .ico,
+.row[data-on='false']:hover .ico {
+  color: var(--accent);
+}
+
+/* 沉浸模式的黄单独处理（设计稿给的是 #f0a500，比品牌蓝更贴） */
+.row[data-on='false'][data-focus] .ico[data-icon='moon'],
+.row[data-on='false'][data-kbd] .ico[data-icon='moon'],
+.row[data-on='false']:hover .ico[data-icon='moon'] {
+  color: var(--warn);
+}
+
+/*
+ * ⚠️ **开关在聚焦时不变**（用户确认「不用」）。
+ * 所以这里**不写** `.row:hover .switch` 之类 —— 留这段注释是为了让人知道
+ * 那是**刻意的**，不是漏了。
+ */
+
+/* ── 普通行的图标色（没有开关的行） ───────────────────────────────────── */
+
+/*
+ * 设计稿里普通行的图标是灰 `var(--icon)`（比文字 var(--text) 浅）。
+ * 例外两个：沉浸模式黄（只在开启时，见上）、活泼度橙（无论状态）。
+ */
+.row:not([data-on]) .ico {
+  color: var(--icon);
+}
+
+/* 活泼度的星星：设计稿是橙 var(--star)（无论开关状态） */
+.row .ico[data-icon='spark'] {
+  color: var(--star);
+}
+
+/* ── 危险行（退出 / 退出全部实例） ────────────────────────────────────── */
+
+/* 设计稿：文字与图标都是红 #d93843 */
+.row[data-danger='true'],
+.row[data-danger='true'] .label,
+.row[data-danger='true'] .ico {
+  color: var(--bad);
+}
+
+/*
+ * ⚠️ 危险行**聚焦时不再变色**：它本来就是"最重的红"，
+ *    再深就没有层次了，而设计稿第 1 页里红色行也没有第二态。
+ *    只保留聚焦底色（那是"指针在这儿"的反馈）。
+ */
+
+/* ── 置灰行（没实现 / 被别的东西托管） ────────────────────────────────── */
+
+/*
+ * ## 为什么置灰项**继续显示**而不是隐藏（项目一贯做法）
+ *
+ * 「沉浸模式正在托管对话框」这类项：隐藏会让菜单项跳来跳去，
+ * 用户找不到刚才点过的那个；置灰 + 明确文案 = "它被别的东西管着，
+ * 去关掉那个东西"。
+ *
+ * ⚠️ 置灰项**不能有任何 hover 变色** —— 变了就说明"能点"，
+ *    而它点下去什么都不会发生（这是这个项目最怕的失败方式：
+ *    不报错、只是没用）。
+ */
+.row[data-disabled='true'],
+.row[data-disabled='true'] .label,
+.row[data-disabled='true'] .ico {
+  color: var(--icon-dim);
+}
+
+.row[data-disabled='true'] .switch {
+  opacity: 0.55;
+}
+
+/* 置灰行不显示聚焦底（没有可点的东西） */
+.row[data-disabled='true']::before {
+  background: transparent;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 深色主题（2026-10-14 加，设置页「界面主题」里切换）
+ * ══════════════════════════════════════════════════════════════════
+ * 只认主进程注入的 `<html data-theme="dark">`。
+ * ⚠️ 想改深色配色**只改这里**，不要去改上面的浅色值 ——
+ *    两份定义分居 `:root` 与这里，改错一边的表现是
+ *    "切到深色之后有个别地方还是浅的"，很难归因。
+ */
+html[data-theme='dark'] {
+  --bg: #1c1d24;
+  --bg-soft: #17181e;
+  --card: #24262f;
+  --card-soft: #2a2d38;
+  --hover: #2a2d38;
+  --sunken: #16171d;
+  --border: #343744;
+  --border-strong: #3a3d4a;
+  --text: #e8e9ee;
+  --text-dim: #9a9db0;
+  --text-soft: #cfd2dd;
+  --accent: #6aa9ff;
+  --ok: #6ee7a8;
+  --bad: #ff7b7b;
+  --warn: #e0b45c;
+  --tag-blue-bg: #2b3550;
+  --tag-blue-bd: #33405f;
+  --tag-green-bg: #2a3a2e;
+  --tag-green-fg: #95ec69;
+  --tag-red-bg: #3a2226;
+  --tag-red-bd: #4a2a2f;
+  --tag-red-fg: #ffb4b4;
+  --icon: #e4e6f0;
+  --icon-dim: #b8bccb;
+  --menu-line: #343744;
+  --star: #f5a623;
+  --immersive-on: #ffcb2e;
+  /*
+   * 开关在深色下**重新取色**（2026-10-14 用户要求）：
+   *   · 开启的蓝提亮到 #4c8dff —— 浅色那个 #2f6fed 在深底上偏沉、不够"亮着"
+   *   · 关闭的轨道提到 #3f4354、外圈 #565b70 —— 原样沿用浅色的 #e4e7ec/#d3d7de
+   *     会在深底上变成一圈**刺眼的白边**，比轨道本身还显眼
+   *   · 圆点保持近白，蓝轨道/灰轨道上都清楚
+   */
+  --switch-on: #4c8dff;
+  --switch-off-track: #3f4354;
+  --switch-off-ring: #565b70;
+  --switch-knob: #ffffff;
+}

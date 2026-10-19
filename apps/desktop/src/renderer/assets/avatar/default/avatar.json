@@ -1,0 +1,133 @@
+{
+  "$comment": [
+    "立绘的第二种形态：**webm 视频**。素材来自参考桌宠应用（shenshen 角色，109 个文件）。",
+    "",
+    "为什么用视频：这套素材只有 webm，没有序列帧。89 段动作合计 44 MB，",
+    "转成贴图会膨胀好几倍，而视频由浏览器原生解码、按需加载。",
+    "",
+    "⚠️ **这些视频没有 alpha 通道，背景是纯黑**（实测：像素格式 yuv420p、",
+    "角落像素 RGBA = [0,0,0,255]）。所以播放器必须自己做「黑 → 透明」抠图。",
+    "好在黑底非常干净，存在一条清晰的阈值线（实测 81.7% 是纯 0，而每通道 ≤6 的",
+    "过渡像素只占 0.004%），所以简单阈值就能抠干净、不伤角色暗部。",
+    "",
+    "⚠️ **片源必须写完整相对路径**（如 `idle/待机呼吸休闲`）。",
+    "原因是浏览器里**无法枚举目录** —— 只写文件名的话，播放器没法知道它在",
+    "idle/ 还是 random/ 下（只能靠逐个试错加载，既慢又会刷一堆报错）。",
+    "",
+    "状态映射见 animations：每种状态给一个**路径数组**，播放器随机挑一个，",
+    "数组可以放任意多个 —— 后续加动作只要往数组里加路径，播放器不用改。"
+  ],
+
+  "kind": "video",
+  "basePath": "assets/avatar/default",
+
+  "$keyComment": "黑底抠图阈值：RGB 每通道都 <= 此值即判为背景。25 是保守值（实测过渡像素最多到 6，留足余量）。调高会开始吃掉角色暗部。",
+  "blackKeyThreshold": 25,
+
+  "$hitboxesComment": "命中框来自素材自带的 manifest.json（源视频 640x360 的像素坐标）。用于区分「点身体」和「摸头」——摸头摸到的反应不同。",
+  "hitboxes": {
+    "body": [212, 60, 428, 330],
+    "head": [185, 60, 436, 195]
+  },
+
+  "$mirrorComment": [
+    "含可读文字的动画**不能水平镜像**，否则字是反的。",
+    "这份名单来自素材自带的 text_clips.json，是原作者逐帧人工核对（中间帧截图）得出的。",
+    "当前播放器还没有做镜像，但名单先登记下来，免得以后加镜像时漏掉这个坑。"
+  ],
+  "noMirror": [
+    "random/是啊，吃什么",
+    "random/写代码",
+    "random/写福字",
+    "random/收红包",
+    "random/吃Token",
+    "random/深度思考碎碎念"
+  ],
+
+  "animations": {
+    "idle": ["idle/待机呼吸休闲"],
+    "drag": ["drag/被鼠标拖拽悬空反馈"],
+    "curious": ["turn/东张西望", "random/被吓一跳", "random/蝴蝶蜜蜂环绕头顶开花"],
+    "happy": ["click/点击回应-开心跃动", "click/点击回应-元气挥手"],
+    "shy": ["click/点击回应-害羞惊讶", "click/点击回应-挠痒咯咯笑"],
+    "angry": ["click/点击回应-傲娇生气"],
+    "sleep": ["random/原地小憩沉眠", "random/打瞌睡被惊醒"],
+    "talk": ["random/是啊，吃什么", "random/深度思考碎碎念", "random/悠闲哼歌"],
+    "peek": ["peek/趴着探头"],
+    "work": [
+      "random/工作状态-忙碌点按",
+      "random/工作状态-思考冒泡",
+      "random/工作状态-清点归档",
+      "random/工作状态-原地踱步张望"
+    ],
+    "workDone": ["random/工作状态-雀跃庆祝"],
+    "workTired": ["random/工作状态-垂头叹气冒汗"]
+  },
+
+  "$peekComment": [
+    "`peek`（趴着探头）：别的应用全屏时，宠物贴边露出的姿势。",
+    "",
+    "⚠️ 素材里**没有**现成的趴着/躺着动画 —— 我抽了名字最像的四段",
+    "（原地小憩沉眠、打瞌睡被惊醒、工作状态-垂头叹气、idle）逐帧核对，全是站姿，",
+    "只是闭眼或眯眼。所以那个睡姿不在名字里。",
+    "",
+    "最后是用 tools/analyse-pose.py 逐帧测「抠掉黑底后非透明包围盒的宽高比」找出来的：",
+    "站立约 0.9，侧躺会跳到 1.7。于是定位到 `move/左转奔跑` 的帧 120~140，",
+    "再用 tools/extract-clip.py 剪出来、转成带 alpha 的 webm（64 KB，0.83 秒循环）。",
+    "",
+    "换素材时可以用同样的办法重新找：跑 analyse-pose.py 看哪段宽高比 > 1.5。"
+  ],
+
+  "$randomComment": [
+    "自主行为 / 节日彩蛋的候选池（89 个中的大部分）。当前**未接入**播放逻辑，",
+    "只是登记下来，方便以后做「每隔一阵自己表演一个动作」时直接取用。",
+    "分类只按名字粗分，不保证准确 —— 要看实际效果得逐个播一遍。"
+  ],
+  "randomPool": {
+    "eating": [
+      "random/吃白饭", "random/吃冰淇淋融化", "random/吃大闸蟹", "random/吃饺子",
+      "random/吃腊八粥", "random/吃年糕", "random/吃青团", "random/吃汤圆",
+      "random/吃糖葫芦", "random/吃晚餐", "random/吃午餐", "random/吃西瓜",
+      "random/吃早餐", "random/吃长寿面", "random/吃重阳糕", "random/吃粽子",
+      "random/涮火锅", "random/大口吃零食", "random/吃Token"
+    ],
+    "festival": [
+      "random/插茱萸赏菊", "random/堆雪人", "random/放河灯", "random/放孔明灯",
+      "random/放烟花", "random/收红包", "random/讨糖南瓜灯", "random/舞狮头",
+      "random/中秋赏月吃月饼", "random/装点圣诞树", "random/穿针乞巧", "random/写福字"
+    ],
+    "play": [
+      "random/抽陀螺", "random/荡秋千", "random/放风筝", "random/撸猫", "random/骑木马",
+      "random/三球抛接", "random/踢毽子", "random/玩水枪", "random/下五子棋",
+      "random/扑克魔术", "random/原地蹲下玩玩具汽车", "random/原地专心玩魔方",
+      "random/玩游戏气急败坏", "random/原地跳跃抓碎头顶物品", "random/摇扇纳凉",
+      "random/照镜子"
+    ],
+    "music": [
+      "random/吹笛子", "random/小提琴演奏", "random/优雅女仆舞",
+      "random/轻快摇摆舞", "random/可爱宅舞", "random/悠闲哼歌"
+    ],
+    "fun": [
+      "random/变鸽子", "random/拆礼物", "random/凭空生花", "random/动物环绕",
+      "random/鲸鱼吐泡泡特效", "random/蓝鲸现世", "random/萌化小幽灵",
+      "random/小幅度原地360度旋转展示", "random/整体换装试色",
+      "random/用鲸鱼尾巴拍打地面", "random/吹气球", "random/晨间刷牙",
+      "random/超大伸懒腰", "random/哈欠连天", "random/女仆屈膝礼仪", "random/轻快记录"
+    ],
+    "chatter": [
+      "random/碎碎念-擦桌碎碎念", "random/碎碎念-对屏碎碎念",
+      "random/碎碎念-发呆碎碎念", "random/深度思考碎碎念", "random/是啊，吃什么"
+    ]
+  },
+
+  "$moveComment": [
+    "移动动画。每段带「每圈地面位移」，用于让位移与步态同步（不滑步）——",
+    "这份标定来自素材的 move_strides.json，是原作者用两种方法（鞋簇跟踪 / 视觉网格读数）",
+    "交叉验证取的值。当前还没做自主移动，先登记着。"
+  ],
+  "moveStrides": {
+    "move/左转奔跑": 240,
+    "move/漂浮踏步": 90,
+    "move/螃蟹走路": 220
+  }
+}

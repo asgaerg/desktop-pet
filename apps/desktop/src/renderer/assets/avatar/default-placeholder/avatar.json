@@ -1,0 +1,73 @@
+{
+  "$comment": "占位序列帧素材，由 apps/desktop/tools/make-placeholder-avatar.mjs 生成。换成真美术时保持同样的结构即可，播放器无需改动。",
+  "image": "sheet.png",
+  "frameWidth": 256,
+  "frameHeight": 256,
+  "fps": 8,
+  "palette": {
+    "body": "#ffb35c",
+    "belly": "#ffe0b8",
+    "eye": "#3a2a1a",
+    "cheek": "#ff8a8a"
+  },
+  "animations": {
+    "idle": {
+      "frames": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "blink": {
+      "frames": [
+        4,
+        5
+      ],
+      "fps": 8,
+      "loop": false
+    },
+    "talk": {
+      "frames": [
+        6,
+        7,
+        8
+      ],
+      "fps": 13,
+      "loop": true
+    },
+    "drag": {
+      "frames": [
+        9
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "sleep": {
+      "frames": [
+        10,
+        11
+      ],
+      "fps": 2.2,
+      "loop": true
+    },
+    "happy": {
+      "frames": [
+        12,
+        13
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "curious": {
+      "frames": [
+        14,
+        15
+      ],
+      "fps": 8,
+      "loop": true
+    }
+  }
+}

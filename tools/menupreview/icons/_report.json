@@ -1,0 +1,90 @@
+[
+  {
+    "name": "moon",
+    "w": 11.98,
+    "h": 11.98,
+    "parts": 1,
+    "segs": 10,
+    "evenodd": false
+  },
+  {
+    "name": "chat",
+    "w": 12.0,
+    "h": 10.32,
+    "parts": 4,
+    "segs": 41,
+    "evenodd": false
+  },
+  {
+    "name": "eye",
+    "w": 12.4,
+    "h": 7.6,
+    "parts": 4,
+    "segs": 36,
+    "evenodd": false
+  },
+  {
+    "name": "paw",
+    "w": 9.8,
+    "h": 10.5,
+    "parts": 4,
+    "segs": 36,
+    "evenodd": false
+  },
+  {
+    "name": "pad",
+    "w": 15.51,
+    "h": 9.09,
+    "parts": 4,
+    "segs": 95,
+    "evenodd": false
+  },
+  {
+    "name": "mic",
+    "w": 10.51,
+    "h": 13.91,
+    "parts": 2,
+    "segs": 42,
+    "evenodd": false
+  },
+  {
+    "name": "spark",
+    "w": 12.0,
+    "h": 12.0,
+    "parts": 1,
+    "segs": 10,
+    "evenodd": false
+  },
+  {
+    "name": "memory",
+    "w": 12.4,
+    "h": 12.9,
+    "parts": 2,
+    "segs": 78,
+    "evenodd": false
+  },
+  {
+    "name": "sun",
+    "w": 13.91,
+    "h": 13.91,
+    "parts": 2,
+    "segs": 110,
+    "evenodd": false
+  },
+  {
+    "name": "power",
+    "w": 11.68,
+    "h": 12.55,
+    "parts": 2,
+    "segs": 34,
+    "evenodd": false
+  },
+  {
+    "name": "copy",
+    "w": 14.4,
+    "h": 14.4,
+    "parts": 2,
+    "segs": 51,
+    "evenodd": false
+  }
+]

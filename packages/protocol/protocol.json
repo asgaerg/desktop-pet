@@ -1,0 +1,904 @@
+{
+  "$comment": "桌面宠物通信协议 v1 —— Electron 前端与 Python sidecar 的唯一契约。这个文件是单一来源：TS 类型在 packages/protocol/src/index.ts，Python 侧对应 apps/brain/protocol.py。改协议先改这里。",
+  "protocolVersion": 1,
+  "directions": {
+    "toBrain": "Electron -> Python sidecar",
+    "toUi": "Python sidecar -> Electron",
+    "toMain": "Python sidecar -> Electron main（主进程自己消费，不进渲染层）",
+    "toMainReply": "Electron main -> Python sidecar（对 toMain 请求的应答，由 Python 消费）"
+  },
+  "envelope": {
+    "type": "string，消息类型，见 messages 的键",
+    "ts": "number，毫秒时间戳（可选，缺省由接收方补齐）"
+  },
+  "messages": {
+    "config.update": {
+      "direction": "toBrain",
+      "comment": "运行时改参数（活泼度滑杆等），必须热生效、不重启",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "patch"
+        ],
+        "properties": {
+          "type": {
+            "const": "config.update"
+          },
+          "patch": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "hello": {
+      "direction": "toBrain",
+      "comment": "前端握手/重连后第一条消息，携带协议版本与客户端信息",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "protocolVersion"
+        ],
+        "properties": {
+          "type": {
+            "const": "hello"
+          },
+          "protocolVersion": {
+            "type": "number"
+          },
+          "client": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "memory.backup": {
+      "direction": "toBrain",
+      "comment": "手动备份记忆库。必须由 sidecar 执行（VACUUM INTO 才能拿到一致快照）；reqId 由主进程附加、回执原样带回",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "memory.backup"
+          }
+        }
+      }
+    },
+    "memory.backup.done": {
+      "direction": "toUi",
+      "comment": "备份结果回执。auto=true 表示启动时自动备份（成功不必打扰用户）",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "type": {
+            "const": "memory.backup.done"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "staged": {
+            "type": "boolean"
+          },
+          "target": {
+            "type": "string"
+          },
+          "auto": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "memory.clear": {
+      "direction": "toBrain",
+      "comment": "清空长期记忆。隐私上的底线能力：用户必须能一句话让它忘掉，且要真的从磁盘删除",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "memory.clear"
+          }
+        }
+      }
+    },
+    "memory.query": {
+      "direction": "toBrain",
+      "comment": "记忆管理界面的一站式入口。action 见 MemoryQueryAction；payload 是各操作自己的参数。集中成一个类型是为了新增操作时不用改三处协议定义（漏了会表现为『点了没反应』）",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "action"
+        ],
+        "properties": {
+          "type": {
+            "const": "memory.query"
+          },
+          "action": {
+            "enum": [
+              "list_raw",
+              "search_raw",
+              "raw_context",
+              "list_cherished",
+              "cherished_detail",
+              "cherish",
+              "expand_cherished",
+              "remove_cherished_turn",
+              "update_cherished",
+              "remove_cherished",
+              "list_memory",
+              "remove_memory",
+              "set_memory_level",
+              "fixed_list",
+              "add_fixed",
+              "remove_fixed",
+              "stats"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          },
+          "requestId": {
+            "type": "string",
+            "comment": "由主进程附加（见 index.ts 的 requestFromBrain），回执原样带回。⚠️ 字段名必须是 requestId —— 曾写成 reqId 导致每次超时"
+          }
+        }
+      }
+    },
+    "memory.result": {
+      "direction": "toUi",
+      "comment": "记忆管理的回执。ok=false 时看 message；items 的类型由 action 决定",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "ok",
+          "action"
+        ],
+        "properties": {
+          "type": {
+            "const": "memory.result"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "action": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array"
+          },
+          "newId": {
+            "type": "number"
+          },
+          "stats": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "pet.emotion": {
+      "direction": "toUi",
+      "comment": "情绪状态三维度，驱动立绘表情与后续行为",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "state"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.emotion"
+          },
+          "state": {
+            "type": "object",
+            "properties": {
+              "energy": {
+                "type": "number"
+              },
+              "mood": {
+                "type": "number"
+              },
+              "intimacy": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "pet.mouth": {
+      "direction": "toUi",
+      "comment": "P3 语音口型用；P0 阶段即可发送供立绘做占位动效",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "id",
+          "envelope"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.mouth"
+          },
+          "id": {
+            "type": "string"
+          },
+          "envelope": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+    "pet.observe": {
+      "direction": "toUi",
+      "comment": "P4 屏幕理解结果；P0 只定义不放实现",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "scene"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.observe"
+          },
+          "scene": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "freshness": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "pet.say.delta": {
+      "direction": "toUi",
+      "comment": "流式增量文本，前端追加即可。这是低延迟体验的核心",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "id",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.say.delta"
+          },
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "pet.say.end": {
+      "direction": "toUi",
+      "comment": "发言结束，可带完整文本供前端校准",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.say.end"
+          },
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "done",
+              "interrupted",
+              "error"
+            ]
+          }
+        }
+      }
+    },
+    "pet.say.start": {
+      "direction": "toUi",
+      "comment": "一条宠物发言开始",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.say.start"
+          },
+          "id": {
+            "type": "string"
+          },
+          "emotion": {
+            "enum": [
+              "neutral",
+              "happy",
+              "curious",
+              "sleepy",
+              "annoyed",
+              "excited"
+            ]
+          },
+          "priority": {
+            "enum": [
+              "low",
+              "normal",
+              "high"
+            ]
+          }
+        }
+      }
+    },
+    "pet.thinking": {
+      "direction": "toUi",
+      "comment": "开始生成，前端点亮思考态",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "id"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.thinking"
+          },
+          "id": {
+            "type": "string"
+          },
+          "replyTo": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ready": {
+      "direction": "toUi",
+      "comment": "sidecar 就绪，回报实际生效的提供者与人格，前端据此显示状态",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "protocolVersion",
+          "brain",
+          "persona"
+        ],
+        "properties": {
+          "type": {
+            "const": "ready"
+          },
+          "protocolVersion": {
+            "type": "number"
+          },
+          "brain": {
+            "type": "string"
+          },
+          "persona": {
+            "type": "string"
+          },
+          "activity": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "system.error": {
+      "direction": "toUi",
+      "comment": "任何模块出错都走这条，前端统一提示，避免静默失败",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "message"
+        ],
+        "properties": {
+          "type": {
+            "const": "system.error"
+          },
+          "level": {
+            "enum": [
+              "info",
+              "warn",
+              "error"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "where": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tts.result": {
+      "direction": "toBrain",
+      "comment": "语音合成的回执（**由 Python 处理**）。pcm 是 base64 的裸 PCM（16bit 单声道 16kHz），已由主进程剥掉 WAV 头并重采样。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "seq",
+          "ok"
+        ],
+        "properties": {
+          "type": {
+            "const": "tts.result"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "pcm": {
+            "type": "string"
+          },
+          "sampleRate": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "tts.synthesize": {
+      "direction": "toMain",
+      "comment": "语音合成请求（Python 发起，**由主进程执行**）。本地 SAPI 合成必须由主进程起 PowerShell —— 实测 Python 起的拿不到 SAPI 音色（Voice.Name 为空）、Node 起的可以；生产里 Electron 就是父进程。方向是 toMain：Python -> 主进程，不进渲染层。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "seq",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "const": "tts.synthesize"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          },
+          "rate": {
+            "type": "number"
+          },
+          "volume": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "user.interrupt": {
+      "direction": "toBrain",
+      "comment": "用户打断当前生成（对应后续语音插话）",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "user.interrupt"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "user.poke": {
+      "direction": "toBrain",
+      "comment": "手动戳一下：跳过意愿评估与冷却，立刻让宠物主动说一句。既是功能（我想听它说话），也是验证自主链路最直接的手段",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "user.poke"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "user.text": {
+      "direction": "toBrain",
+      "comment": "用户打字输入，P0 阶段的唯一输入通道",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "const": "user.text"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "voice.control": {
+      "direction": "toBrain",
+      "comment": "开关麦克风采集。前端开启后才推送音频帧（二进制通道）",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "enabled"
+        ],
+        "properties": {
+          "type": {
+            "const": "voice.control"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "voice.ptt": {
+      "direction": "toBrain",
+      "comment": "按住说话的句子边界（用户要求「按下按键发声，停下结束」）。start 打开采集闸门；end 关闸门并主动收尾送去识别",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "phase"
+        ],
+        "properties": {
+          "type": {
+            "const": "voice.ptt"
+          },
+          "phase": {
+            "enum": [
+              "start",
+              "end"
+            ]
+          }
+        }
+      }
+    },
+    "voice.say": {
+      "direction": "toMain",
+      "comment": "让宠物读一句话（设置页「文字转语音」的试听按钮）。刻意走真实链路（sidecar 的 VoiceSession.speak()），这样试听成功就等于宠物真能出声 —— 本地 SAPI 在主进程里能枚举音色却取不到，直接在主进程合成会得出误导性结论。方向是 toMain：Python -> 主进程。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "text"
+        ],
+        "properties": {
+          "type": {
+            "const": "voice.say"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "web.browser.fetch": {
+      "direction": "toMain",
+      "comment": "浏览器兜底读网页 —— 请求（2026-10-13 用户要求）。起点中文网全站返回 WAF 挑战（x-waf-captcha-referer + probe.js），纯 HTTP 客户端过不去，但 Chromium 能过 —— 而这个项目本来就是 Electron，所以由主进程开一个隐藏窗口去读（实测拿到 22,161 字正文 + 真标题）。方向 toMain：Python -> 主进程，不进渲染层；回执见 web.browser.result。⚠️ 默认关闭（tools.browser_fallback）—— 走浏览器等于以用户的身份浏览。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "url",
+          "requestId"
+        ],
+        "properties": {
+          "type": {
+            "const": "web.browser.fetch"
+          },
+          "url": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "timeoutMs": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "web.browser.result": {
+      "direction": "toMainReply",
+      "comment": "浏览器兜底的回执（**由 Python 处理**）。metas 里含 og:* —— 那是站点自己生成的结构化数据。实测起点书页的 og:novel:* 直接给出作者/分类/状态/最新章节，比从两万字正文里正则抠可靠得多，也短得多。⚠️ 失败也必须回，而且要带 reason：不回的话 Python 只能等超时（20 秒），而含糊的失败会让模型编造页面内容（这个项目里栽过一次）。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "requestId",
+          "ok"
+        ],
+        "properties": {
+          "type": {
+            "const": "web.browser.result"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "finalUrl": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "metas": {
+            "type": "object"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "elapsedMs": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "voice.tts_failed": {
+      "direction": "toMain",
+      "comment": "TTS 合成失败（2026-10-15）。方向 toMain：Python -> 主进程，不进渲染层。主进程据此把 ttsHealthy 置 false，让沉浸模式降级显示文字。为什么需要：用户报「发不了声音 + 回复不了信息」，根因是沉浸模式按「TTS 配置开着」判断有没有语音，而实际合成 403 失败了 —— 文字被主动隐藏、语音又没有，两头都收不到。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "voice.tts_failed"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "vision.snap": {
+      "direction": "toBrain",
+      "comment": "「截图对话」请求（2026-10-17 用户要求）：主进程 -> Python，要它立刻抓一张屏、看懂、把注意力拉到用户身上、顺着画面开口。⚠️ 抓屏与看图的**实现全在 Python 侧**（screen_chat.py），这条消息只带一个 requestId；不把图片塞进协议是刻意的 —— 一张 768px 的 PNG 有 90~400KB，而协议上行的总闸门是 256KB（parse_incoming 的 DoS 保护），塞进去会直接被拒。图片从采集到送模型全程在 sidecar 内存里，不落盘。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "vision.snap"
+          },
+          "requestId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "vision.snap.done": {
+      "direction": "toMain",
+      "comment": "「截图对话」回执（Python -> 主进程）。主进程用 requestFromBrain 等它，按 requestId 匹配。⚠️ 失败也必须回，而且必须带 message：不回的话主进程只能等 60 秒超时，用户看到的是「看图超时」而不是「被隐私规则挡住了」—— 那种含糊的失败会让人去怀疑模型坏了。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "ok"
+        ],
+        "properties": {
+          "type": {
+            "const": "vision.snap.done"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          },
+          "elapsed_ms": {
+            "type": "number"
+          },
+          "titles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "activity.tier": {
+      "direction": "toMain",
+      "comment": "活泼度档位**到期回落**（Python -> 主进程，2026-10-17）。如「自言自语」待满 20 分钟回到「安静」。主进程据此更新菜单显示与内存里的 activity；⚠️ **不写** persona.yaml —— 活泼度是运行时状态，写文件就成了它半夜自己改配置。"
+    },
+    "modules.query": {
+      "direction": "toBrain",
+      "comment": "查询模块开关状态。requestId 由主进程补，用来等 modules.state 回执。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "const": "modules.query"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "modules.set": {
+      "direction": "toBrain",
+      "comment": "试切一个模块（先热切、成功才落盘，见 index.ts 的 settings:set-module）。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "name",
+          "enabled"
+        ],
+        "properties": {
+          "type": {
+            "const": "modules.set"
+          },
+          "name": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "modules.state": {
+      "direction": "toUi",
+      "comment": "模块状态回执。changed 是这次真正执行的副作用；restartRequired 是必须重启才生效的模块",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "ok",
+          "modules"
+        ],
+        "properties": {
+          "type": {
+            "const": "modules.state"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "modules": {
+            "type": "array"
+          },
+          "changed": {
+            "type": "object"
+          },
+          "restartRequired": {
+            "type": "array"
+          }
+        }
+      }
+    }
+  }
+}

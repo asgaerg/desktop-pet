@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      自绘右键菜单的宿主页面（2026-10-14）。
+
+      ## 为什么必须是**独立的无边框透明窗口**
+
+      原先是 Electron 的原生菜单（`Menu.popup()`），而
+      `MenuItemConstructorOptions` 的 20 个属性里**一个都不是样式** ——
+      原生菜单做不出设计稿的样子。所以只能在透明无边框窗里自己画。
+
+      ## 这个页面**只负责画**，不自己决定菜单长什么样
+
+      菜单结构（有哪些项、层级、勾选、置灰、图标名）唯一的真相源是
+      `src/main/petMenuTemplate.ts`，由主进程把
+      `buildPetMenuTemplate()` 的结果通过 `menu:show` 推过来。
+
+      这样改菜单只改一处 —— 而不是"主进程一份 + 渲染层再抄一份"。
+      （同一份菜单在两个进程各写一遍，结局一定是两边慢慢漂移，
+        而且漂移了不报错。）
+
+      ## CSP
+
+      · `img-src 'self' data:` —— 图标是 `mask-image` 的 data URI
+        （**mask-image 属于 CSS 图像，受 img-src 管**，不写就会被拦掉，
+         表现是"图标全都不显示"，而控制台只有一行 CSP 警告）。
+      · `style-src 'self' 'unsafe-inline'` —— 面板的位置/尺寸是算出来之后
+        逐帧写进 `style` 的（布局要靠实测尺寸，不能写死在 CSS 里）。
+      · 这里不发任何网络请求。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>宠物菜单</title>
+    <link rel="stylesheet" href="petMenu.icons.css" />
+    <link rel="stylesheet" href="petMenu.css" />
+  </head>
+  <body>
+    <!--
+      所有面板都挂在这里。第一层（`data-level="0"`）是主菜单，
+      子菜单（`data-level="1"`）是**同一个窗口里**的浮出面板 ——
+      与原生菜单的弹出式子菜单对齐，但样式完全可控。
+
+      ⚠️ 面板由脚本生成（结构来自主进程），所以这里是个空容器。
+    -->
+    <div id="root"></div>
+
+    <!--
+      ⚠️ 用**普通脚本**而不是 `type="module"`：
+      这个页面只做"渲染 + 报点击"，没有任何 import；
+      而模块脚本一旦解析失败是**整个脚本不执行**（界面空白且不报错）。
+      少一层模块机制就少一类"静默全废"的故障。
+    -->
+    <script src="petMenu.js"></script>
+  </body>
+</html>

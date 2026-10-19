@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP：与设置页同一套。`connect-src 'none'` 是有意的 ——
+      这个页面**不联网**，所有数据来自主进程（IPC）。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>桌面宠物 · 记忆管理</title>
+    <link rel="stylesheet" href="memory.css" />
+  </head>
+  <body>
+    <!--
+      布局：顶部标题栏 + 标签页 + 工具栏 + 表格 + 分页。
+
+      用户要求「三页可以参考图书管理等系统的 ui，方便显示数据与信息」——
+      图书管理系统的典型形态就是**表格式**：一行一条记录、列对齐、
+      工具栏带搜索与操作、底部分页。表格的好处是"一屏能看到多少条"
+      以及"同一列能纵向扫读"，这正是记忆管理要的。
+    -->
+    <header class="top">
+      <h1>记忆管理</h1>
+      <div class="stats" id="stats"></div>
+    </header>
+
+    <!--
+      五个标签页。顺序：原文 / 珍藏 / 检索层 / 记忆压缩 / 固定注入。
+      「检索层」与「记忆压缩」是 2026-10-05 按用户要求新增的：
+        · 检索层   —— 固定提炼过的文本/图片**进固定注入提示词**的入口
+        · 记忆压缩 —— 处理检索层里的**重复性**（独属于检索层的精简功能）
+    -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="raw">原文记忆</button>
+      <button class="tab" data-tab="cherished">珍藏记忆</button>
+      <button class="tab" data-tab="memory">检索层</button>
+      <button class="tab" data-tab="compress">记忆压缩</button>
+      <button class="tab" data-tab="fixed">固定注入提示词</button>
+    </nav>
+
+    <main>
+      <!-- ==================== ① 原文记忆管理 ==================== -->
+      <section id="tab-raw" class="panel active">
+        <p class="lead">
+          <strong>一字不改的全部对话</strong>，永远不会被淘汰，也不参与检索。
+          在下面找到想说点什么的那一段，点「珍藏」把它永久留下来。
+        </p>
+
+        <div class="toolbar wrap">
+          <input id="raw-search" type="text" placeholder="搜索原文内容…" />
+          <button id="raw-search-btn" class="btn primary">搜索</button>
+          <button id="raw-reset-btn" class="btn">重置</button>
+          <label class="inline-check">
+            <input id="raw-only-user" type="checkbox" />
+            只看我说的
+          </label>
+          <label class="inline-check">
+            <input id="raw-only-pet" type="checkbox" />
+            只看宠物说的
+          </label>
+        </div>
+
+        <!--
+          时间范围（用户要求：「原文记忆加入时间搜索，方便通过时间查询」）。
+          用 `<input type="date">` 而不是自己造日历：日期选择器是系统原生控件，
+          用户熟悉，而且自带"这个月哪天"的直观感。
+          ⚠️ 值是**本地日期**（`YYYY-MM-DD`），提交时要转成当天 00:00 / 23:59:59
+          —— 只传日期字符串的话，`until` 会变成那天 0 点，整天都查不到。
+        -->
+        <div class="toolbar wrap">
+          <span class="muted">时间范围</span>
+          <input id="raw-since" type="date" />
+          <span class="muted">至</span>
+          <input id="raw-until" type="date" />
+          <button id="raw-range-btn" class="btn">按时间查</button>
+          <button id="raw-today-btn" class="btn">今天</button>
+          <button id="raw-week-btn" class="btn">最近 7 天</button>
+          <button id="raw-refresh" class="btn">刷新</button>
+          <span class="spacer"></span>
+          <span class="count" id="raw-count"></span>
+        </div>
+
+        <!--
+          多选与批量珍藏（用户要求：「可以勾选一条或多条对话进去」）。
+          这一条只在**勾了至少一条**时显示，"操作栏出现/消失"本身
+          就是一种状态反馈。
+        -->
+        <div class="toolbar wrap selbar" id="raw-selbar" hidden>
+          <span class="count" id="raw-selcount"></span>
+          <button id="raw-cherish-sel" class="btn primary">珍藏选中的</button>
+          <span class="muted">上下文</span>
+          <input id="raw-ctx-before" class="tiny-num" type="number" min="1" max="100" value="5" />
+          <span class="muted">↑</span>
+          <input id="raw-ctx-after" class="tiny-num" type="number" min="1" max="100" value="5" />
+          <span class="muted">↓</span>
+          <button id="raw-ctx-btn" class="btn">展开上下文</button>
+          <button id="raw-sel-clear" class="btn">取消选择</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th class="c-check"><input id="raw-check-all" type="checkbox" /></th>
+                <th class="c-id">#</th>
+                <th class="c-time">时间</th>
+                <th class="c-who">说话者</th>
+                <th class="c-text">内容</th>
+                <th class="c-act">操作</th>
+              </tr>
+            </thead>
+            <tbody id="raw-body"></tbody>
+          </table>
+        </div>
+
+        <div class="pager">
+          <button id="raw-prev" class="btn" disabled>← 更新</button>
+          <button id="raw-next" class="btn" disabled>更早 →</button>
+          <span class="muted" id="raw-page"></span>
+        </div>
+      </section>
+
+      <!-- ==================== ② 珍藏记忆管理 ==================== -->
+      <section id="tab-cherished" class="panel">
+        <p class="lead">
+          <strong>永久保留</strong>的片段，不受时间窗口影响。
+          它们可以「固定注入」—— 勾上的每次对话都会带上
+          （所以别太多，会很占提示词）。
+        </p>
+
+        <div class="toolbar">
+          <button id="cher-new" class="btn">手动新建…</button>
+          <button id="cher-refresh" class="btn">刷新</button>
+          <span class="spacer"></span>
+          <span class="count" id="cher-count"></span>
+        </div>
+
+        <div id="cher-new-form" class="new-form hidden">
+          <input id="cher-new-title" type="text" placeholder="标题（可留空）" />
+          <textarea id="cher-new-text" rows="4" placeholder="要珍藏的内容…"></textarea>
+          <div class="row">
+            <label class="inline-check">
+              <input id="cher-new-pinned" type="checkbox" checked />
+              固定注入
+            </label>
+            <button id="cher-new-save" class="btn primary">保存</button>
+            <button id="cher-new-cancel" class="btn">取消</button>
+            <span class="muted" id="cher-new-state"></span>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th class="c-id">#</th>
+                <th class="c-time">时间</th>
+                <th class="c-title">标题</th>
+                <th class="c-text">内容</th>
+                <th class="c-turns">轮数</th>
+                <th class="c-pin">固定注入</th>
+                <th class="c-act">操作</th>
+              </tr>
+            </thead>
+            <tbody id="cher-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ==================== ③ 检索层 ==================== -->
+      <!--
+        用户要求（2026-10-05）：「记忆管理新增检索层 tab 页面，可以手动像原文记忆
+        一样手动**固定提炼过后的文本或图片**加入固定注入提示词」
+
+        所以这个 tab 的**主要职责**是"挑选 -> 固定注入"，
+        ⚠️ 不是新增/编辑条目（那是用户明确没选的）。
+      -->
+      <section id="tab-memory" class="panel">
+        <p class="lead">
+          <strong>提炼过的事实</strong>——唯一参与检索的一层。
+          在这里挑出 AI 或你的<strong>喜好与习惯</strong>，点「固定」让它每次都注入。
+          被压缩过的条目也可以在这里<strong>还原</strong>。
+        </p>
+
+        <!--
+          批量操作栏（用户要求「检索层加入可删除的功能…可多选删除」）。
+          默认 hidden，选中至少一条才出现 —— 与原文 tab 的选中栏同一个形态。
+        -->
+        <div id="mem-selbar" class="selbar" hidden>
+          <span id="mem-selcount" class="muted">已选中 0 条</span>
+          <button id="mem-del-selected" class="btn danger">真删选中的</button>
+          <button id="mem-sel-clear" class="btn">取消选择</button>
+          <span class="muted tiny">
+            真删 = 连同向量与索引一起清掉，<strong>不可还原</strong>（与「压缩」不同）
+          </span>
+        </div>
+
+        <div class="toolbar wrap">
+          <input id="mem-search" type="text" placeholder="搜索检索层内容…" />
+          <button id="mem-search-btn" class="btn primary">搜索</button>
+          <button id="mem-reset-btn" class="btn">重置</button>
+          <label class="inline-check">
+            <input id="mem-level-fixed" type="checkbox" />
+            只看已固定
+          </label>
+          <label class="inline-check">
+            <input id="mem-show-merged" type="checkbox" />
+            显示已压缩
+          </label>
+        </div>
+        <div class="toolbar wrap">
+          <span class="muted">时间范围</span>
+          <input id="mem-since" type="date" />
+          <span class="muted">至</span>
+          <input id="mem-until" type="date" />
+          <button id="mem-range-btn" class="btn">按时间查</button>
+          <span class="muted">来源</span>
+          <select id="mem-src">
+            <option value="">全部</option>
+            <option value="fact">提炼</option>
+            <option value="phrase">常说的话</option>
+            <option value="habit">习惯</option>
+            <option value="persona">人设</option>
+          </select>
+        </div>
+
+        <div class="countbar">
+          <span id="mem-count" class="muted"></span>
+          <span id="mem-page" class="muted"></span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="grid">
+            <thead>
+              <tr>
+                <!-- 勾选列（多选真删用）—— 表头是全选 -->
+                <th class="c-check"><input id="mem-check-all" type="checkbox" /></th>
+                <th class="col-time">时间</th>
+                <th class="col-kind">类型</th>
+                <th>内容</th>
+                <th class="col-hits">命中</th>
+                <th class="col-state">状态</th>
+                <th class="col-act">操作</th>
+              </tr>
+            </thead>
+            <tbody id="mem-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ==================== ④ 记忆压缩 ==================== -->
+      <!--
+        用户要求（2026-10-05）：「记忆压缩是独属于检索层的精简功能，单开一页」
+        三种策略：手动审核 / 相似度自动 / AI 合并。
+        ⚠️ 核心是**重复性**（琐事和常说的话挤占召回），不是体积。
+        ⚠️ 不删只标记 —— 被压的可在此页还原。
+      -->
+      <section id="tab-compress" class="panel">
+        <p class="lead">
+          检索层里<strong>同一个意思被反复记住</strong>的条目，会挤占每次检索的名额。
+          这里把它们找出来，<strong>标记</strong>成一条代表（<strong>不删除</strong>，随时可还原）。
+        </p>
+
+        <div class="compress-bar">
+          <label class="inline-check">
+            相似度阈值
+            <!-- 用户指定：0.5~1 可更改，用输入框 -->
+            <input id="cmp-threshold" type="number" class="tiny-num"
+                   min="0.5" max="1" step="0.05" value="0.75" />
+          </label>
+          <button id="cmp-scan-btn" class="btn primary">扫描重复</button>
+          <span class="muted" id="cmp-status"></span>
+        </div>
+
+        <div class="compress-bar">
+          <label class="inline-check">
+            <input type="radio" name="cmp-mode" value="keep" checked />
+            保留代表条
+          </label>
+          <label class="inline-check">
+            <input type="radio" name="cmp-mode" value="ai" />
+            AI 合并成一条
+          </label>
+          <button id="cmp-apply-btn" class="btn" disabled>压缩勾选的组</button>
+        </div>
+
+        <!--
+          AI 合并的自定义提示词（用户要求）：
+          「ai 合并搞个提示词输入框，可以让用户自己写提示词让 ai 处理压缩数据」
+          留空则用内置默认。
+        -->
+        <details id="cmp-prompt-box" class="prompt-box">
+          <summary>AI 合并提示词（留空用默认）</summary>
+          <textarea id="cmp-prompt" rows="4"
+            placeholder="留空则用内置默认：把同一意思的多种说法合并成一条简洁完整的陈述"></textarea>
+        </details>
+
+        <div id="cmp-groups" class="cards"></div>
+
+        <h3 class="section-title">
+          已压缩
+          <span class="muted" id="cmp-merged-count"></span>
+          <button id="cmp-undo-all" class="btn tiny">全部还原</button>
+        </h3>
+        <div class="table-wrap short">
+          <table class="grid">
+            <thead>
+              <tr>
+                <th class="col-time">压缩于</th>
+                <th>内容</th>
+                <th>已并入</th>
+                <th class="col-act">操作</th>
+              </tr>
+            </thead>
+            <tbody id="cmp-merged-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ==================== ⑤ 固定注入提示词 ==================== -->
+      <section id="tab-fixed" class="panel">
+        <p class="lead">
+          每次对话都会<strong>无条件带上</strong>的内容 —— 适合放宠物的人设、
+          它的口头禅、你的固定习惯。左边搜原文找到那些反复出现的说法，
+          点「固定」加进来。
+        </p>
+
+        <div class="two-col">
+          <!-- 左：搜原文找候选 -->
+          <div class="col">
+            <h2>从原文里找</h2>
+            <div class="toolbar wrap">
+              <input id="fix-search" type="text" placeholder="搜关键词，比如「诶」「嗯」「我觉得」…" />
+              <button id="fix-search-btn" class="btn primary">搜索</button>
+            </div>
+            <div class="toolbar wrap">
+              <label class="inline-check">
+                <input id="fix-only-pet" type="checkbox" checked />
+                只看宠物说的
+              </label>
+              <label class="inline-check">
+                <input id="fix-only-user" type="checkbox" />
+                只看我说的
+              </label>
+            </div>
+            <div class="table-wrap short">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th class="c-who">谁</th>
+                    <th class="c-text">原文片段</th>
+                    <th class="c-act">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="fix-body"></tbody>
+              </table>
+            </div>
+            <p class="muted" id="fix-state">在上面输入关键词开始搜索。</p>
+          </div>
+
+          <!-- 右：已加入固定注入的清单 -->
+          <div class="col">
+            <h2>
+              已固定注入 <span class="count" id="fixed-count"></span>
+              <button id="fixed-refresh" class="btn mini">刷新</button>
+            </h2>
+            <div class="table-wrap short">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th class="c-text">内容</th>
+                    <th class="c-act">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="fixed-body"></tbody>
+              </table>
+            </div>
+            <p class="muted" id="fixed-state"></p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!--
+      ==================== 复现窗口（用户要求：微信聊天窗口） ====================
+
+      点一条珍藏 -> 用聊天窗口把它的几轮对话复现出来。
+
+      ## 为什么做成浮层而不是跳到另一个页面
+
+      复现是"看一眼"的动作，看完就关。跳页面会丢掉列表的滚动位置
+      （用户刚翻了半天才找到这条），回来还得再找一遍。
+
+      ## ⚠️ 为什么放在 `</main>` **外面**
+
+      它是 `position: fixed` 的整屏遮罩，逻辑上不属于任何一个面板。
+      放进 `<main>` 里会被面板的 `display: none / flex` 牵连
+      （实测：放在珍藏面板里时，一旦切到别的 tab 浮层就跟着消失），
+      而且 `main` 的 padding 会让遮罩算错覆盖范围。
+
+      ## 为什么是微信的样子
+
+      用户原话：「对话窗口用微信聊天的窗口做，简洁干净」。
+      微信聊天的关键特征（这里逐条落实）：
+        · 自己的话在**右**、对方在**左**；
+        · 气泡圆角、颜色区分（自己绿/对方灰），同一侧连续气泡收紧间距；
+        · 时间戳居中显示为一条淡淡的灰字；
+        · 没有多余边框和装饰，"内容本身"占满视野。
+    -->
+    <div id="replay" class="modal" hidden>
+        <div class="modal-box">
+          <header class="modal-head">
+            <div>
+              <h2 id="replay-title">珍藏回忆</h2>
+              <span class="muted" id="replay-meta"></span>
+            </div>
+            <div class="row">
+              <button id="replay-voice" class="btn" title="朗读这段回忆">🔊 朗读</button>
+              <button id="replay-close" class="btn">关闭</button>
+            </div>
+          </header>
+          <div class="chat" id="replay-chat"></div>
+          <footer class="modal-foot">
+            <span class="muted">上下文</span>
+            <input id="replay-before" class="tiny-num" type="number" min="0" max="100" value="5" />
+            <span class="muted">↑</span>
+            <input id="replay-after" class="tiny-num" type="number" min="0" max="100" value="5" />
+            <span class="muted">↓</span>
+            <button id="replay-expand" class="btn primary">扩充进来</button>
+            <span class="spacer"></span>
+            <span class="muted" id="replay-state"></span>
+          </footer>
+        </div>
+      </div>
+
+    <script type="module" src="memory.js"></script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "desktop-pet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "桌面 AI 宠物：Electron 外壳 + Python 大脑 sidecar（序列帧立绘）",
+  "scripts": {
+    "start": "node scripts/launch.mjs",
+    "dev": "node scripts/launch.mjs --dev --build",
+    "build": "npm --prefix apps/desktop run build",
+    "test": "npm --prefix apps/desktop run test",
+    "test:e2e": "npm --prefix apps/desktop run test:e2e",
+    "test:brain": "cd apps/brain && python -m pet --selftest",
+    "avatar": "npm --prefix apps/desktop run avatar",
+    "brain": "cd apps/brain && python -m pet",
+    "check:config": "cd apps/brain && python -m pet --check-config",
+    "check:vision": "cd apps/brain && python -m pet --vision-test"
+  }
+}

@@ -1,0 +1,99 @@
+# electron-builder 配置 —— 在线版（不含语音模型，安装包小）
+#
+# 用法（在 apps/desktop 下）：
+#   npx electron-builder --win --config electron-builder.online.yml
+#
+# ## 布局约定（和主进程的三个根一一对应，见 src/main/index.ts）
+#
+#   APP_ROOT  = process.resourcesPath
+#     ├─ config/                      默认配置（首启复制到 %APPDATA%）
+#     ├─ pet/pet.exe                  冻结的 sidecar（onedir）
+#     ├─ pet/websearch-mcp.exe        联网搜索后端
+#     └─ apps/desktop/pet-data/vendor  cppjieba 词典（只读）
+#
+#   DATA_DIR  = %APPDATA%\<productName>\pet-data      日志/数据库/备份/模型
+#   CONFIG_ROOT = %APPDATA%\<productName>              persona.yaml 会被写，不能放 Program Files
+#
+# 渲染层（src/renderer，53MB 立绘素材）走 **asar 内** 的 files，
+# 因为 assets.ts 的 resolveRendererPage 是从 dist 往上找 `../src/renderer`。
+
+appId: com.tianyi.desktop-pet
+productName: DesktopPet
+copyright: Copyright © 2026 tianyi
+
+# 本机已经装好 electron（node_modules/electron/dist 里有 version 文件），
+# 直接用它，避免 builder 再去下载 electron zip（这个环境连不上外网 CDN）
+electronDist: node_modules/electron/dist
+
+directories:
+  output: ../../release
+  buildResources: build
+
+# 只打必要文件；node_modules 里的 electron/esbuild 由 builder 自己排除
+files:
+  - dist/**
+  - src/renderer/**
+  # 托盘/窗口图标（tray.ts 找 dist/../assets/tray.ico）。
+  # 不带上就退回代码画的橙色圆脸 —— 2026-10-19 用户看到的"图标还是以前的"就是它。
+  - assets/tray.ico
+  - assets/pet.ico
+  - package.json
+
+# asar 里的东西读得到、写不了 —— 所以"会被写"的一律走 extraResources
+extraResources:
+  - from: ../../config
+    to: config
+  - from: ../brain/dist/pet
+    to: pet
+  - from: ../brain/pet/websearch-mcp.exe
+    to: pet/websearch-mcp.exe
+  # 运行时会被调用的 PowerShell 脚本（全屏检测、TTS）—— 漏了会每 1 秒报一次警告
+  # 只带运行时真正会调的脚本（整目录搬会把开发脚本/备份也带进去）
+  - from: tools/probe-fullscreen.ps1
+    to: apps/desktop/tools/probe-fullscreen.ps1
+  - from: tools/probe-key.ps1
+    to: apps/desktop/tools/probe-key.ps1
+  - from: tools/win-tts.ps1
+    to: apps/desktop/tools/win-tts.ps1
+  - from: pet-data/vendor
+    to: apps/desktop/pet-data/vendor
+    # ⚠️ 只带**资源**，绝不带数据（2026-10-18 发现过一次泄漏）：
+    # `vendor/simple/libsimple-windows-x64/mig-19negrr1/t.db` 是 10-06 那次
+    # "DB 路径按 cwd 算"的 bug 留在词典目录里的**旧记忆库**（437 轮对话）。
+    # 整个 vendor 目录照搬就会把它一起打进去。所以这里显式排除一切数据文件。
+    filter:
+      - '**/*'
+      - '!**/mig-*/**'
+      - '!**/*.db'
+      - '!**/*.db-wal'
+      - '!**/*.db-shm'
+      - '!**/*.log'
+  # 本地语义嵌入模型（91MB）：不带它会退化成哈希嵌入，检索质量明显变差
+  - from: pet-data/models
+    to: apps/desktop/pet-data/models
+
+win:
+  # 必须让 builder 改 exe 资源（rcedit），否则图标只进安装包、DesktopPet.exe 还是 Electron 默认图标。
+  # 它需要 winCodeSign（第一次会下载，之后走 %LOCALAPPDATA%\electron-builder\Cache）。
+  signAndEditExecutable: true
+  # 没有代码签名证书：设 CSC_IDENTITY_AUTO_DISCOVERY=false 跳过签名，只做资源编辑
+  # 应用图标：由 tools/make-app-icon.py 从立绘帧生成（buildResources 目录 = apps/desktop/build）
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false                     # 给用户选择安装目录的机会
+  perMachine: false                   # 装到 %LOCALAPPDATA%，不需要管理员
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 桌宠
+  # ⚠️ 不要自定义 installerIcon / uninstallerIcon（2026-10-18 安装报错后改回）：
+  # NSIS 会把 uninstallerIcon.ico 写进**安装目录**（INSTDIR），
+  # 在桌面 / OneDrive 这类被同步或杀软盯着的目录里会直接失败：
+  #   「不能打开要写入的文件：...\DesktopPet\uninstallerIcon.ico」
+  # 去掉之后这两个文件根本不会落地；exe 和安装包的图标由 win.icon 负责，不受影响。
+  artifactName: DesktopPet-${version}-online-setup.${ext}

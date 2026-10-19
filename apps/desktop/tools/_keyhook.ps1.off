@@ -1,0 +1,350 @@
+﻿# Low-level keyboard hook (WH_KEYBOARD_LL) -- reports BOTH key-down and key-up.
+#
+# ## Why this file exists (2026-10-10)
+#
+# The user asked for press-and-hold push-to-talk: "listen for keydown and keyup".
+# Neither of the two approaches tried before can do that in this environment:
+#
+#   * `globalShortcut.register` -- **press only, never release**, and a bare
+#     modifier key (right Ctrl / right Alt) is not even expressible as an
+#     accelerator.
+#   * `probe-key.ps1` polling `GetAsyncKeyState` -- on this machine the user
+#     pressed many times over 180 seconds with the loop verifiably running
+#     (heartbeat), and **zero DOWN events** arrived.
+#
+# A low-level keyboard hook is event driven, so it delivers the release too.
+#
+# ## TWO traps that both look like "the hook stopped working"
+#
+# ### Trap 1 -- the delegate gets collected (the reason this project avoided hooks)
+#
+# Fixed by keeping the delegate in a static field AND pinning it with a
+# `GCHandle`. Without both, Windows calls back into a freed thunk and the hook
+# silently does nothing.
+#
+# ### Trap 2 -- SLOW CALLBACK, and Windows silently unhooks you (found 2026-10-10)
+#
+# Windows requires a low-level keyboard callback to return within a few
+# milliseconds. If it does not, **Windows removes the hook without notifying
+# anyone**. Measured symptom:
+#
+#     14:30:09.894  DOWN 163        <- user pressed, hook delivered it
+#     ... 150+ auto-repeat DOWNs over 5 seconds ...
+#     14:30:15.025  UP 163          <- release delivered, recognition succeeded
+#     ---- from here on ----
+#     TICK keeps flowing (134 of them, message loop provably alive)
+#     but **NOT ONE further key event**, for 3+ minutes of user presses
+#
+# The message loop was alive; the hook was gone. The callback was doing
+# `StreamWriter.WriteLine` + `Flush` -- **disk I/O inside the callback** --
+# and the auto-repeat flood made it too slow.
+#
+# The fix is the classic one: the callback only deposits into an in-memory
+# queue, and a **separate thread** does the file I/O.
+#
+# ## Third issue: auto-repeat
+#
+# Holding a key makes Windows send repeated key-downs. The old callback
+# reported every one (150+ lines for a single 5-second hold). Now a `_isDown`
+# flag emits exactly one DOWN per physical press and one UP on release.
+#
+# ## Output protocol (same shape as probe-key.ps1, so the Node side is unchanged)
+#
+#   READY <vk>
+#   DOWN <vk>
+#   UP <vk>
+#   TICK                     (heartbeat, ~3s; proves the message loop is alive)
+#
+# ## ASCII only in this comment block
+#
+# Windows PowerShell 5.1 reads .ps1 as ANSI unless the file has a UTF-8 BOM.
+# Mangling inside a block comment can terminate it early and break the script.
+# Line comments starting at column 0 are safe; block comments are not.
+
+param(
+    [Parameter(Mandatory = $true)][int]$Vk,
+    [string]$OutFile = '',
+    # Diagnostic switch (2026-10-10): disable the periodic hook re-install.
+    # Lets a controlled A/B tell "the rehook broke it" apart from
+    # "the hook never worked in this context".
+    [switch]$NoRehook
+)
+
+$ErrorActionPreference = 'Stop'
+
+$source = @'
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+public static class KeyHook
+{
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYDOWN = 0x0104;
+    private const int WM_SYSKEYUP = 0x0105;
+
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("user32.dll")]
+    private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll")]
+    private static extern bool TranslateMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetTimer(IntPtr hWnd, IntPtr nIDEvent, uint uElapse, IntPtr lpTimerFunc);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    /** How often the timer posts a heartbeat. Re-install happens every 10 ticks. */
+    private const uint HEARTBEAT_MS = 3000;
+    /** WM_TIMER -- the heartbeat message. */
+    private const int WM_TIMER = 0x0113;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public IntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KBDLLHOOKSTRUCT
+    {
+        public uint vkCode;
+        public uint scanCode;
+        public uint flags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    // Both keep the delegate alive: `_proc` stops it becoming garbage,
+    // `_handle` stops the GC moving/collecting the thunk. Trap 1 above.
+    private static LowLevelKeyboardProc _proc;
+    private static GCHandle _handle;
+    private static IntPtr _hook = IntPtr.Zero;
+
+    /*
+     * The callback must NOT do file I/O (Trap 2 above), so it only enqueues.
+     *
+     * A bounded queue is deliberate: if the writer ever falls behind we drop
+     * lines instead of growing without limit. Key transitions are rare enough
+     * that this never happens in practice; the bound exists so a pathological
+     * case (some app spamming the key) cannot eat memory.
+     */
+    private static readonly BlockingCollection<string> _queue =
+        new BlockingCollection<string>(new ConcurrentQueue<string>(), 4096);
+
+    private static uint _wantVk;
+    private static bool _rehook;
+    private static bool _isDown;          // auto-repeat suppression
+    private static Thread _writer;
+    private static StreamWriter _file;
+    private static bool _toConsole;
+
+    private static void Enqueue(string s)
+    {
+        // Never block the callback: TryAdd and move on.
+        try { _queue.TryAdd(s); } catch (Exception) { /* 已关闭 */ }
+    }
+
+    private static void WriterLoop()
+    {
+        try
+        {
+            foreach (string s in _queue.GetConsumingEnumerable())
+            {
+                try
+                {
+                    if (_toConsole)
+                    {
+                        Console.Out.WriteLine(s);
+                        Console.Out.Flush();
+                    }
+                    else
+                    {
+                        _file.WriteLine(s);
+                        _file.Flush();
+                    }
+                }
+                catch (Exception) { /* 写失败不该让线程死掉 */ }
+            }
+        }
+        catch (Exception) { /* GetConsumingEnumerable 在 CompleteAdding 后正常退出 */ }
+    }
+
+    private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            int msg = wParam.ToInt32();
+            KBDLLHOOKSTRUCT data = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+            if (data.vkCode == _wantVk)
+            {
+                bool isDown = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+                bool isUp = (msg == WM_KEYUP || msg == WM_SYSKEYUP);
+                if (isDown && !_isDown)
+                {
+                    _isDown = true;
+                    Enqueue("DOWN " + _wantVk);      // in-memory only, never blocks
+                }
+                else if (isUp && _isDown)
+                {
+                    _isDown = false;
+                    Enqueue("UP " + _wantVk);
+                }
+                // Auto-repeat (isDown while already down) falls through silently.
+            }
+        }
+        return CallNextHookEx(_hook, nCode, wParam, lParam);
+    }
+
+    public static bool Start(uint vk, string outFile, bool rehook)
+    {
+        _wantVk = vk;
+        _rehook = rehook;
+        _isDown = false;
+
+        if (string.IsNullOrEmpty(outFile))
+        {
+            _toConsole = true;
+        }
+        else
+        {
+            _file = new StreamWriter(outFile, false, new UTF8Encoding(false));
+            _file.AutoFlush = true;
+            _toConsole = false;
+        }
+
+        // Writer thread owns ALL file I/O. Started before the hook so READY
+        // can go through the same path.
+        _writer = new Thread(WriterLoop);
+        _writer.IsBackground = true;
+        _writer.Start();
+
+        _proc = HookCallback;
+        _handle = GCHandle.Alloc(_proc);
+
+        if (!Install()) return false;
+
+        Enqueue("READY " + vk);
+
+        SetTimer(IntPtr.Zero, IntPtr.Zero, HEARTBEAT_MS, IntPtr.Zero);
+
+        MSG msg;
+        int ticks = 0;
+        while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+        {
+            if (msg.message == WM_TIMER)
+            {
+                Enqueue("TICK");
+
+                /*
+                 * Periodically RE-INSTALL the hook.
+                 *
+                 * Windows removes a low-level keyboard hook when the callback
+                 * is too slow, and it does **not** notify anyone. Measured:
+                 * after one 5-second press (150+ auto-repeat callbacks), the
+                 * message loop kept running (heartbeat fine) but not a single
+                 * further key event arrived for 3+ minutes of user presses.
+                 *
+                 * There is no API to ask "is my hook still installed?", so the
+                 * only defence is to re-install it periodically. Doing so is
+                 * harmless: the old handle is released first, and the callback
+                 * delegate is reused (still pinned by `_handle`).
+                 *
+                 * 30 seconds is chosen so the worst case is "the first press
+                 * within 30s of a silent removal is missed", while the churn
+                 * stays negligible (~2 calls per minute).
+                 */
+                ticks++;
+                /*
+                 * Re-install is OFF by default (2026-10-10 measured).
+                 *
+                 * Timeline evidence:
+                 *   14:30 build WITHOUT rehook -> user pressed, DOWN/UP arrived,
+                 *         recognition succeeded.
+                 *   14:37 build WITH rehook (every 30s) -> TICK and REHOOK kept
+                 *         flowing, but **zero key events** for minutes of presses.
+                 *
+                 * The only real difference was the periodic re-install, so it is
+                 * the suspect. Pass -Rehook to re-enable it for experiments.
+                 *
+                 * The slow-callback problem it was meant to defend against is now
+                 * handled properly by the queue + writer thread (the callback does
+                 * no I/O at all), which is the actual root cause fix.
+                 */
+                if (_rehook && ticks % 10 == 0)
+                {
+                    if (Refresh())
+                    {
+                        Enqueue("REHOOK");
+                    }
+                }
+                continue;
+            }
+            TranslateMessage(ref msg);
+            DispatchMessage(ref msg);
+        }
+
+        _queue.CompleteAdding();
+        return true;
+    }
+
+    /** Install (or re-install) the hook. Returns false if Windows refused. */
+    private static bool Install()
+    {
+        IntPtr hmod = GetModuleHandle(null);
+        _hook = SetWindowsHookEx(WH_KEYBOARD_LL, _proc, hmod, 0);
+        return _hook != IntPtr.Zero;
+    }
+
+    private static bool Refresh()
+    {
+        if (_hook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_hook);
+            _hook = IntPtr.Zero;
+        }
+        _isDown = false;   // state is meaningless across a re-install
+        return Install();
+    }
+}
+'@
+
+Add-Type -TypeDefinition $source -Language CSharp -ErrorAction Stop
+
+# A low-level keyboard hook requires a message loop on the **same thread** that
+# installed it. `KeyHook.Start` runs that loop, so this call blocks until the
+# process is stopped -- which is what the Node side wants (a long-lived child).
+if (-not [KeyHook]::Start([uint32]$Vk, $OutFile, [bool]$Rehook)) {
+    # Report the reason instead of dying silently: "hook installed but nothing
+    # happens" was the historical failure mode, and it is indistinguishable
+    # from "no key pressed" unless we say something here.
+    $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    Write-Error "SetWindowsHookEx failed (Win32 error $err)"
+    exit 1
+}

@@ -1,0 +1,931 @@
+/*
+ * 桌面宠物 HUD 样式。
+ *
+ * 两条贯穿全部样式的规则：
+ *   1. 背景必须真正透明 —— html/body 都设 transparent，否则透明窗会出现黑底；
+ *   2. 默认 pointer-events: none，只有标记 .interactive 的元素才接收鼠标。
+ *      这是"点击穿透"的渲染侧一半：主进程负责窗口级穿透，这里负责告诉它
+ *      指针何时落在交互区。缺任何一半，宠物要么挡住整个桌面，要么点不动。
+ */
+
+:root {
+  --bg: rgba(28, 26, 38, 0.86);
+  --bg-soft: rgba(40, 37, 54, 0.72);
+  --border: rgba(255, 255, 255, 0.14);
+  --text: #f2eefb;
+  --text-dim: #b9b2cf;
+  --accent: #ffb35c;
+  --accent-strong: #ff9e3d;
+  --ok: #6ee7a8;
+  --warn: #ffd166;
+  --error: #ff7b7b;
+  --radius: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  color: var(--text);
+  /* 整页默认不吃鼠标事件，事件会透给桌面 */
+  pointer-events: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* 只有交互区接收鼠标，并且要显式恢复 cursor 与 user-select */
+.interactive {
+  pointer-events: auto;
+}
+
+#hud {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 10px;
+  gap: 8px;
+  /* 允许拖动窗口：-webkit-app-region 在透明无边框窗上表现不稳，
+     这里保留默认行为，拖动由托盘与快捷键承担 */
+}
+
+/* ------------------------------------------------------------------ 状态 */
+
+/*
+  状态徽标。**不再绝对定位于窗口左上角**（那样离宠物很远、显得"老高"），
+  而是作为输入卡片内部的第一行 —— 也就是"左下角、输入栏上面一点"。
+  这样它随卡片布局，不需要硬算偏移量，卡片大小变了也不会错位。
+*/
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 2px 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: none;
+}
+
+.status[data-level='ok'] .dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.status[data-level='warn'] .dot {
+  background: var(--warn);
+}
+.status[data-level='error'] .dot {
+  background: var(--error);
+  box-shadow: 0 0 6px var(--error);
+}
+
+/* ------------------------------------------------------------------ 舞台 */
+
+.stage {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+}
+
+/*
+ * 文字弹窗（气泡）：显示宠物在**宠物上方**的回应文字。
+ *
+ * ---- 定位方式（这里踩过坑，别改回 flex） ----
+ *
+ * 它**不参与 `.stage` 的 flex 布局**。原因：`.stage` 是
+ * `display:flex; justify-content:flex-end`（把内容压到底部），气泡放进去
+ * 会被挤到 `y = -42`（整个跑到窗口外看不见），但 `box-shadow` 仍往上溢出，
+ * 在窗口顶部形成一条黑色渐变 —— 用户当时看到的就是"顶部出现灰条"。
+ *
+ * 现在用绝对定位贴窗口顶部：
+ *   · `left: 50%` + 自身平移一半 => 水平居中；
+ *   · `--bubble-shift-x` 由 JS 设置，用于**探头时把气泡推回屏幕内侧**
+ *     （用户要求：「当宠物处在探头状态时，文字不要超出屏幕」）。
+ *
+ * 显隐用 `opacity + transform` 过渡（不是 display），这样才能做出
+ * 用户要求的"上一个弹窗动画过渡消失，随后新文字弹窗出现"。
+ */
+.bubble {
+  position: absolute;
+  /*
+   * 定位基准是**底边**，不是顶边。
+   *
+   * 用户要求：「将弹窗底部设置为始终在宠物头上就好了」——
+   * 也就是气泡底边**钉在立绘头顶**，文字变多时**往上长**。
+   *
+   * 所以这里用 `bottom` 而不是 `top`：`--bubble-bottom` 由 JS 按立绘上边距算
+   * （见 app.js 的 updateBubbleBottom），高度无论怎么变，底边都贴着头顶不动。
+   *
+   * 兜底 `100%`（= 贴窗口底）只是个安全值，正常一帧内就会被 JS 覆盖。
+   */
+  bottom: var(--bubble-bottom, 100%);
+  left: 50%;
+  z-index: 3;
+  /*
+   * 尺寸**完全随文字**（用户要求：「改成随文字变大，不设固定大小，
+   * 只要长度高度不要超出屏幕即可」）。
+   *
+   * ⚠️ 这里改过两版，三个坑都记下来：
+   *   ① 原来有 `min-width: 62%` —— 让气泡**不随文字缩**：短句也被撑到 62% 宽，
+   *      长回复很早就换行、纵向超高。
+   *   ② 原来有 `max-height: 62%` + `overflow-y: auto` —— 纵向超出后出**滚动条**。
+   *      用户看到的就是"气泡里带滚动条、文字被截住"。
+   *   ③ 行宽上限原来给到 `34ch / 窗口宽-16`，实测每行只放得下 2~3 个汉字，
+   *      61 字的回复撑到 **300px 高**，而窗口只有 240 —— 直接溢出屏幕。
+   *
+   * 现在：
+   *   · 宽度自适应内容，但不超过窗口宽度（再宽就出屏）；
+   *   · 行宽收紧到 `22ch`，并缩小字号与内边距 —— 这样"窄窗口 + 长回复"
+   *     也不会长成一根柱子；
+   *   · 高度上限 = **窗口高度**（这是它能占据的最大空间，再多就出屏了）；
+   *     真的超长时用 `overflow: hidden` **裁掉**而不是出滚动条
+   *     （用户明确不要滚动条；裁掉至少形态是正常的聊天气泡）。
+   */
+  /*
+   * ⚠️ 宽度必须用 `max-content`，**不是** `fit-content`。
+   *
+   * 踩过：写 `fit-content` 时，即使 `max-width` 放到了整窗宽，实测宽度也**始终
+   * 卡在 120px**（窗口 240 的一半）—— 于是文字一多只能往纵向堆：
+   * 30 字 120×107（占窗高 45%）、50 字 120×145（60%），正好糊住宠物脸。
+   *
+   * `max-content` = "按内容不换行时需要的宽度"，再由 `max-width` 收紧到
+   * 窗口宽 —— 这样短句紧贴文字、长句优先横向铺开，高度自然降下来。
+   */
+  width: max-content;
+  /*
+   * 宽度上限 = **几乎整个窗口宽**（用户要求："气泡要根据字数的多少来决定长度"）。
+   *
+   * 踩过：原来卡在 `22ch`（= 窗口宽 50% 左右），于是文字一多就**只能往纵向堆**：
+   * 实测 30 字的气泡 120×107（占窗高 45%），50 字 120×145（60%）——
+   * 正好压在宠物脸上（用户截图里的现象）。
+   *
+   * 放开宽度之后，同样的字数会先横向铺开、高度自然降下来，
+   * 气泡从"窄高条"变成"扁方块"，不再糊住脸。
+   */
+  max-width: var(--bubble-max-w, calc(100% - 12px));
+  /*
+   * 高度上限 = 窗口里气泡**可用的全部纵向空间**（从 top:6px 到窗口底）。
+   *
+   * 为什么不用 `100%`：百分比是相对包含块（整个窗口）算的，于是
+   * "top:6px + 高度 100%" 会比窗口高 6px —— 那 6px 就伸到屏幕外了。
+   * `--bubble-max-h` 由 JS 按窗口实际高度算好（见 app.js 的 updateBubbleMaxHeight）。
+   */
+  max-height: var(--bubble-max-h, calc(100% - 12px));
+  overflow: hidden;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(10px);
+  line-height: 1.5;
+  word-break: break-word;
+  /*
+   * ⚠️ 必须是 `pre-line`，**不能**用 `pre-wrap`。
+   *
+   * 踩过：气泡的 HTML 里带着缩进（`<div id="bubble">` 换行缩进 →
+   * `bubble-text` → 再换行缩进 → `typing`），于是标签之间有
+   * 三个纯空白的文本节点（`"\n "`）。`pre-wrap` 会把它们**当内容渲染**：
+   * 每个缩进变成一行 —— 实测回复"嗯嗯"两个字，气泡被撑到 **126px 高**。
+   *
+   * `pre-line` 同样保留**换行**（宠物回复里的 `\n` 仍然换行），
+   * 但会折叠多余的空格与缩进，正好是这里要的。
+   */
+  white-space: pre-line;
+  /*
+   * 三段过渡：
+   *   · transform 400ms —— 探头时气泡左右滑回屏幕内（跟窗口的位移协调）
+   *   · opacity / transform 180ms —— 出现与消失的动画
+   * 两个 transform 声明会互相覆盖，所以合并成一条、位移走 CSS 变量。
+   */
+  transform: translate(calc(-50% + var(--bubble-shift-x, 0px)), -6px) scale(0.94);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 180ms ease-out,
+    transform 220ms cubic-bezier(0.34, 1.16, 0.64, 1);
+}
+
+/* 出场：淡入 + 轻微放大落位 */
+.bubble.visible {
+  opacity: 1;
+  transform: translate(calc(-50% + var(--bubble-shift-x, 0px)), 0) scale(1);
+}
+
+/*
+ * 退场：淡出 + 轻微缩小上移。
+ * 与 `.visible` 的优先级：两者同时存在时以退场为准（写在后面）。
+ */
+.bubble.leaving {
+  opacity: 0;
+  transform: translate(calc(-50% + var(--bubble-shift-x, 0px)), -8px) scale(0.94);
+  transition:
+    opacity 220ms ease-in,
+    transform 220ms ease-in;
+}
+
+/* 完全隐藏（连布局都不占，避免挡住宠物） */
+.bubble.hidden {
+  display: none;
+}
+
+/* 气泡下的小尖角，指向宠物 */
+.bubble::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -8px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid var(--bg);
+}
+
+.bubble-text {
+  margin: 0;
+}
+
+/* 流式光标：让"正在说话"这件事在视觉上连续 */
+.bubble.streaming .bubble-text::after {
+  content: '▋';
+  margin-left: 2px;
+  color: var(--accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.typing {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  animation: bounce 1.1s infinite ease-in-out;
+}
+
+.typing i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.typing i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.pet {
+  display: block;
+  width: 240px;
+  height: 240px;
+  /*
+   * ⚠️ 调试叠层的染色（`PET_DEBUG_HUD=1` 时由 body.debug-hud 打开）。
+   * 给画布元素一个**半透明底色**：画布的透明像素被染上颜色，而**立绘保持原色**，
+   * 一眼看出"画布边界在哪、立绘占哪一块" —— 正是排查探头定位所需的。
+   * 纯 CSS，不去动画布内容、不和 sprite 抢绘制。
+   */
+  background: transparent;
+  /*
+   * ⚠️ **不要**加 max-width / max-height: 100%。
+   *
+   * 原来有这两条（"窗口变窄时画布跟着缩"），但窗口现在**恒等于画布边长**，
+   * 于是 100% 在纵向把 240 的画布压成 177 —— 立绘跟着变小、位置也偏，
+   * 表现就是"调大小之后留白乱了、贴边判定不准"（用户报的那个 bug）。
+   * 画布尺寸由 `sprite.setSize()` 精确控制，CSS 不该再插一手。
+   */
+  position: absolute;
+  /*
+   * ## ⚠️ 画布横向**恒贴窗口左边**（`left: 0`）—— 不要改成"居中"
+   *
+   * 2026-10-04 我一度把它做成 `var(--canvas-offset-x)`，想在探头时把画布居中、
+   * 好让旋转后的立绘不越出窗口。**结果引入了连锁冲突**：
+   *
+   *   · 画布位置从"常量 0"变成了"随窗口宽变化" -> 多出一个自由变量；
+   *   · 所有基于"画布贴窗口左上角"的定位（碰撞箱、`artOffsetInWindow`、
+   *     探头吸附、拖拽极限）都要跟着改，而它们**已经按贴左写好了**；
+   *   · 表现为"立绘左上被切 + 外围一圈白边"（画布移出窗口后被 `overflow:hidden`
+   *     裁出硬边）。
+   *
+   * 用户指出这是**布局层的地基**，要求退回单一来源。已回退。
+   * 探头时旋转外接框比窗口窄不下的问题，应该改**窗口尺寸/立绘缩放**，
+   * 而不是挪画布。
+   */
+  left: 0;
+  /*
+   * 顶部让出 `--canvas-offset-y`（= 窗口高 − 画布高）。
+   *
+   * 用户要求「可以加高宠物窗口」给文字弹窗留空间之后，多出来的高度必须
+   * **全放在上方**：这样立绘在屏幕上的位置与加高前**完全一致**，用户感知不到跳变，
+   * 而新增空间正好落在宠物头顶之上、给气泡用。
+   *
+   * 如果按窗口居中，多出的高度会绕立绘上下各分一半 —— 实测立绘被整体推高，
+   * 顶部凭空多出 42px、底部 104px 空白，等于宠物在屏幕上跳了一截。
+   */
+  top: var(--canvas-offset-y, 0px);
+  /*
+   * ⚠️ `transition` 只能有**一条**（同一个选择器里写两次，后面的会覆盖前面的，
+   * 前面那条静默失效 —— 这个坑踩过一次）。
+   *
+   * 所以这里把两件事合并：
+   *   · `transform` —— 旋转过渡，时长与 `.pet-wrap` 的平移**共用** `--peek-rotate-ms`，
+   *     否则"位移先到位、旋转还在转"，观感就是"飘"（旧代码 500/460 不同步）；
+   *   · `opacity` —— 首帧门闸的淡入（抠图完成前不显示）。
+   */
+  transition:
+    transform var(--peek-rotate-ms) cubic-bezier(0.34, 1.16, 0.64, 1),
+    opacity 180ms ease-out;
+  /*
+   * 首帧门闸：抠图完成前**不显示**。
+   *
+   * 用户报告：「在程序运行成功后，宠物会有几帧是之前宠物的图片」。
+   * 实测录制：启动后约 0.1~0.2 秒，宠物窗口位置画的是一块**橙色**
+   * （视频首帧 + 抠图还没生效的样子），之后才变成正常立绘。
+   *
+   * 所以这里初始 opacity: 0，等 `videoPlayer` 抠好第一帧、
+   * 渲染层调 `markArtReady()` 加上 `.pet-wrap.ready` 才淡入。
+   * 宁可启动时短暂空白，也不要闪一下错误画面 —— 空白看起来像"还没加载"，
+   * 闪错画面看起来像"程序坏了"。
+   */
+  opacity: 0;
+  /* ⚠️ 这里**故意不再写 transition** —— 见上面那条合并后的声明。
+     同一选择器里写两次，后面的会覆盖前面的（前面那条静默失效）。 */
+  /* 绝对定位后不再走 flex 布局，尺寸要自己站住 */
+  flex: none;
+  /*
+   * ⚠️ 去掉了 filter: drop-shadow(...)。
+   *
+   * 用户报告：点它、或从探头拖出来时，宠物四周会出现**灰色矩形**。
+   * 排查结果：html / body / #hud / #stage / #pet-wrap / #pet 的
+   * 背景全是 rgba(0,0,0,0)（完全透明），唯一会画出非透明像素的
+   * 就是这条阴影 —— 0.32 的黑色阴影落在白色页面上正好就是浅灰块，
+   * 而且它占的是 canvas 那个**矩形**范围，所以看起来像"窗口有灰底"。
+   *
+   * 用户要求"把窗口全部设为透明"，这个阴影也就没必要了。
+   * （它本来是为了让立绘"浮"在桌面上；现在用户宁可要干净的透明。）
+   *
+   * 以后若想加回去，记得同时验证"周围没有矩形淡影"。
+   */
+  /* filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.32)); */
+  cursor: grab;
+  /*
+    拖拽**不再**用 `-webkit-app-region: drag`。
+    它依赖 Chromium 的拖拽区命中测试，而窗口在穿透状态下带 WS_EX_TRANSPARENT
+    （setIgnoreMouseEvents(true) 的效果），命中测试会被跳过 —— 表现就是
+    "抓不住宠物、窗口不动"。现在由 app.js 显式发送屏幕坐标、主进程 setPosition，
+    完全确定。cursor: grab 保留，纯视觉反馈。
+  */
+}
+
+.pet:active {
+  cursor: grabbing;
+}
+
+/* 输入区依旧要排除在拖动之外（虽然现在不用 app-region 了，保留以防将来改回） */
+.dock,
+.dock button,
+.dock input,
+.status {
+  -webkit-app-region: no-drag;
+}
+
+/* ------------------------------------------------------------------ 输入栏 */
+
+.dock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(10px);
+}
+
+/* 控件整体压扁一点。用户反馈卡片"太大" —— 主要来自三行控件的默认高度。 */
+.dock .btn {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 11px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  transition: border-color 0.15s ease;
+  user-select: text;
+}
+
+/*
+  按钮行：把按钮推到右边，左边留白。
+  这样四颗按钮排在一起、不与滑杆抢宽度，也不会散得很开。
+*/
+.row.actions {
+  justify-content: flex-end;
+}
+
+.input::placeholder {
+  color: var(--text-dim);
+}
+
+.input:focus {
+  border-color: var(--accent);
+}
+
+.btn {
+  flex: none;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.08s ease;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.btn:active {
+  transform: scale(0.97);
+}
+
+.btn.primary {
+  color: #3a2408;
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.btn.primary:hover {
+  background: var(--accent-strong);
+}
+
+.btn.ghost {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.btn.active {
+  background: var(--warn);
+  color: #3a2c00;
+  border-color: var(--warn);
+}
+
+.settings {
+  gap: 8px;
+}
+
+.slider-label,
+.slider-value {
+  font-size: 12px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.slider-value {
+  width: 32px;
+  text-align: right;
+}
+
+.slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 4px;
+  appearance: none;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent) var(--fill, 50%), rgba(255, 255, 255, 0.16) var(--fill, 50%));
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent-strong);
+  cursor: pointer;
+}
+
+.hint {
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.hint-sep {
+  opacity: 0.5;
+  margin: 0 4px;
+}
+
+/* 语音状态：这个指示灯很重要 —— 用户必须随时知道它到底有没有在听，
+   否则会一直怀疑"是不是没开麦"。 */
+.voice-state {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.voice-state[data-state='listening'] {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.voice-state[data-state='hearing'] {
+  color: #3a2408;
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.voice-state[data-state='thinking'] {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.voice-state[data-state='speaking'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 记忆状态：让"它记住了多少事"可见。用户看不到就等于不存在，
+   而且看不到就更不会去用它、也不会去清它。 */
+.memory-state {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.memory-state[data-state='on'] {
+  color: var(--ok);
+  border-color: rgba(110, 231, 168, 0.5);
+}
+
+.btn.link {
+  flex: none;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.btn.link:hover {
+  background: none;
+  color: var(--error);
+}
+
+/* ------------------------------------------------------------------ 提示 */
+
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  font-size: 12.5px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  max-width: 90%;
+  text-align: center;
+}
+
+.toast[data-level='warn'] {
+  border-color: var(--warn);
+}
+.toast[data-level='error'] {
+  border-color: var(--error);
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* 免打扰：整体降饱和，一眼能看出"它现在不说话" */
+body.paused #stage,
+body.paused #dock {
+  filter: grayscale(0.6) brightness(0.86);
+}
+
+/*
+ * 紧凑模式（"趴着"）：别的应用全屏时进入（打游戏、看全屏视频）。
+ *
+ * 全屏时用户在看画面，一块带输入框的面板会挡住内容 —— 所以整块卡片藏起来，
+ * 只留宠物本体，贴着右下角（窗口尺寸已由主进程同步缩小）。
+ *
+ * 用 display:none 而不是 opacity:0：**隐藏后不该再接收鼠标事件**。
+ * 透明但仍在的卡片会挡住下面全屏应用的点击区域，表现为"游戏点不动"。
+ */
+body.compact #dock {
+  display: none;
+}
+
+/* 紧凑模式下宠物贴角，不留多余留白 */
+body.compact .stage {
+  gap: 0;
+  padding: 0;
+}
+
+/*
+ * `#pet-wrap`：**居中平移 + 探头位移 + 探头旋转缩放**层。
+ *
+ * 窗口现在是**长方形，贴合立绘宽高**（155×177 @scale=1）—— 用户要求
+ * 「窗口呈现长方形状贴合宠物宽高就好了，这样就完美」。
+ * 于是窗口边 == 立绘边，"窗口贴到屏幕边"就是"宠物贴到屏幕边"，
+ * 贴边判定不需要任何估算留白。
+ *
+ * 立绘在画布里偏右下（实测 x0=96 y0=114 / 240），所以这里把画布平移
+ * `--art-shift-x/y` 让它居中；`--peek-scale` 用于探头时缩放
+ * （用户要求「旋转不必缩小」，所以默认为 1，保留变量以便需要时调）。
+ *
+ * `transition` 是**丝滑的关键**（用户原话：「平移加旋转就可以通过修改到达时间
+ * 来让它变得丝滑」）。曲线带一点**回弹**（1.2% 过冲）而不是 `ease-out`：
+ * 纯减速会显得"到点了才停"，轻微过冲才有参考应用那种"活"的手感。
+ */
+.pet-wrap {
+  --art-shift-x: 0px;
+  --art-shift-y: 0px;
+  --peek-shift-x: 0px;
+  --peek-shift-y: 0px;
+  /*
+   * ⚠️ `--peek-comp-*`（旋转补偿）**已全部删除**（2026-10-04）。
+   *
+   * 它当初是为"探头时立绘往右下甩"加的位移补偿，叠在下面的 transform 里。
+   * 后来查明真正的原因是两处几何错误（`petLayout.ts` 的 `rawY` 漏了立绘偏移、
+   * 这里的 `transform-origin` 用错了旋转中心），根因修掉后补偿恒为 0，
+   * 用户要求删除。**不要再往 transform 里加补偿项** —— 先查根因。
+   */
+  /*
+   * ⚠️ **旋转该绕哪一点转** —— 由渲染层按实测的立绘中心写进来。
+   *
+   * 默认值 `120px 134px` 是实测的立绘中心（画布 240x240 内 `artBox @ 120,134`）。
+   *
+   * ## 为什么不能用默认的 `center`
+   *
+   * `.pet-wrap` 铺满整个窗口（240x323），它的 center 是 `(120, 161)`
+   * —— 比立绘中心（y=134）**低 27px**。绕一个偏下的点转 45°，立绘会**画一段弧**：
+   * 实测"探头时立绘屏幕 y 从 300 变成 287"（往上 13px），
+   * 用户看到的就是"向右上飘逸"。
+   *
+   * 改成绕立绘自己的中心之后，旋转**原地发生**，不再有任何位移。
+   */
+  transform-origin: var(--art-origin-x, 120px) var(--art-origin-y, 134px);
+  /*
+   * 探头动画时长（旋转 + 平移**共用**这一个值）。
+   *
+   * 用户要求：「平移旋转动画改成 1 秒吧」（此前是 1.5 秒）。
+   *
+   * ⚠️ 两条 transition（`.pet` 的旋转、`.pet-wrap` 的平移）必须用**同一个**变量。
+   * 之前旋转是 500ms、平移是写死的 460ms —— 两者不同步，
+   * 于是"位移先到位、旋转还在转"，观感上就是立绘在**飘**（排查过一个多钟头）。
+   */
+  --peek-rotate-ms: 1000ms;
+  --peek-scale: 1;
+  /*
+   * ⚠️ 尺寸必须**跟随窗口**，不能写死像素。
+   *
+   * 这里原来写的是 `width/height: 240px` + `flex: none` —— 那是"宠物大小"
+   * 只有一档的时候。加上缩放下拉框（144/240/360/480）之后，写死的 240
+   * 就与画布尺寸对不上了：
+   *   · 选 144 时 wrap 仍是 240，把 144 的画布挤出窗口
+   *     （实测 pet 的 rect = [-48,-114]，窗口里只剩立绘顶上一小条）；
+   *   · 选 480 时 wrap 仍是 240，画布溢出、立绘被布局连带挪走。
+   * 用户报的「144px 变成这样了」（只剩头顶一条）与「宠物身体不全」都是它。
+   *
+   * 绝对定位 + `inset: 0` 让它**精确等于窗口内容区**，任何档位都对得上。
+   */
+  position: absolute;
+  inset: 0;
+  /* ⚠️ 不能 hidden：旋转后立绘会溢出，裁了会丢内容 */
+  overflow: visible;
+  transform: translate(var(--art-shift-x), var(--art-shift-y));
+  /*
+   * ⚠️ 基础规则就用 `--peek-rotate-ms`（而不是写死 460ms）。
+   *
+   * 因为 `body.peek .pet-wrap` 只在**进入**探头时生效：退出时 `.peek` 类被摘掉，
+   * 这条基础规则立刻接管 —— 若两者时长不同，进 1.5s、出 0.46s，**进出不对称**，
+   * 退出时会"唰"一下弹回去。两处用同一个变量才能保证来去一致。
+   */
+  transition: transform var(--peek-rotate-ms) cubic-bezier(0.34, 1.16, 0.64, 1);
+}
+
+/*
+ * 画布**绝对定位**在包装层左上角。
+ *
+ * ⚠️ 不能用 flex 居中：那样画布会先被居中、再叠加 `--art-shift-*` 平移，
+ * 两者一起把位置算歪（实测立绘被顶到窗口右下角、贴边判定全乱）。
+ * 绝对定位后只有一个参照系 —— 平移量是多少，立绘就偏移多少，可推算、可测。
+ */
+/*
+ * ⚠️ 这里原来还有一条重复的 `.pet { position:absolute; left:0; top:0 }`，
+ * 已删除。
+ *
+ * 它把上面那条 `.pet`（L329 附近）里的 `top: var(--canvas-offset-y)` **覆盖成了 0**
+ * —— CSS 里同优先级下**后写的赢**，所以 `--canvas-offset-y`（84px）完全没生效，
+ * 画布一直贴在窗口顶部。
+ *
+ * 后果很隐蔽：`artTopInWindow()` 按"画布下移 84px"来算立绘头顶，
+ * 而画布其实没下移 —— 算出来的头顶比真实位置低 84px，
+ * 气泡底边于是压到宠物脸上（用户截图里的现象）。
+ *
+ * 教训：**同一个选择器不要写两条规则**。一个属性写两遍、其中一处还是硬编码，
+ * 就会变成"改了不生效"，而且 grep 单个属性值也看不出来。
+ */
+
+/*
+ * 探头：整体往屏幕边位移 + （可选）缩放 + 旋转。
+ *
+ * ⚠️ 旋转加在**这一层**（`.pet-wrap`），不是 `#pet` 上 —— 见下面 transform 里的说明。
+ *
+ * `#pet-wrap` 与 `#pet` 是两层，所以位移与旋转可以并存（一个元素只能有一份 transform，
+ * 分开两层才不会互相覆盖）。
+ */
+body.peek .pet-wrap {
+  /*
+   * 横纵都可能要位移：贴左右边用 X，贴上下边用 Y（用户要求四边都支持）。
+   *
+   * ⚠️ 这里**只有两项**：`--art-shift-*`（让立绘居中）与 `--peek-shift-*`（探头平移）。
+   * 曾经还叠过 `--peek-comp-*`（旋转补偿）—— 已删除，原因见 `.pet-wrap` 里的说明：
+   * 那个补偿是在治标，真正的病灶是 `transform-origin` 用错了旋转中心。
+   */
+  transform: translate(
+      calc(var(--art-shift-x) + var(--peek-shift-x)),
+      calc(var(--art-shift-y) + var(--peek-shift-y))
+    )
+    scale(var(--peek-scale))
+    /*
+     * ⚠️ **旋转加在这一层**（`#pet-wrap`），不是 `#pet` 上。
+     *
+     * ## 为什么（这是排查十几轮后的结构性修正）
+     *
+     * 原来旋转写在 `#pet` 上，于是**画布自己的外接矩形会随角度变大**
+     * （240x240 -> 339x339）。而本项目**所有**定位逻辑都建立在
+     * "画布没被 transform 动过"这个前提上 —— `measureArtBox` 量的是画布像素、
+     * `reportArtRect` 报的是画布内的坐标、贴边判定与换尺寸锚点又都读它。
+     * 画布一被撑大，这些全都偏了，于是要**层层加补偿**，而每加一层就多一处
+     * 和实测对不上的地方（用户诊断：「画布一变大，它就闪现向变大后的画布中央」）。
+     *
+     * 把旋转移到这一层之后：
+     *   · `#pet` 永远不被旋转 -> 它的 `getBoundingClientRect()` 恒为 `240x240`；
+     *   · `measureArtBox` / `reportArtRect` / 锚点 / 碰撞箱全部基于**未旋转**的画布；
+     *   · 之前那些针对"旋转导致画布偏移"的补偿**全都不需要**。
+     * 旋转仍然视觉生效（只是转在外层），所以观感不变。
+     *
+     * 角度由渲染层写 `--pet-rotate`（`pet:peek` 里）。静止时它是 0deg。
+     */
+    rotate(var(--pet-rotate, 0deg));
+  /*
+   * 这里**故意不再写 transition** —— 时长由基础 `.pet-wrap` 规则给，
+   * 两处都写容易改一处忘另一处（原来就是 500ms/460ms 不同步）。
+   */
+}
+
+body.peek .pet {
+  /*
+   * ⚠️ **旋转不再加在这里** —— 已移到 `.pet-wrap`（见那里的长注释）。
+   *
+   * 保留这条规则只为 `transform-origin`：万一将来有人又把 transform 写回
+   * `#pet`（比如调试），原点至少是对的。
+   */
+  transform-origin: center center;
+}
+
+/*
+ * ⚠️ 这里原来有两条"探头时把画布推向屏幕边缘"的规则：
+ *
+ *     body.compact.peek-right .stage { align-items: flex-end; }
+ *     body.compact.peek-left  .stage { align-items: flex-start; }
+ *
+ * 它们是为**旧方案**服务的 —— 那时窗口故意伸出屏幕外，要让画布贴住窗口
+ * 靠内侧的那条边，画面才不会被切得莫名其妙。
+ *
+ * 但用户改成"窗口绝不超出屏幕、靠近边缘原地旋转"之后，这两条会**打架**：
+ * 窗口是按"立绘中心不动"对齐的，而它把画布推到窗口一侧，
+ * 于是立绘会偏到窗口边上、看起来像被顶出去了。
+ * 原地旋转必须**居中** —— 绕中心转，中心不动，才是最自然的效果。
+ */
+
+/*
+ * 第一帧抠图完成后淡入（见渲染层 markArtReady）。
+ * 180ms 足够柔，又不至于让人等 —— 启动本来就只要几百毫秒。
+ */
+.pet-wrap.ready .pet {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------ 调试叠层 */
+/*
+ * `PET_DEBUG_HUD=1` 时给 `<body>` 加上 `.debug-hud`：
+ *   · 画布染色 —— 透明区变蓝，立绘保持原色，画出"画布边界"；
+ *   · HUD 面板由 app.js 动态创建（内容每 60ms 刷新）。
+ *
+ * 为什么用背景色而不是往画布上刷一层：刷画布必须重绘，
+ * 会和 sprite 自己的绘制循环打架（谁后画谁赢，立绘会被刷掉）。纯 CSS 没这问题。
+ */
+body.debug-hud .pet {
+  background: rgba(0, 150, 255, 0.35);
+  /* 描个边，边界更清楚 */
+  outline: 1px solid rgba(120, 220, 255, 0.85);
+  outline-offset: -1px;
+}
+
+body.debug-hud .pet-wrap {
+  /* 再把"立绘之外那圈窗口留白"也标出来（窗口范围 = 视口） */
+  box-shadow: inset 0 0 0 1px rgba(255, 200, 0, 0.55);
+}
+
+/* ---------------------------------------------------------------- 模块开关 */
+/*
+ * 「立绘动画」模块关掉时隐藏宠物本体（2026-10-18）。
+ *
+ * 为什么用 `display:none` 而不是销毁窗口：关掉是为了**不看它**，
+ * 不是退出程序 —— 窗口留着，开回来立刻就能看见（也避免拖动位置丢失）。
+ *
+ * `data-mod-sprite` 由主进程在 dom-ready 时注入（见 index.ts 的 injectModules）。
+ */
+html[data-mod-sprite="0"] [data-module="sprite"] {
+  display: none !important;
+}

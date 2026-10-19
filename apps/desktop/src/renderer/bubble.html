@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>桌面宠物 · 文字弹窗</title>
+    <link rel="stylesheet" href="bubble.css" />
+  </head>
+  <body>
+    <!--
+      气泡本体：**底边贴窗口底、水平居中**。
+      主进程把窗口底边对准宠物立绘头顶，所以气泡的高度怎么变，锚点都不动
+      —— 这正是用户要的「弹窗底部始终在宠物头上」。
+    -->
+    <div id="bubble" class="bubble hidden" aria-live="polite"><div id="bubble-text" class="bubble-text"></div><span id="typing" class="typing hidden"><i></i><i></i><i></i></span></div>
+    <script type="module" src="bubble.js"></script>
+  </body>
+</html>

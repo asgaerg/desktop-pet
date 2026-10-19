@@ -1,0 +1,561 @@
+{
+ "when": "2026-10-18 13:03",
+ "count": 185,
+ "files": {
+  ".shot-page-runner.cjs": {
+   "size": 2934
+  },
+  ".shot-page-user.js": {
+   "size": 116
+  },
+  ".voice-end-runner.cjs": {
+   "size": 4532
+  },
+  "add-yaml-writer-test.py": {
+   "size": 6764
+  },
+  "audit-devlog-2026-10-17.py": {
+   "size": 7899
+  },
+  "audit-devlog-features.py": {
+   "size": 7272
+  },
+  "audit-renderer.py": {
+   "size": 14205
+  },
+  "audit-tools-inventory.py": {
+   "size": 6664
+  },
+  "backfill-memory.py": {
+   "size": 11249
+  },
+  "bench-asr.py": {
+   "size": 10068
+  },
+  "bench-vector.py": {
+   "size": 9259
+  },
+  "build-icon-css.py": {
+   "size": 7541
+  },
+  "build-iohook.py": {
+   "size": 6326
+  },
+  "calibrate-min-score.py": {
+   "size": 5653
+  },
+  "calibrate-relative-floor.py": {
+   "size": 5739
+  },
+  "check-extract-prompt.py": {
+   "size": 7016
+  },
+  "check-html-tags.py": {
+   "size": 2629
+  },
+  "check-log-rotation.py": {
+   "size": 8796
+  },
+  "check-self-refs.py": {
+   "size": 5340
+  },
+  "check-tts-gate.py": {
+   "size": 5185
+  },
+  "clean-junk.py": {
+   "size": 8328
+  },
+  "compare-asr-real.py": {
+   "size": 8325
+  },
+  "compare-flip.py": {
+   "size": 5268
+  },
+  "compare-icon-orientation.py": {
+   "size": 4792
+  },
+  "compare-menu.py": {
+   "size": 5567
+  },
+  "cost-estimate.py": {
+   "size": 3895
+  },
+  "diag-audio-playback.py": {
+   "size": 9064
+  },
+  "diag-frontend-gate.py": {
+   "size": 6631
+  },
+  "diag-monitor-alive.py": {
+   "size": 5656
+  },
+  "diag-ptt-audio.py": {
+   "size": 5314
+  },
+  "diag-ptt-audio2.py": {
+   "size": 5279
+  },
+  "diag-ptt-chain.py": {
+   "size": 3888
+  },
+  "diag-ptt-fail.py": {
+   "size": 5656
+  },
+  "diagnose-ptt-now.py": {
+   "size": 5544
+  },
+  "drive-qidian-read.py": {
+   "size": 8104
+  },
+  "dump-all-keycodes.py": {
+   "size": 5494
+  },
+  "dump-prompt.py": {
+   "size": 5459
+  },
+  "e2e-audio-chain.py": {
+   "size": 7589
+  },
+  "e2e-voice-and-reply.py": {
+   "size": 8602
+  },
+  "extract-menu-icons.py": {
+   "size": 13495
+  },
+  "extraction-probe.json": {
+   "size": 610
+  },
+  "fetch-corpus.py": {
+   "size": 22313
+  },
+  "fetch-served-js.py": {
+   "size": 4252
+  },
+  "gen-t2s-table.py": {
+   "size": 6874
+  },
+  "inject-into-product.py": {
+   "size": 4680
+  },
+  "inspect-last-turn-prompt.py": {
+   "size": 3022
+  },
+  "inspect-recent-turns.py": {
+   "size": 2426
+  },
+  "make-pet-ico.py": {
+   "size": 1568
+  },
+  "measure-asr-latency.py": {
+   "size": 5779
+  },
+  "measure-brain-memory.py": {
+   "size": 3410
+  },
+  "measure-embedder.py": {
+   "size": 4519
+  },
+  "measure-gpu-asr.py": {
+   "size": 4941
+  },
+  "measure-growth.py": {
+   "size": 5320
+  },
+  "measure-hint-dup.py": {
+   "size": 3465
+  },
+  "measure-hint-sections.py": {
+   "size": 4940
+  },
+  "measure-hint-size.py": {
+   "size": 3350
+  },
+  "measure-local-asr.py": {
+   "size": 4818
+  },
+  "measure-request.py": {
+   "size": 4947
+  },
+  "measure-synonym-expansion.py": {
+   "size": 5274
+  },
+  "measure-thinking-cost.py": {
+   "size": 5599
+  },
+  "measure-usage.py": {
+   "size": 4108
+  },
+  "menu-preview.png": {
+   "size": 51485
+  },
+  "petmenu-measure.js": {
+   "size": 2179
+  },
+  "probe-ab-search.py": {
+   "size": 5167
+  },
+  "probe-search-results.py": {
+   "size": 4603
+  },
+  "probe-status-design.py": {
+   "size": 25746
+  },
+  "prove-segment-tests-red.py": {
+   "size": 5754
+  },
+  "prune-vague-memories.py": {
+   "size": 10311
+  },
+  "refresh-icons.py": {
+   "size": 322
+  },
+  "regen-status-shot.py": {
+   "size": 4508
+  },
+  "repair-config.py": {
+   "size": 2507
+  },
+  "reset-memory.py": {
+   "size": 8834
+  },
+  "restart-and-check-hotkey.ps1": {
+   "size": 2964
+  },
+  "retheme-light.py": {
+   "size": 5316
+  },
+  "scan-junk.py": {
+   "size": 6318
+  },
+  "search-ptt-history.py": {
+   "size": 2282
+  },
+  "search-vk165.py": {
+   "size": 1852
+  },
+  "seed-quotes.py": {
+   "size": 5740
+  },
+  "selftest-ptt.py": {
+   "size": 11333
+  },
+  "send-right-alt.py": {
+   "size": 4664
+  },
+  "shortcut-rebuild.py": {
+   "size": 5639
+  },
+  "shortcut-tool.py": {
+   "size": 4818
+  },
+  "shot-page.py": {
+   "size": 9831
+  },
+  "simulate-attention.py": {
+   "size": 7368
+  },
+  "status-design-render.png": {
+   "size": 70384
+  },
+  "tap-voice-stream.py": {
+   "size": 4454
+  },
+  "test-agent-live.py": {
+   "size": 6689
+  },
+  "test-agent-loop.py": {
+   "size": 15872
+  },
+  "test-agent-tools.py": {
+   "size": 9346
+  },
+  "test-asr-gate.py": {
+   "size": 6106
+  },
+  "test-audit-1017.py": {
+   "size": 4575
+  },
+  "test-before-input-focused.py": {
+   "size": 6861
+  },
+  "test-before-input.py": {
+   "size": 6825
+  },
+  "test-browser-bridge.py": {
+   "size": 6090
+  },
+  "test-browser-fallback-e2e.py": {
+   "size": 9740
+  },
+  "test-clear-browser-data.py": {
+   "size": 8823
+  },
+  "test-cookie-roundtrip.py": {
+   "size": 11042
+  },
+  "test-edge-engine.py": {
+   "size": 4927
+  },
+  "test-edge-tts.py": {
+   "size": 5518
+  },
+  "test-extract-quality.py": {
+   "size": 6947
+  },
+  "test-focus-pet.py": {
+   "size": 6552
+  },
+  "test-force-answer.py": {
+   "size": 5189
+  },
+  "test-interest-growth.py": {
+   "size": 7792
+  },
+  "test-iohook-electron.py": {
+   "size": 5517
+  },
+  "test-iohook-user-code.py": {
+   "size": 7372
+  },
+  "test-keyhook.py": {
+   "size": 4223
+  },
+  "test-live-snapshot-chat.py": {
+   "size": 14113
+  },
+  "test-live-snapshot-desc.py": {
+   "size": 8504
+  },
+  "test-live-subjectivity.py": {
+   "size": 12529
+  },
+  "test-live-tier-decay.py": {
+   "size": 7807
+  },
+  "test-mcp-e2e.py": {
+   "size": 9510
+  },
+  "test-mcp-search.py": {
+   "size": 8863
+  },
+  "test-petmenu-edges.py": {
+   "size": 11554
+  },
+  "test-petmenu-effect.py": {
+   "size": 10659
+  },
+  "test-petmenu-icons.py": {
+   "size": 12219
+  },
+  "test-petmenu-live.py": {
+   "size": 12470
+  },
+  "test-ptt-end-to-end.py": {
+   "size": 6001
+  },
+  "test-ptt-real-speech.py": {
+   "size": 6646
+  },
+  "test-query-ignored.py": {
+   "size": 8515
+  },
+  "test-random-events.py": {
+   "size": 10183
+  },
+  "test-reasoning-separation.py": {
+   "size": 5774
+  },
+  "test-renderer-keydown.py": {
+   "size": 7772
+  },
+  "test-screenshot-chat.py": {
+   "size": 6291
+  },
+  "test-sendkeys-f9.py": {
+   "size": 4195
+  },
+  "test-settings-api.py": {
+   "size": 13356
+  },
+  "test-settings-tabs.py": {
+   "size": 12277
+  },
+  "test-status-search-e2e.py": {
+   "size": 11893
+  },
+  "test-tool-refs.py": {
+   "size": 7985
+  },
+  "test-tool-status.py": {
+   "size": 18646
+  },
+  "test-uiohook-in-electron.py": {
+   "size": 6660
+  },
+  "test-uiohook.py": {
+   "size": 4925
+  },
+  "test-video-parse.py": {
+   "size": 6929
+  },
+  "test-vk-compare.py": {
+   "size": 4990
+  },
+  "test-voice-end.mjs": {
+   "size": 7859
+  },
+  "test-web-search.py": {
+   "size": 7176
+  },
+  "test-web-toggle.py": {
+   "size": 6529
+  },
+  "theme-light-dark.py": {
+   "size": 7298
+  },
+  "toggle-browser-fallback.py": {
+   "size": 7285
+  },
+  "tool_bootstrap.py": {
+   "size": 3427
+  },
+  "watch-f9-toggle.py": {
+   "size": 3496
+  },
+  "watch-hold-to-talk.py": {
+   "size": 5047
+  },
+  "watch-hook-file.py": {
+   "size": 5178
+  },
+  "watch-keys.py": {
+   "size": 3695
+  },
+  "watch-product-monitor.py": {
+   "size": 3148
+  },
+  "watch-ptt-chain.py": {
+   "size": 5170
+  },
+  "watch-ptt-round.py": {
+   "size": 3559
+  },
+  "watch-real-f9.py": {
+   "size": 5585
+  },
+  "watch-uiohook-ptt.py": {
+   "size": 5543
+  },
+  "zoom-design-icons.py": {
+   "size": 2235
+  },
+  "fixtures/extraction-samples.json": {
+   "size": 8206
+  },
+  "menu-icons/chat.svg": {
+   "size": 1491
+  },
+  "menu-icons/copy.svg": {
+   "size": 1654
+  },
+  "menu-icons/eye.svg": {
+   "size": 1343
+  },
+  "menu-icons/memory.svg": {
+   "size": 2895
+  },
+  "menu-icons/mic.svg": {
+   "size": 1502
+  },
+  "menu-icons/moon.svg": {
+   "size": 562
+  },
+  "menu-icons/multi-chat-color.svg": {
+   "size": 1552
+  },
+  "menu-icons/multi-chat-evenodd.svg": {
+   "size": 1407
+  },
+  "menu-icons/multi-eye-color.svg": {
+   "size": 1404
+  },
+  "menu-icons/multi-eye-evenodd.svg": {
+   "size": 1259
+  },
+  "menu-icons/multi-memory-color.svg": {
+   "size": 1511
+  },
+  "menu-icons/multi-memory-evenodd.svg": {
+   "size": 2811
+  },
+  "menu-icons/pad.svg": {
+   "size": 3057
+  },
+  "menu-icons/paw.svg": {
+   "size": 1346
+  },
+  "menu-icons/power.svg": {
+   "size": 1372
+  },
+  "menu-icons/spark.svg": {
+   "size": 366
+  },
+  "menu-icons/sun.svg": {
+   "size": 3465
+  },
+  "menu-icons/_report.json": {
+   "size": 1331
+  },
+  "menupreview/icon-masks.css": {
+   "size": 28060
+  },
+  "menupreview/icons.html": {
+   "size": 2068
+  },
+  "menupreview/index.html": {
+   "size": 9825
+  },
+  "menupreview/one.html": {
+   "size": 2995
+  },
+  "menupreview/petMenu.css": {
+   "size": 16621
+  },
+  "menupreview/icons/chat.svg": {
+   "size": 1490
+  },
+  "menupreview/icons/copy.svg": {
+   "size": 1662
+  },
+  "menupreview/icons/eye.svg": {
+   "size": 1343
+  },
+  "menupreview/icons/memory.svg": {
+   "size": 2909
+  },
+  "menupreview/icons/mic.svg": {
+   "size": 1507
+  },
+  "menupreview/icons/moon.svg": {
+   "size": 566
+  },
+  "menupreview/icons/pad.svg": {
+   "size": 3057
+  },
+  "menupreview/icons/paw.svg": {
+   "size": 1342
+  },
+  "menupreview/icons/power.svg": {
+   "size": 1357
+  },
+  "menupreview/icons/spark.svg": {
+   "size": 365
+  },
+  "menupreview/icons/sun.svg": {
+   "size": 3466
+  },
+  "menupreview/icons/_report.json": {
+   "size": 1331
+  }
+ }
+}

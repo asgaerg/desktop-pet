@@ -1,0 +1,1662 @@
+/*
+ * 设置窗口的样式。
+ *
+ * 风格与宠物窗口保持一致（深色半透明卡片），但**没有透明背景** ——
+ * 设置窗口是一个普通窗口，可读性优先。
+ */
+
+:root {
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+  --bg: #f5f6f8;
+  --bg-soft: #fafbfc;
+  --card: #ffffff;
+  --card-soft: #fbfcfd;
+  --hover: #f3f5f9;
+  --sunken: #eef0f4;
+  --border: #e4e7ec;
+  --border-strong: #d3d7de;
+  --text: #3c4149;
+  --text-dim: #98a0a8;
+  --text-soft: #5b616b;
+  --accent: #2f6fed;
+  --ok: #22a06b;
+  --bad: #d93843;
+  --warn: #f0a500;
+  --tag-blue-bg: #e8effd;
+  --tag-blue-bd: #d5e2fb;
+  --tag-green-bg: #e6f4ec;
+  --tag-green-fg: #1f7a4d;
+  --tag-red-bg: #fbeaec;
+  --tag-red-bd: #f5d5d8;
+  --tag-red-fg: #b32833;
+
+  /* ── 界面主题用的角色变量（浅色值）────────────────────────────
+   * 由 `tools/theme-light-dark.py` 生成；深色值在同文件末尾的
+   * `html[data-theme='dark']` 里覆盖。属性由主进程注入到 `<html>`。
+   */
+
+  --danger: #d93843;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+  /*
+   * ⚠️ 这里是**普通带边框窗口**的样式（用户要求「还是换成之前的窗口吧」）。
+   *
+   * 不要改回"透明底 + 自绘圆角/阴影"那套 —— 那是无边框弹窗时期的配套
+   * （见下面 body 的注释），撤掉边框后它只会让页面看起来是个怪方框。
+   */
+  overflow: hidden;
+}
+
+/*
+ * 不要给 body 加圆角/描边/阴影。
+ *
+ * 无边框弹窗时期必须自己画（系统标题栏没了），但换回带边框窗口之后
+ * 系统已经画了外框，再画一层就是"框里还有框"。
+ */
+
+/*
+ * 右上角自绘的关闭按钮（`.close`）已**删除**。
+ *
+ * 它是无边框弹窗时期的产物（没有系统标题栏，只好自己画一个 ×）。
+ * 换回带系统边框的窗口后，标题栏自带的关闭按钮就够了 —— 再画一个
+ * 反而和系统按钮重叠，看起来像两个叉。
+ *
+ * 对应地 `settings.html` 里的 `<button id="close">` 也删了；
+ * 只删一边会让契约检查或运行时引用悬空。
+ */
+
+/*
+ * 整体骨架：左侧分类导航 + 右侧内容。
+ *
+ * 照参考桌宠应用的设置窗口结构。为什么要侧栏：设置项只会越来越多，
+ * 单页长滚动会让人找不到东西；分分类之后"这个开关大概在哪一类"是可预期的。
+ *
+ * 侧栏 190px（窗口宽 820 时够用）。
+ */
+.shell {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  height: 100%;
+  /* 内容超出时只滚动右侧，侧栏固定 —— 所以这里不能整体滚动 */
+  overflow: hidden;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 10px 10px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-soft);
+  min-height: 0;
+}
+
+h1 {
+  margin: 0 0 10px 6px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.nav-item.active {
+  background: var(--hover);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 分类前面的编号：让"第几类"可以直接被说出来、被指代 */
+.nav-idx {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.nav-item.active .nav-idx {
+  background: var(--accent);
+  color: #eef0f4;
+}
+
+.sidebar-foot {
+  margin: auto 0 0;
+  padding: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+main {
+  padding: 16px 18px 20px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* 面板：一次只显示一个分类 */
+/*
+ * ## 面板做成「卡片」（2026-10-05，用户要求对齐参考应用的观感）
+ *
+ * 原来是 `background: transparent` —— 内容直接贴在窗口底色上，一长条读下来
+ * 分不清"哪里是一组设置"。参考应用里每一组都在自己的浅色卡片里。
+ *
+ * ## ⚠️ 为什么只改 CSS、不重排 HTML
+ *
+ * 要"每组一张卡片"，直观做法是在 HTML 里给每个 `h2` 加一层 `.card` 包裹 ——
+ * 但那意味着把 6 个面板、十几个分组全部重排一遍（还要同步改 JS 里按 id 取元素的
+ * 逻辑）。收益只是标题多一层容器，而**风险是整页结构出错**。
+ *
+ * 现在把每个 `section.tab-panel` 本身做成卡片：一组设置 = 一个标签页，
+ * 这个粒度下"卡片"的视觉效果已经拿到了，而 DOM 一行没动。
+ *
+ * 将来若某个标签页内部需要再分几张卡片，那时再引入 `.card` 包裹即可。
+ */
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: block;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 22px;
+}
+
+/* 卡片内第一个标题不该再顶上边距（外层 padding 已经给足了） */
+.tab-panel.active > h2:first-child {
+  margin-top: 0;
+}
+
+section {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin-bottom: 12px;
+}
+
+/*
+ * 段落标题。
+ *
+ * ## ⚠️ 上边距不能是 0（2026-10-05 修）
+ *
+ * 原来是 `margin: 0 0 8px` —— **没有上边距**，于是第二段之后的标题（「自动备份」
+ * 「人格提示词」）会**紧贴**在上一段内容上，看起来像那一行的一部分。
+ * 用户对着参考应用的截图提出这一点（那边标题上方有明显留白）。
+ *
+ * 34px 是"内容与下一段之间"的舒适间隔：足以分段，又不至于把页面拉得很长。
+ * 首个标题（`:first-child`）不需要 —— 它上面就是面板顶部，已有内边距。
+ */
+h2 {
+  margin: 34px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+h2:first-child {
+  margin-top: 0;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+/**
+ * 整宽的字段块（2026-10-05）。
+ *
+ * ⚠️ 为什么需要它：`.field` 是 `110px 1fr` 的两列网格，内容被塞在**右边那窄列**里。
+ * 提示词 textarea 套上 `.field` 之后就变成一条细缝（用户报「提示词设置框太小，
+ * 让它宽度回到正常状态」）。
+ *
+ * 这个变体改成**单列、标签在上、内容占满整宽**，适合多行文本/大控件。
+ */
+.field.field-block {
+  grid-template-columns: 1fr;
+  align-items: start;
+  gap: 6px;
+}
+
+.field.field-block > * {
+  width: 100%;
+}
+
+.field label {
+  color: var(--text-dim);
+}
+
+/* ------------------------------------------------------------------ 下拉框的箭头 */
+
+/*
+ * ## 去掉系统默认的下拉箭头，换成自己画的（2026-10-05）
+ *
+ * 用户说「类似的都可以改」—— 这是清单里最后一个还是系统外观的控件。
+ * 默认那个箭头在不同平台长得不一样（Windows 上是浅色实心三角），
+ * 在深色主题里同样是一块异物。
+ *
+ * ## 为什么用纯 CSS 三角而不是 SVG 图片
+ *
+ * 用 `background-image: url("data:image/svg+xml,...")` 更精确，但要过 CSP：
+ * 这是设置页，`img-src 'self' data:` 允许 data:，而 `style-src` 带 `'unsafe-inline'`
+ * —— 理论上可行，但**不同 Chromium 版本对"CSS 里的 data: 图片算 style-src 还是
+ * img-src"解释不一致**，出问题时表现是"箭头不见了"，很难查。
+ *
+ * 纯 CSS 三角（两条边框旋转 45°）没有这个不确定性，也不需要维护一个 base64 串。
+ */
+.select-wrap {
+  position: relative;
+  display: block;
+}
+
+.select-wrap > select {
+  width: 100%;
+  /* 右侧留出箭头的空间，否则长选项文字会压到箭头底下 */
+  padding-right: 30px;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.select-wrap::after {
+  content: '';
+  position: absolute;
+  /* 垂直居中、贴右边；`pointer-events: none` 让点击穿透到 select 上
+     —— 少了它，点在箭头上不会展开下拉框（踩过这种"点不动"的 bug） */
+  top: 50%;
+  right: 12px;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+
+.select-wrap:hover::after {
+  border-color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ 数字框的上下箭头 */
+
+/*
+ * ## 去掉数字输入框的步进箭头（2026-10-05，用户要求）
+ *
+ * 用户截图里那两个白底黑三角很扎眼 —— 它是**系统默认控件外观**，
+ * 与深色主题格格不入（和之前那条默认滚动条是同一类问题）。
+ *
+ * ## 为什么"去掉"而不是"美化"
+ *
+ * 这两个箭头唯一的作用是"点一下加/减一个 step"。而这两个字段：
+ *
+ *     时间窗口   1 ~ 3650，step 1    → 点到头要 3600 次
+ *     保留份数   0 ~ 999，  step 1    → 同上
+ *
+ * 也就是说它们**在最需要它的场景（跨度大）里毫无用处**，在跨度小的场景里
+ * 又不如直接敲一个数字快。既然给不了帮助，就不要那块白色异物。
+ *
+ * `appearance: none` 是标准写法；`::-webkit-inner-spin-button` 是 Chromium 的
+ * 具体伪元素（这个应用只跑 Chromium，两个都写上以防某一版行为变化）。
+ */
+input[type='number'] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ 带后缀的输入 */
+
+/*
+ * 输入框 + 单位后缀（"天"）。
+ *
+ * 为什么不用 `input` 的 `placeholder` 或 label 里写单位：
+ * 数字框里的值会被"天"这个词挤掉（用户输入 30，看到的是"30 天"还是"30"分不清）。
+ * 所以后缀单独一个元素贴在右边，用 flex 布局。
+ *
+ * 为什么不做成 `<input>` 里内嵌后缀：那要靠 padding + 绝对定位叠一个 span，
+ * 输入内容会跑到后缀底下（长数字时）。flex 更简单也不会重叠。
+ */
+.with-suffix {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.with-suffix > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.with-suffix > .suffix {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/*
+ * ## 窄字段：不占满整行（2026-10-05 用户要求）
+ *
+ * 用户指出：一个 **4 位数的字段不该占满整行宽度**（原来是 `width: 100%`，
+ * 在 700px 宽的卡片里拉成一条长条，左边一个「30」显得很空）。
+ *
+ * ⚠️ 关于宽度数值：用户说「30px差不多」，但**纯 30px 装不下内容** ——
+ * `padding: 8px 11px`（左右 22px）+ 边框 2px 已经占掉 24px，
+ * 只剩 6px 给数字，连一位都显示不全。
+ *
+ * 所以按"能舒服放下 4 位数 + 内边距"取值：
+ *     数字 4 位 × 8px ≈ 32px ＋ padding 22px ＋ 边框 2px ≈ 56px（最小可用）
+ *     再宽一点避免数字贴着边框：**96px**（约 5~6 位数的余量）
+ *
+ * 想再窄/再宽就调下面这一个数 —— 它是这个决定唯一的落点。
+ *
+ * 用户定稿：**100px**。
+ *
+ * ## ⚠️ 必须带上 `input[type='...']`，不能只写 `.narrow-num`（2026-10-05 实测）
+ *
+ * 只写 `.narrow-num { width: 100px }`（特异度 0,1,0）**会被这条覆盖**：
+ *
+ *     input[type='text'], input[type='number'], ... { width: 100% }   ← 0,1,1
+ *
+ * 实测就是如此：`保留份数` 带着 `class="narrow-num"` 却仍然是 409px（整行宽），
+ * 而 `时间窗口` 没事 —— 因为它走的是 `.with-suffix.narrow > input`（0,3,1），
+ * 特异度本来就够。
+ *
+ * 提高特异度到 0,2,1 就能稳定胜过上面那条，不用 `!important`
+ * （`!important` 会让以后想覆盖它变得很麻烦）。
+ */
+input[type='number'].narrow-num,
+input[type='text'].narrow-num {
+  width: 100px;
+}
+
+/* 带后缀的窄字段：输入框固定宽，单位紧跟其后（不撑满整行） */
+.with-suffix.narrow > input {
+  flex: 0 0 auto;
+  width: 100px;
+}
+
+/* `.setting-control` 里的单位后缀（数字框取代 `<output>` 之后需要） */
+.setting-control > .suffix {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/*
+ * 记忆列表的按钮不能被压窄。
+ *
+ * 踩过：搜索行是 `flex`，输入框带 `width: 100%`（来自 `input[type='text']` 那条
+ * 通用规则）—— 它把整行的宽度吃光，右边两个按钮被挤成窄条，
+ * **文字竖着排成两行**（"搜/索"、"看最/新"）。
+ *
+ * `flex: 0 0 auto` 让按钮按内容宽度，`white-space: nowrap` 兜底防止再被压。
+ */
+.mem-list ~ .row .btn,
+.row > .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* 搜索行里的输入框：占满剩余空间，但不把按钮挤没 */
+.row > input[type='text'],
+.row > input[type='number'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+
+/* ------------------------------------------------------------------ 记忆列表 */
+
+/*
+ * 记忆/珍藏/原文的条目列表。
+ *
+ * 每个条目是一张浅色小卡：原文可能很长（几百字），条目之间必须有明确边界，
+ * 否则一整片文字读下来分不清哪条是哪条。
+ */
+.mem-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  /* 条目多时不要在卡片里再套一层滚动 —— 整页滚动更自然，
+     而且嵌套滚动区在无边框窗口里很容易误触（滚到里面就出不来了） */
+}
+
+.mem-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--sunken);
+  padding: 9px 12px;
+}
+
+/* 头部一行：谁说的 + 时间 + 右侧操作按钮 */
+.mem-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.mem-who {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.mem-when {
+  color: var(--text-dim);
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+}
+
+.mem-text {
+  font-size: 13px;
+  line-height: 1.6;
+  /* 长文本折行；`pre-wrap` 保留原文里的换行（气泡里的分段是有意义的） */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 单条最多显示这么高，超出内部滚动 —— 否则一条几千字的原文会把页面撑爆 */
+  max-height: 190px;
+  overflow-y: auto;
+}
+
+.mem-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+/* 列表里的小按钮：比主按钮矮一档，不然每条都顶着一个大按钮很吵 */
+.mem-actions .btn {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.mem-actions .btn.pinned {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #eef0f4;
+}
+
+.mem-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--text-dim);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+
+.mem-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+/* ------------------------------------------------------------------ 滚动条 */
+/*
+ * ## 自定义滚动条（2026-10-05，用户要求）
+ *
+ * 用户原话：「换成它的圆滑滑块，背景变成透明色或者和背景色一样融入进去就不错」。
+ *
+ * 系统默认滚动条很扎眼：**两端有上下箭头按钮、方角、浅色轨道**。
+ * 在深色主题里那一条浅色槽把面板切成了两半（提示词框右边那条尤其明显，
+ * 还压住了 textarea 的 resize 手柄）。
+ *
+ * 换成：**轨道透明、滑块圆角半透明** —— 不滚动时几乎看不见，需要时又找得到。
+ *
+ * ⚠️ `::-webkit-scrollbar` 在 Chromium 里是有效的（设置窗口就是 Chromium）。
+ * 不用 `scrollbar-width: thin`：那个在 Chromium 里支持但不给圆角控制。
+ */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+/* 轨道：透明 —— 这是"融入背景"的关键 */
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 滑块：圆角 + 半透明，悬停时更明显 */
+*::-webkit-scrollbar-thumb {
+  background: rgba(23, 26, 33, 0.1);
+  border-radius: 999px;
+  /* 用透明边框 + background-clip 做出"四周留白"，滑块看起来更细 */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(23, 26, 33, 0.14);
+  background-clip: padding-box;
+}
+
+/* 去掉两端的上下箭头按钮（默认滚动条最扎眼的部分） */
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* 右下角两条滚动条交汇处：透明，否则会留一块浅色方块 */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/*
+ * 提示词框**不要自己带滚动条**。
+ *
+ * 横条对"会换行的长文本"毫无用处（永远用不到），而竖条会压住右下角的 resize 手柄
+ * ——用户截图里正是这个现象。内容超出时靠**整个面板**滚动，那是更自然的交互。
+ *
+ * 用 `scrollbar-width: none` + `::-webkit-scrollbar { display: none }` 双写：
+ * 前者是标准属性（Chromium 121+ 支持），后者兼容旧版。
+ */
+#persona-prompt {
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+#persona-prompt::-webkit-scrollbar {
+  display: none;
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+textarea,
+select {
+  width: 100%;
+  padding: 8px 11px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  /* 切换聚焦态时边框颜色平滑过渡，避免"啪"地跳一下 */
+  transition:
+    border-color 120ms ease-out,
+    box-shadow 120ms ease-out;
+}
+
+/*
+ * 提示词是多行文本。
+ *
+ * 刻意**不用等宽字体**（原来是 Consolas）：用户写的是中文人设，
+ * 等宽字体下中文字距会很难看，而且参考应用那里也是普通字体。
+ *
+ * ## 高度固定、不许拖动（2026-10-05 用户要求）
+ *
+ * 原来 `resize: vertical` 会带出**系统默认的拖动小手柄**（右下角那个斜线），
+ * 那也是"默认外观"的一部分，与刚统一掉的滚动条不搭；
+ * 而且用户能拖到任意高度，把下面的按钮挤出视野。
+ *
+ * 现在给一个**够用的固定高度**（约 11 行）+ 内部滚动（滚动条已隐藏，
+ * 靠滚轮/键盘翻），下面接"有未保存的修改"的提示。
+ */
+textarea {
+  resize: none;
+  height: 240px;
+  min-height: 140px;
+  line-height: 1.65;
+  font-family: inherit;
+}
+
+/*
+ * 聚焦态：边框变蓝 + 一圈淡蓝光晕。
+ *
+ * 光晕（`box-shadow`）是参考应用那个观感的关键 —— 只改边框颜色的话，
+ * 深色底上几乎看不出"我正在编辑这里"。这里可以用 `box-shadow`，
+ * 因为设置窗口是**不透明**窗口（气泡窗口才不能用，见 bubble.css 的说明）。
+ */
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.18);
+}
+
+/* 禁用态（提示词关掉时输入框会变灰）：让它一眼看出"这里现在不生效" */
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 模型下拉框下紧挨着"手填"输入框 —— 给一点点间距，别贴在一起 */
+#model-manual {
+  margin-top: 6px;
+}
+
+/*
+ * 注：`label.check` 上面原来还有一条 `.row.buttons { margin-top: 8px }`，
+ * 与下面第 306 行那条**完全重复**（后者覆盖前者，前者是死规则）。
+ * 已删 —— 两条同样的选择器散在文件两头，改了一处不生效是迟早的事。
+ */
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/*
+ * 复选框完全自绘。
+ *
+ * ## 原来只设了 `accent-color`（2026-10-05 统一控件外观时修）
+ *
+ * `accent-color` 只能改**勾选时那个色块的颜色**，未勾选的方框仍是
+ * **系统默认**（浅色底 + 系统边框）—— 在深色主题里是一块白点，
+ * 和之前那条默认滚动条、数字框的白色箭头是同一类问题。
+ *
+ * ## 为什么用伪元素画勾而不是嵌入 SVG 图片
+ *
+ * 和下拉箭头同样的理由：`url("data:image/svg+xml,...")` 要过 CSP
+ * （不同 Chromium 版本对"CSS 里的 data: 图片算 style-src 还是 img-src"解释不一致，
+ * 出问题时表现为"勾不见了"，很难查）。用两条边框旋转 45° 画勾没有这个不确定性。
+ *
+ * ## 结构
+ *
+ *     <label class="check"><input type="checkbox"><span>文字</span></label>
+ *
+ * `input` 本身 `appearance: none` 之后就是一块可上色的方块；
+ * 勾画在它的 `::after` 上（input 是**非替换元素**时才支持伪元素 ——
+ * `appearance: none` 之后 Chromium 允许，实测有效）。
+ */
+label.check input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-soft);
+  cursor: pointer;
+  position: relative;
+  transition:
+    background 120ms ease-out,
+    border-color 120ms ease-out;
+}
+
+label.check input[type='checkbox']:hover {
+  border-color: var(--accent);
+}
+
+label.check input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 勾：一段折线，用两条边框旋转 45° 画出来 */
+label.check input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: rotate(45deg) scale(0);
+  transition: transform 120ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+label.check input[type='checkbox']:checked::after {
+  transform: rotate(45deg) scale(1);
+}
+
+/* 键盘聚焦要看得见（鼠标点不显示，免得留个框） */
+label.check input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.28);
+}
+
+/*
+ * 没包在 label.check 里的裸 checkbox/radio（如「开机自启」）走系统默认绘制，
+ * 用 accent-color 把勾选块染成品牌蓝 —— 浅色主题下原生方框本来就可见，
+ * 但默认蓝和 #2f6fed 不是同一个蓝。
+ */
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row.buttons {
+  margin-top: 10px;
+}
+
+.btn {
+  padding: 7px 15px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition:
+    background 120ms ease-out,
+    border-color 120ms ease-out;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--border-strong);
+}
+
+/* 键盘聚焦也要看得见（鼠标点的时候不显示，免得"点完还留个框"） */
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.28);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #eef0f4;
+  font-weight: 600;
+}
+
+.btn.danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: transparent;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: rgba(217, 56, 67, 0.12);
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+  /*
+   * ⚠️ 保留文本里的换行（2026-10-10）。
+   *
+   * 模型列表的状态行会分两行写：第一行"取到 N 个模型"，第二行说明
+   * "其中 M 个免费 + 需实名 + 清单核对日期"。挤成一行又长又难读。
+   *
+   * 用 `pre-line` 而不是 `pre-wrap`：前者**只保留换行**、折叠多余空格 ——
+   * 提示文字里可能有缩进用的空格，`pre-wrap` 会把它们显示出来。
+   */
+  white-space: pre-line;
+}
+
+.hint code {
+  background: var(--bg-soft);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.result {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.result.ok {
+  border-color: rgba(34, 160, 107, 0.5);
+  color: var(--ok);
+}
+
+.result.bad {
+  border-color: rgba(217, 56, 67, 0.5);
+  color: var(--bad);
+}
+
+.result pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------------ 设置行 */
+
+/*
+ * 一行设置：左边文字、右边控件。
+ *
+ * 与参考应用的排布一致 —— 标题+说明在左、开关在右。
+ * 卡片化（背景+圆角）是为了让"一行"在视觉上成为一个整体，
+ * 否则一堆开关排下来分不清哪段说明属于哪个开关。
+ */
+/*
+ * ⚠️ **竖向排列**（2026-10-09 按用户要求改）。
+ *
+ * 原来是 `flex` 横排 + `.setting-text { flex: 1 1 auto }`，
+ * 于是说明文字把宽度吃光、控件只剩一点：
+ *
+ *     #tts-provider 实测宽度 = 59px
+ *     而选项文字「本地（Windows 自带语音）」要 ≈ 250px
+ *
+ * 用户看到的现象是"右边显示不出来"。改成竖排：说明在上、控件在下、占满整行。
+ */
+.setting {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  padding: 11px 13px;
+  margin-bottom: 8px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * **只让"该满宽"的控件占满整行**：下拉框和文本框。
+ *
+ * ## 为什么收窄了范围（2026-10-09，我改坏过一次）
+ *
+ * 第一版我写的是 `.setting > .setting-text ~ *` —— 命中紧跟说明的**所有**元素，
+ * 于是把**开关**也拉成了整行宽：
+ *
+ *     <label class="switch">      <!-- 本来是 42×24 -->
+ *       <input id="vision" type="checkbox" />
+ *       <span class="slider"></span>
+ *     </label>
+ *
+ * 用户看到的截图就是"开关变成了长条"。**他只要求下拉框别被挤窄。**
+ *
+ * ⚠️ 为什么反着写（`:not(.switch)` 之类）也不好：以后加新控件还是会误伤。
+ * **正面列出要满宽的**，加新控件时要显式决定，比"默认全中、再排除"安全。
+ *
+ * ⚠️ `min-width: 0` 是必要的：`select` 的默认 `min-width` 是 `auto`，
+ * 在 flex 容器里会按**最长选项**撑开，可能溢出容器。
+ */
+.setting > .setting-text ~ select,
+.setting > .setting-text ~ input:not([type='checkbox']):not([type='radio']) {
+  width: 100%;
+  min-width: 0;
+}
+
+.setting-title {
+  font-weight: 600;
+}
+
+.setting-desc {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/*
+ * 横排的设置项（文字在左、按钮/开关在右）—— 2026-10-13 加。
+ *
+ * ⚠️ 为什么需要它：.setting 默认是 lex-direction: column +
+ * lign-items: stretch，所以放一个 <button> 进去会被**拉满整行** ——
+ * 实测「清空」按钮占了一整行，看起来像主操作而不是右边那个小按钮。
+ *
+ * 加一个 -row 修饰类，不动默认行为（默认那个是给整块内容用的）。
+ */
+.setting-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.setting-row .btn {
+  flex: 0 0 auto;
+}
+
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: 0 0 auto;
+}
+
+.setting-control input[type='range'] {
+  width: 168px;
+}
+
+/* ------------------------------------------------------------------ 滑块 */
+/*
+ * ## 为什么必须自己重画（2026-10-05）
+ *
+ * 原来只有一行 `accent-color: var(--accent)` —— 那只能改**填充色**，
+ * 轨道的两端仍然是浏览器默认的**方角**。用户对着参考应用的截图说
+ * 「滑块两角变圆」，要的就是把轨道和滑块都重画。
+ *
+ * 重画的做法是给 `::-webkit-slider-runnable-track`（轨道）和
+ * `::-webkit-slider-thumb`（滑块）写样式。`appearance: none` 是前提 ——
+ * 不写它，伪元素样式会被系统原生外观覆盖掉（改了看不到效果）。
+ *
+ * 尺寸对齐参考应用：轨道 4px 高、滑块 16px 圆点。
+ * 轨道细、滑块圆，是 Fluent 那套观感的关键。
+ */
+/*
+ * 宽度**默认不写 100%**。
+ *
+ * 踩过：我给 `input[type='range']` 写了 `width: 100%`，把 `.setting-control` 里
+ * 原本的 `168px` 覆盖掉了 —— 滑块一下撑满整行，在左侧标签 + 右侧控件的两列布局里
+ * 显得很突兀（截图里一眼就看出来了）。
+ * 所以宽度交给各处自己定：`.setting-control` 用它自己的 168px，
+ * 「记忆」标签页的滑块用下面的 `.field` 规则撑满。
+ */
+input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 18px; /* 可点击区域比轨道高，好点中 */
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 「记忆」标签页里滑块放在 `.field` 的第二列 —— 那种布局下撑满列宽才对 */
+.field input[type='range'] {
+  width: 100%;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  /* 两端圆角 = 用户要求的"两角变圆" */
+  border-radius: 999px;
+  background: var(--border);
+}
+
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px; /* (4 - 16) / 2 —— 让滑块在轨道上垂直居中 */
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 3px rgba(23, 26, 33, 0.18);
+  transition: transform 120ms ease-out;
+}
+
+input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(1.25);
+}
+
+input[type='range']:focus-visible {
+  outline: none;
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px rgba(47, 111, 237, 0.25);
+}
+
+/* Firefox（虽然这个应用只跑 Chromium，写上不影响） */
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+
+.setting-control output {
+  min-width: 52px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------------ 提示词模板 */
+
+/*
+ * 每条提示词是一个可折叠块。
+ *
+ * 为什么折叠：9 条全部摊开会占两三屏，「想找某一条」要滚很久。
+ * `summary` 里放了"这条现在长什么样"的开头，折叠状态下也能扫读。
+ */
+.prompt-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--sunken);
+  padding: 0 12px;
+  margin-bottom: 8px;
+}
+
+.prompt-item > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+
+/* 去掉默认的三角标记（不同平台长得不一样，不如不放） */
+.prompt-item > summary::-webkit-details-marker {
+  display: none;
+}
+
+.prompt-item[open] > summary {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.prompt-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  /* 预览只占一行，太长就截断 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-input {
+  margin-top: 8px;
+  font-family: inherit;
+}
+
+/* 单行模板不该继承 textarea 的固定高度 */
+input.prompt-input {
+  height: auto;
+  min-height: 0;
+}
+
+textarea.prompt-input {
+  height: auto;
+  min-height: 68px;
+  resize: none;
+  line-height: 1.6;
+}
+
+.prompt-item .row.buttons {
+  margin: 8px 0 12px;
+}
+
+.prompt-state {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ 开关 */
+
+/*
+ * 开关（checkbox 的样式化）。用 appearance:none 重画，而不是放一张图片：
+ * 这样配色跟着 CSS 变量走，也不会多出一个小图标文件要维护。
+ */
+.switch {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 22px;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+
+.switch .slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 11px;
+  background: var(--border-strong);
+  transition: background 140ms ease-out;
+  pointer-events: none;
+}
+
+.switch .slider::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--card);
+  transition: transform 140ms ease-out;
+}
+
+.switch input:checked + .slider {
+  background: var(--accent);
+}
+
+.switch input:checked + .slider::after {
+  transform: translateX(18px);
+}
+
+/* 键盘可达性：焦点环不能省，否则 Tab 走一遍完全看不出焦点在哪 */
+.switch input:focus-visible + .slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ *
+ * 编号小节标题（「语音」页的 ① 语音识别 / ② 文字转语音）
+ * ------------------------------------------------------------------ *
+ *
+ * 用户要求 2026-10-09：「一个是语音识别，一个是文字转语音，这两个标号」。
+ *
+ * ⚠️ 它是 h3 而不是 h2：h2 是**标签页标题**（.tab-panel > h2，字号更大、
+ * 有下边框）。用 h2 会让两个小节看起来像两个并列的页面。
+ */
+.sub-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 26px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line, var(--border));
+  color: var(--text, var(--text-soft));
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sub-title:first-of-type {
+  margin-top: 18px;
+}
+
+/* 序号圆牌 */
+.sub-idx {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent, #2f6fed);
+  color: #fff;
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* 小节内容：左侧一条细线，视觉上归到标题下 */
+section.sub {
+  margin: 0 0 4px;
+  padding-left: 12px;
+  border-left: 2px solid var(--line, var(--border));
+}
+
+/* 隐私提示：小字 + 偏黄，和普通说明区分开 */
+.privacy-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* 快捷键一览（2026-10-12）                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * 从托盘菜单搬过来的（那行超长文字把菜单撑到约 780px 宽）。
+ *
+ * 样式刻意与 .setting-title / .setting-desc 一脉相承：
+ * 设置页里全是"标题 + 说明 + 控件"的三段式，这里是一个**表格式**的变体 ——
+ * 左边键位、右边作用，用 grid 对齐，比一串「 · 」分隔的长句好读得多
+ * （原来那行就是这么排的，读起来很累）。
+ */
+.shortcut-list {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  align-items: baseline;
+  font-size: 12.5px;
+}
+
+.shortcut-list .shortcut-key {
+  /*
+   * 键位用等宽字体 + 浅底：一眼能和说明文字区分开，
+   * 也让 Ctrl+Alt+P 这种组合里的每个字母宽度一致（对齐好看）。
+   */
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(23, 26, 33, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.shortcut-list .shortcut-desc {
+  color: var(--muted);
+}
+
+.shortcut-list .shortcut-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 深色主题（2026-10-14 加，设置页「界面主题」里切换）
+ * ══════════════════════════════════════════════════════════════════
+ * 只认主进程注入的 `<html data-theme="dark">`。
+ * ⚠️ 想改深色配色**只改这里**，不要去改上面的浅色值 ——
+ *    两份定义分居 `:root` 与这里，改错一边的表现是
+ *    "切到深色之后有个别地方还是浅的"，很难归因。
+ */
+html[data-theme='dark'] {
+  --bg: #1c1d24;
+  --bg-soft: #17181e;
+  --card: #24262f;
+  --card-soft: #2a2d38;
+  --hover: #2a2d38;
+  --sunken: #16171d;
+  --border: #343744;
+  --border-strong: #3a3d4a;
+  --text: #e8e9ee;
+  --text-dim: #9a9db0;
+  --text-soft: #cfd2dd;
+  --accent: #6aa9ff;
+  --ok: #6ee7a8;
+  --bad: #ff7b7b;
+  --warn: #e0b45c;
+  --tag-blue-bg: #2b3550;
+  --tag-blue-bd: #33405f;
+  --tag-green-bg: #2a3a2e;
+  --tag-green-fg: #95ec69;
+  --tag-red-bg: #3a2226;
+  --tag-red-bd: #4a2a2f;
+  --tag-red-fg: #ffb4b4;
+}
+
+/* ── 模块开关（2026-10-18 重设计：卡片 + 分组 + 自绘开关）─────────────
+ * 旧版是 .field 两列网格 + 原生 checkbox：长提示被挤进右侧窄列、换行稀碎。
+ * 新版：卡片网格（两列，窄窗口自动一列）+ 组标题 + 自绘 switch。
+ * 浅深主题全走角色变量（--card/--border/--accent…），不需要单独配色。 */
+.module-group-title {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 16px 2px 8px;
+  letter-spacing: 0.5px;
+}
+
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 820px) {
+  .module-grid { grid-template-columns: 1fr; }
+}
+
+.module-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 13px;
+}
+
+/* 地基/前端模块：弱化一档（不是禁用态那么重，只是"与你无关"的安静） */
+.module-card.locked {
+  background: var(--card-soft);
+}
+
+.module-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.module-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.module-card.locked .module-name {
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.module-badge {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+
+.module-badge.restart {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.module-desc {
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-soft);
+}
+
+/* 自绘开关：38x21 轨道 + 15px 旋钮，on 时轨道变 accent */
+.module-switch {
+  flex: none;
+  width: 38px;
+  height: 21px;
+  border-radius: 11px;
+  border: 1px solid var(--border-strong);
+  background: var(--sunken);
+  position: relative;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.18s, border-color 0.18s;
+}
+
+.module-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  box-sizing: border-box;
+  transition: left 0.18s;
+}
+
+.module-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.module-switch.on::after {
+  left: 19px;
+  border-color: var(--accent);
+}
+
+.module-switch.locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+ * 2026-10-18 设置页整体重设计（覆盖上方同名旧规则 —— 追加在文件末尾所以生效）
+ *
+ * 设计语言与「模块」页的卡片一致：左文右控件的行式卡片、自绘开关、
+ * 统一的输入/按钮规格。浅深主题全走角色变量，零单独配色。
+ *
+ * ⚠️ 本段用 `.tab-panel` 提升一级优先级压过上面的旧规则；
+ *    大控件（textarea / 文本 / 密码 / 按钮组 / select）用 `:has()` 自动
+ *    退回「上下堆叠」布局，小控件（开关 / 数字 / 单按钮）右对齐一行放下。
+ * ════════════════════════════════════════════════════════════════════ */
+
+/* 1. 行式卡片：文字左、控件右 */
+.tab-panel .setting {
+  flex-direction: row;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 16px;
+  border-radius: 12px;
+}
+
+.tab-panel .setting-text {
+  gap: 4px;
+}
+
+.tab-panel .setting-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: none;
+  min-width: 0;
+}
+
+/* 大控件自动退回上下堆叠（宽度优先） */
+.tab-panel .setting:has(.setting-control textarea),
+.tab-panel .setting:has(.setting-control input[type='text']),
+.tab-panel .setting:has(.setting-control input[type='password']),
+.tab-panel .setting:has(.setting-control .row),
+.tab-panel .setting:has(.setting-control .select-wrap) {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* 2. 裸 checkbox -> 自绘开关（appearance:none 重画）。
+ * ⚠️ :not(.switch input) 排除已有 .switch 包着的 —— 那些是 opacity:0 的
+ *    隐形 input，被本规则重新可见的话会跟 .slider 叠成两层。 */
+.tab-panel input[type='checkbox']:not(.switch input) {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: var(--border-strong);
+  position: relative;
+  cursor: pointer;
+  margin: 0;
+  transition: background 140ms ease-out;
+}
+
+.tab-panel input[type='checkbox']:not(.switch input)::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--card);
+  transition: transform 140ms ease-out;
+}
+
+.tab-panel input[type='checkbox']:not(.switch input):checked {
+  background: var(--accent);
+}
+
+.tab-panel input[type='checkbox']:not(.switch input):checked::after {
+  transform: translateX(18px);
+}
+
+.tab-panel input[type='checkbox']:not(.switch input):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.28);
+}
+
+.tab-panel input[type='checkbox']:not(.switch input):disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 3. 输入框 / 下拉框统一规格（背景、圆角、聚焦环） */
+.tab-panel input[type='text'],
+.tab-panel input[type='password'],
+.tab-panel input[type='number'],
+.tab-panel .select-wrap > select,
+.tab-panel textarea {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  transition: border-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+
+.tab-panel input[type='text']:focus,
+.tab-panel input[type='password']:focus,
+.tab-panel input[type='number']:focus,
+.tab-panel .select-wrap > select:focus,
+.tab-panel textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.22);
+}
+
+/* 下拉框在行式卡片里右对齐、按内容自适应宽度（上限 360 防止过长选项撑爆） */
+.tab-panel .setting-control .select-wrap {
+  width: auto;
+  min-width: 200px;
+  max-width: 360px;
+}
+
+/* 🔴 主题下拉框是 .setting 的**直接子元素**（不在 .setting-control 里）——
+ * 没有这条时它会被旁边的长描述 flex 挤成 ~40px 宽（"文字都被卡着了"，
+ * 用户 10-18 截图报）。给直接子元素的 wrap / 裸 select 一个保底宽度。 */
+.tab-panel .setting > .select-wrap,
+.tab-panel .setting > select {
+  width: auto;
+  min-width: 220px;
+  max-width: 360px;
+}
+
+/* 4. 按钮统一规格 */
+.tab-panel .btn {
+  flex: none;
+  white-space: nowrap;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border-radius: 9px;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+}
+
+.tab-panel .btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--accent);
+}
+
+.tab-panel .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.tab-panel .btn.danger {
+  background: transparent;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.tab-panel .btn.danger:hover:not(:disabled) {
+  background: rgba(217, 56, 67, 0.12);
+  border-color: var(--bad);
+}
+
+/* 5. 小节标题与提示的间距微调 */
+.tab-panel h2 {
+  margin: 0 0 6px;
+}
+
+.tab-panel .setting,
+.tab-panel .sub {
+  margin-bottom: 10px;
+}
+
+.tab-panel .hint {
+  line-height: 1.55;
+}

@@ -1,0 +1,1151 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP 说明：设置页比宠物主页面宽松一点点，但依然**不允许渲染层联网**。
+      `connect-src 'none'` 是有意的 —— 测试连通性由主进程（Node）发起，
+      渲染层只负责显示结果。这样"渲染层不联网"这条约束在设置页也成立。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>桌面宠物 · 设置</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <!--
+      右上角自绘的关闭按钮（`#close`）已**删除**。
+      它是无边框弹窗时期的产物（`frame: false` 没有系统标题栏，只好自己画一个 ×）。
+      换回带系统边框的窗口后，标题栏自带的关闭按钮就够了 —— 再画一个反而
+      和系统按钮重叠，看起来像两个叉。对应的样式与 JS 也一并删了。
+    -->
+
+    <!--
+      布局：左侧分类导航 + 右侧内容（照参考桌宠应用的设置窗口结构）。
+      为什么要侧栏：设置项会越加越多，单页长滚动会让人找不到东西；
+      分分类之后"这个开关大概在哪一类"是可以预期的。
+    -->
+    <div class="shell">
+      <aside class="sidebar">
+        <h1>桌宠设置</h1>
+        <nav id="nav">
+          <button class="nav-item active" data-target="tab-general">
+            <span class="nav-idx">1</span>常规
+          </button>
+          <button class="nav-item" data-target="tab-pet">
+            <span class="nav-idx">2</span>桌宠
+          </button>
+          <button class="nav-item" data-target="tab-ai">
+            <span class="nav-idx">3</span>AI 与对话
+          </button>
+          <button class="nav-item" data-target="tab-prompts">
+            <span class="nav-idx">4</span>提示词
+          </button>
+          <button class="nav-item" data-target="tab-memory">
+            <span class="nav-idx">5</span>记忆
+          </button>
+          <button class="nav-item" data-target="tab-voice">
+            <span class="nav-idx">6</span>语音
+          </button>
+          <button class="nav-item" data-target="tab-modules">
+            <span class="nav-idx">7</span>模块
+          </button>
+          <button class="nav-item" data-target="tab-privacy">
+            <span class="nav-idx">8</span>隐私
+          </button>
+          <button class="nav-item" data-target="tab-about">
+            <span class="nav-idx">9</span>关于
+          </button>
+        </nav>
+        <p class="sidebar-foot" id="status"></p>
+      </aside>
+
+      <main>
+        <!-- ============================ 常规 ============================ -->
+        <section id="tab-general" class="tab-panel active">
+          <h2>程序</h2>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">显示宠物</span>
+              <span class="setting-desc">把宠物窗口提到最前。找不到它时点这个。</span>
+            </div>
+            <button id="show-pet" class="btn">显示</button>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">开机自启</span>
+              <span class="setting-desc">
+                开机后自动启动宠物。
+                <!--
+                  2026-10-12 从菜单的占位项搬过来并**做成真的**。
+
+                  它原来是菜单里一个置灰的「开机自启·未实现」，用户要求
+                  「开机自启动这个功能放在设置里面」—— 放在这里比放菜单合适：
+                  它是"程序怎么运行"，不是"宠物怎么表现"。
+                -->
+              </span>
+              <div id="login-item-state" class="hint"></div>
+            </div>
+            <!-- 用 checkbox 而不是按钮：它是二态开关，勾选状态本身就是信息。
+                 ⚠️ 不加 `class` —— 与页面里其它 6 个开关保持一致
+                 （尺寸由 settings.css 的 `input[type=checkbox]` 统一管，
+                 多写一个不存在的 class 只会让人以为有别的样式）。 -->
+            <input id="login-item" type="checkbox" />
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">界面主题</span>
+              <span class="setting-desc">
+                换掉宠物菜单、对话条、气泡、记忆管理和本窗口的配色。
+                <strong>深色</strong>适合夜里用 —— 浅色浮层在暗环境里很扎眼。
+              </span>
+              <div id="theme-state" class="hint"></div>
+            </div>
+            <!--
+              主题设置（2026-10-14 用户要求「现在是浅色系的，加个深色系的」）。
+
+              ## 为什么是下拉框，不是"浅色/深色"两个按钮
+
+              与这一页其它控件一致：下拉框是既有的、已经处理过箭头/配色/键盘的
+              那一种（`wrapSelects()` 会给它套 `.select-wrap`）。按钮组要多一套样式，
+              而且以后想加"跟随系统"时下拉框直接多一个选项就行。
+            -->
+            <select id="theme">
+              <option value="light">浅色</option>
+              <option value="dark">深色</option>
+            </select>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">退出程序</span>
+              <span class="setting-desc">只结束<strong>当前这一个</strong>实例。</span>
+            </div>
+            <button id="quit" class="btn danger">退出</button>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">退出全部实例</span>
+              <span class="setting-desc">
+                反复双击桌面快捷方式会堆出多个实例（它们叠在一起，看起来像各种怪问题）。
+                这个按钮通知<strong>所有</strong>正在运行的宠物一起退出。
+              </span>
+            </div>
+            <button id="quit-all" class="btn danger">全部退出</button>
+          </div>
+
+          <!--
+            快捷键一览（2026-10-12 从托盘菜单搬过来的）。
+
+            ## 为什么搬家
+
+            它原来在托盘菜单里是一整行长文字：
+            「快捷键：Ctrl+Alt+P 显示/隐藏 · Ctrl+Alt+L 聚焦输入框 · …」
+            而 Windows 菜单的宽度**取最长项**，于是整个托盘菜单被撑到约 780px，
+            右边一大片空白。而它还是个 `enabled: false` 的不可点说明项 ——
+            占最多空间、最没用。
+
+            搬到这里之后菜单回到正常宽度，说明文字也有了更宽敞的地方。
+
+            ## ⚠️ 内容由 `settings.js` 从主进程的 SHORTCUTS 填充，**不写死**
+
+            写死一份就多一处会漂移的副本，而"界面写着 Ctrl+Alt+M、实际从没注册过"
+            是这个项目踩过的真事故。`#shortcut-list` 是空的，等 JS 填。
+
+            ⚠️ 但**快捷键的字样必须留在文件里**（哪怕是注释）：
+            `tools/check-shortcuts.mjs` 会扫 renderer 目录，要求每个登记的快捷键
+            都能在界面文案里找到 —— 免得"实现了但没告诉用户"。
+
+                显示/隐藏宠物          Ctrl+Alt+P
+                聚焦输入框            Ctrl+Alt+L
+                聚焦宠物              Ctrl+Alt+K
+                免打扰                Ctrl+Alt+Q
+          -->
+          <h2>快捷键</h2>
+          <div class="setting">
+            <div class="setting-text" style="flex: 1">
+              <span class="setting-title">全局快捷键</span>
+              <span class="setting-desc">
+                在任何程序里都有效。宠物的输入框和窗口默认不抢焦点，
+                所以「按住说话」之前要先用<strong>聚焦宠物</strong>把焦点给它。
+              </span>
+              <!-- 由 settings.js 填充 -->
+              <div id="shortcut-list" class="shortcut-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================ 桌宠 ============================ -->
+        <section id="tab-pet" class="tab-panel">
+          <!--
+            ⚠️ 「活泼度」滑杆**已删除**（2026-10-17 用户要求：
+               「把设置里面的活泼度调节删除吧，现在用菜单调节就行」）。
+            现在只有宠物右键菜单里那四档（安静 / 无聊 / 好奇 / 自言自语），
+            因为档位是一等公民，滑杆那种"0.73"没有对应的行为语义。
+          -->
+          <h2>宠物大小</h2>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">宠物大小</span>
+              <span class="setting-desc">
+                窗口与立绘一起缩放，只列几个<strong>标准档位</strong>，好记也好改。
+                改完<strong>立刻生效</strong>，不用点保存。
+              </span>
+            </div>
+            <div class="setting-control">
+              <!--
+                下拉框的选项由 settings.js **按主进程给的档位清单填充**（不写死在这里）。
+                清单的真源是 `petLayout.ts` 的 `PET_SCALE_PRESETS`，这样"代码里的档位"
+                和"界面上的档位"不会漂移成两份。
+                （原来是个 0.6~2.4 的连续滑杆，用户要求改成固定几档。）
+              -->
+              <select id="pet-scale"></select>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">「自言自语」持续多久</span>
+              <span class="setting-desc">
+                活泼度切到「自言自语」后，它念叨多久会自己回落到「安静」（情绪发泄完了）。
+                <strong>默认 20 分钟</strong>，最多 180 分钟（3 小时）。
+                <br />
+                <strong>0 = 不回落</strong>：会一直念念叨叨，直到你手动换档位。
+                <br />
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="monologue-decay" class="narrow-num" type="number" min="0" max="180" step="1" />
+              <span class="suffix">分钟</span>
+            </div>
+          </div>
+
+          <h2>边缘探头</h2>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">启用边缘探头</span>
+              <span class="setting-desc">
+                把宠物拖到屏幕左/右边缘时，它会侧身 45° 贴着边窥视。
+                拖离边缘即退出。
+              </span>
+            </div>
+            <label class="switch">
+              <input id="edge-peek" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!--
+            ⚠️ 「靠边多少像素自动侧身」（`edge-snap`）已**删除**。
+            用户要求：「将第一项去除，因为现在靠近屏幕最边缘才触发」。
+            现在的行为是"立绘真正贴到屏幕边才触发"，这个阈值不再需要给用户调。
+            （主进程里的 `edgeSnapPx` 仍在，但只用默认值 40：
+            那 40px 是"立绘可见边缘到屏幕边"的距离，不是窗口边缘，
+            所以实际观感已经是"几乎贴上去"才触发。）
+          -->
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">文字弹窗存在时间</span>
+              <span class="setting-desc">
+                宠物上方的回应气泡显示多久后自动消失，<strong>默认 10 秒</strong>。
+                若在这段时间内出现下一条回应，旧气泡会先做动画消失、新气泡再出现。
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <!-- 数字输入框（原来滑杆：整数参数拖不准，用户要求改输入框） -->
+              <input id="bubble-linger" class="narrow-num" type="number" min="1" max="600" step="1" />
+              <span class="suffix">秒</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">气泡段间距</span>
+              <span class="setting-desc">
+                气泡里段落之间留多宽的缝，<strong>默认 4px</strong>（0 = 完全贴合，
+                24 = 分段很明显）。改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-para-gap" class="narrow-num" type="number" min="0" max="24" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">气泡上方间距</span>
+              <span class="setting-desc">
+                气泡显示在宠物头顶时，与头顶留多宽的空隙，<strong>默认 6px</strong>。
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-gap-above" class="narrow-num" type="number" min="0" max="120" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">气泡左右间距</span>
+              <span class="setting-desc">
+                气泡改到宠物旁边显示时，与立绘留多宽的空隙，<strong>默认 10px</strong>。
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-gap-side" class="narrow-num" type="number" min="0" max="120" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">立绘贴合度</span>
+              <span class="setting-desc">
+                气泡贴着立绘的「核心框」摆放 —— 比例越大气泡贴得越近（补偿立绘
+                动画帧之间的透明余量），<strong>默认 25%</strong>。设 0 则按原始
+                测量框（可能会显得远）。改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-core-shrink" class="narrow-num" type="number" min="0" max="40" step="1" />
+              <span class="suffix">%</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">探头时的平移距离</span>
+              <span class="setting-desc">
+                侧身探头时，立绘往屏幕边方向<strong>平移多少像素</strong>。
+                调大 = 探出去更多、身体更往外；<strong>调小 = 只在边上露一点</strong>。
+                <strong>可以是负数</strong>（往回收，立绘退回屏幕里一些、露出更多）。
+                改完<strong>立刻生效</strong>，不用点保存，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <!-- 数字输入框（原来滑杆）。`min` 是负的 —— 负数表示往回收，是合法值。 -->
+              <input id="peek-offset" class="narrow-num" type="number" min="-60" max="160" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============================ AI ============================ -->
+        <section id="tab-ai" class="tab-panel">
+          <h2>大脑 API</h2>
+
+          <!--
+            提供商切换（用户要求 2026-10-08：
+            「两个都要，要和现有的 deepseek 有互切选项」）。
+
+            ## ⚠️ 这一项改的是 `providers.brain.active`，**不是**「接口类型」
+
+            两者是**不同层级**的概念，别混：
+
+              · 接口类型（下面那个 `#provider`）= **协议**（mock / openai）
+                —— 决定用哪个实现，一般不用改
+              · 提供商（这一个）            = **厂商**（DeepSeek / 硅基流动）
+                —— 决定连哪个地址、用哪个密钥
+
+            DeepSeek 与硅基流动**都走 OpenAI 兼容协议**，所以切换厂商时
+            「接口类型」保持不变。把它俩做成两个"接口类型"是错的抽象
+            （以后接第三家又要改协议层）。
+
+            ## 切过去之后地址与密钥会自动跟着换
+
+            `#base-url` 与 `#api-key` 会按新厂商刷新（见 `brainRefreshUi()`）。
+          -->
+          <div class="field">
+            <label for="brain-mode">运行位置</label>
+            <!--
+              大脑只有一种协议（OpenAI 兼容），本地 Ollama / llama.cpp / vLLM 也走它，
+              所以"本地"= 换接口地址 + 不需要密钥（后端对 127.0.0.1/localhost 免密钥）。
+
+              ⚠️ 这里只是**引导**：选完自动填地址/模型，仍然要点「保存」才落盘。
+            -->
+            <select id="brain-mode">
+              <option value="cloud">云端 API（DeepSeek / 硅基流动…）</option>
+              <option value="local">本地模型（Ollama / llama.cpp / vLLM）</option>
+            </select>
+            <p class="hint" id="brain-mode-hint"></p>
+          </div>
+
+          <div class="field">
+            <label for="brain-vendor">提供商</label>
+            <select id="brain-vendor"></select>
+            <p class="hint" id="brain-vendor-state"></p>
+          </div>
+
+          <div class="field">
+            <label for="provider">接口类型</label>
+            <select id="provider">
+              <option value="mock">mock（离线占位，不调用任何接口）</option>
+              <option value="openai">openai（OpenAI 兼容：DeepSeek / Kimi / 通义…）</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="base-url">接口地址</label>
+            <input id="base-url" type="text" spellcheck="false" placeholder="https://api.deepseek.com/v1" />
+          </div>
+
+          <div class="field">
+            <label for="model">模型</label>
+            <!--
+              **下拉框**而不是文本框（用户要求：「可以根据 api 传来的可选模型自由选择」）。
+
+              ⚠️ 保留一个"手填"选项：有些 OpenAI 兼容端点（自建 llama.cpp / 部分代理）
+              没有 `/models`，那时列表是空的，必须还能自己敲模型名。
+            -->
+            <select id="model"></select>
+            <div class="row buttons">
+              <button id="refresh-models" class="btn">刷新模型列表</button>
+            </div>
+            <input
+              id="model-manual"
+              type="text"
+              spellcheck="false"
+              placeholder="手填模型名（列表拉不到时用）"
+            />
+            <p class="hint" id="models-state"></p>
+          </div>
+
+          <div class="field">
+            <label for="api-key">API 密钥</label>
+            <input id="api-key" type="password" spellcheck="false" placeholder="sk-..." />
+          </div>
+
+          <p class="hint" id="key-state"></p>
+
+          <div class="row buttons">
+            <button id="test" class="btn">测试连接</button>
+            <button id="save" class="btn primary">保存</button>
+          </div>
+
+          <div id="result" class="result hidden"></div>
+
+          <!-- ======================= 人格提示词 ======================= -->
+          <h2>人格提示词</h2>
+          <p class="hint">
+            这段文字是宠物的"底子"，每次对话都会带上。
+            <code>{name}</code> 会被替换成宠物名字。
+          </p>
+
+          <!-- 开关：用户可以不用提示词（自己写的人设 vs 完全不干预） -->
+          <label class="check">
+            <input id="prompt-enabled" type="checkbox" />
+            <span>启用这段提示词（不勾选 = 完全按模型自己的性子说话）</span>
+          </label>
+
+          <!-- ⚠️ 用 `field-block`：整宽单列。普通 `.field` 会把 textarea 压到窄列里 -->
+          <div class="field field-block">
+            <textarea id="persona-prompt" rows="12" spellcheck="false"></textarea>
+            <p class="hint" id="prompt-state"></p>
+          </div>
+          <div class="row buttons">
+            <button id="reload-prompt" class="btn">重新载入</button>
+            <button id="save-prompt" class="btn primary">保存提示词</button>
+          </div>
+        </section>
+
+        <!-- ============================ 提示词 ============================ -->
+        <section id="tab-prompts" class="tab-panel">
+          <h2>要输入给 AI 的提示词</h2>
+          <p class="hint">
+            每一次对话，宠物都会把这些段落拼成一段「系统提示词」发给模型。
+            这里逐条列出，**改了立刻生效**（重启也保留）。
+          </p>
+          <p class="hint">
+            ⚠️ 花括号是<strong>占位符</strong>，会被程序替换成实际内容；
+            写错（多一个括号、写了不存在的名字）时这一段会**退回内置默认**并记一条日志 ——
+            不会让宠物不说话。想输出字面花括号请写 <code>{{</code> 和 <code>}}</code>。
+          </p>
+
+          <!--
+            字段由 `settings.js` 的 `renderPromptTemplates()` 动态生成。
+            为什么不写死在 HTML 里：清单的真源在主进程（带标签、说明、占位符提示），
+            两处各写一份必然漂移。
+          -->
+          <div id="prompt-fields"></div>
+          <p class="hint" id="prompt-tpl-state"></p>
+
+          <h2>记忆相关的两段</h2>
+          <!--
+            用户要求（2026-10-05）：「用记忆管理中的珍藏记忆管理来接管提示词中的
+            记忆珍藏的功能，所以提示词中它只用写在记忆管理中的珍藏记忆管理即可，
+            此处纯文本」（固定注入开头同理）。
+
+            所以这两项**从可编辑清单里移除了**（见 index.ts 的 PROMPT_FIELDS），
+            这里只留说明文字 + 一个入口按钮。
+          -->
+          <p class="hint">
+            <strong>珍藏记忆</strong>：在记忆管理页面中管理。<br />
+            <strong>固定注入的开头</strong>：在记忆管理页面中管理。
+          </p>
+          <div class="row buttons">
+            <button id="open-memory-from-prompts" class="btn">打开记忆管理…</button>
+          </div>
+          <p class="hint">
+            那两段的内容由你的记忆数据决定（珍藏了什么、固定注入了什么），
+            所以放在记忆管理页面里更合适 —— 在那里能一边看数据一边改。
+          </p>
+
+          <h2>人格底子</h2>
+          <p class="hint">
+            这段是宠物人格的核心，也在上面这些段落之前注入。它有自己的开关（在「AI 与对话」里）
+            和独立的编辑器（同样在那一页）—— 因为它是唯一一段「长文」，值得占一块地方。
+          </p>
+        </section>
+
+        <!-- ============================ 记忆 ============================ -->
+        <section id="tab-memory" class="tab-panel">
+          <h2>上下文记忆</h2>
+          <p class="hint">
+            宠物和你的<strong>最近对话</strong>会作为对话历史发给模型，这样它「接着上次说」。
+            关闭宠物只是关掉进程 —— 记忆存在本地，下次打开<strong>自动接上</strong>。
+          </p>
+          <!--
+            ## ⚠️ 这一项最终定成「天数」（用户 2026-10-08 定稿）
+
+            用户原话：
+
+                「不如直接按照最近记忆，设置多少天的记忆内容，重启宠物时灌注
+                  最近的设置记忆内容即可，不过最近记忆可以按照设置的天数自动
+                  搜索数据库取得字数，计算出总 token 消耗，再和云端的大模型
+                  上下文计算，看总占比。」
+
+            所以：**天数是你调的那个旋钮**，下面那行实时显示它对应多少字 /
+            多少 token / 占比多少 —— 让你看着数字调，而不是盲调。
+
+            （中途试过"只给一个 token 预算输入框"。用户否掉了 ——
+              天数才是人脑子里想的东西："我要它记得最近 7 天"。）
+
+            ## 天数与 token 预算的分工（已确认「天数为主，预算当安全上限」）
+
+              天数 -> 决定**取多少**
+              预算 -> 决定**最多发多少**（超了只发最新那部分，下面会提示"已截断"）
+
+            预算由厂商配置决定（`providers.brain.history_token_budget`）。
+
+            ⚠️ 2026-10-18 用户要求「将安全上限的 token 设置成可自助调节」，
+            所以预算从"只显示"改成**可编辑**（就写上面那个键）。
+          -->
+          <div class="field">
+            <label for="mem-days">记忆天数</label>
+            <!-- 0 = 不限天数（仍受预算截断）。上限十万天 ≈ 274 年，等于不限。 -->
+            <div class="with-suffix narrow">
+              <input id="mem-days" type="number" min="0" max="100000" step="1" />
+              <span class="suffix">天</span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="mem-budget">上下文上限</label>
+            <!-- 安全上限：超了就只发最新的那部分。
+                 下限 1000 / 上限 100000 —— 必须与主进程写入口
+                 （settings:set-memory-config 的 clamp）保持一致。 -->
+            <div class="with-suffix narrow">
+              <input id="mem-budget" type="number" min="1000" max="100000" step="1000" />
+              <span class="suffix">token</span>
+            </div>
+          </div>
+          <p class="hint" id="mem-budget-hint"></p>
+          <p class="hint" id="mem-hint"></p>
+          <p class="hint" id="mem-usage"></p>
+
+          <h2>记忆库</h2>
+          <p class="hint">
+            原文对话、珍藏片段、固定注入提示词都在<strong>独立的记忆管理窗口</strong>里查看与编辑
+            —— 那是一个表格界面（一屏能看几十行），比设置页里塞一块列表好用得多。
+          </p>
+          <div class="row buttons">
+            <button id="open-memory" class="btn primary">打开记忆管理…</button>
+          </div>
+          <p class="hint" id="db-path-line"></p>
+
+          <h2>自动备份</h2>
+          <p class="hint">
+            每次打开宠物时，把整个记忆数据库复制一份到指定文件夹。
+            <br />
+            ⚠️ <strong>数据库里就是全部记忆</strong> —— 所以"备份数据库"等于"备份记忆"。
+            原文件夹丢了，靠这个能完整恢复。
+          </p>
+          <label class="check">
+            <input id="backup-enabled" type="checkbox" />
+            <span>每次启动时自动备份</span>
+          </label>
+          <div class="field">
+            <label for="backup-dir">备份文件夹</label>
+            <input id="backup-dir" type="text" spellcheck="false" placeholder="还没选（点右边选一个）" />
+          </div>
+          <div class="row buttons">
+            <button id="pick-backup-dir" class="btn">选择文件夹…</button>
+            <button id="backup-now" class="btn">立即备份一次</button>
+          </div>
+          <div class="field">
+            <label for="backup-keep">保留份数</label>
+            <!-- `narrow-num`：上限 999，同样不需要占满整行（与「时间窗口」保持一致） -->
+            <input id="backup-keep" class="narrow-num" type="number" min="0" max="999" step="1" />
+          </div>
+          <p class="hint">
+            <strong>0 = 保留全部</strong>（默认）。实测 119 轮对话只有 6.6 KB 文字，
+            几十份备份也就几百 KB，不值得删。等检索记忆（带向量）长起来再考虑限制。
+          </p>
+          <p class="hint" id="backup-state"></p>
+          <p class="hint" id="backup-info"></p>
+          <p class="hint">
+            数据库位置：<code id="db-path"></code>
+          </p>
+        </section>
+
+        <!-- ============================ 隐私 ============================ -->
+        <!-- ============================ 语音 ============================ -->
+        <!--
+          用户要求 2026-10-09：「你放在设置隐私里面的语音系统，统一拉出来放在
+          设置语音里面，一个是语音识别，一个是文字转语音，这两个标号，
+          还有涉及隐私的要提示」。
+
+          所以这一页**只有语音**，分两个编号小节。隐私提示写在每一项上
+          （本地 = 不出本机；云端 = 上传到哪家），而不是笼统说一句"注意隐私"。
+        -->
+        <section id="tab-voice" class="tab-panel">
+          <h2>语音</h2>
+
+          <p class="hint">
+            语音有关的都在这一页。<strong>麦克风相关的开关不需要就保持关闭</strong>
+            —— 关着的时候宠物一样会说话（出声是扬声器，不需要麦克风权限）。
+          </p>
+
+          <h3 class="sub-title"><span class="sub-idx">1</span>语音识别（你说给它听）</h3>
+
+          <section class="sub">
+          <!--
+            语音对话开关（2026-10-07）。
+
+            ⚠️ 它**不在这个窗口里开麦克风** —— 麦克风的生命周期跟宠物走
+            （设置页关掉不该让语音停）。这里只发"我要开"，宠物窗口执行
+            `VoiceIO.start()`。见 `app.js` 的 `setVoice` 与 settings preload 的注释。
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">语音对话（麦克风）</span>
+              <span class="setting-desc">
+                打开后可以直接对宠物说话，它听懂了就用语音回你（TTS 未接时只显示文字）。
+                <br />
+                <strong>打开时会请求麦克风权限</strong> —— 浏览器要求这一步必须由
+                「点击」触发，所以不能记住上次的开关自动打开。
+                <br />
+                <span id="voice-state" class="muted">未开启</span>
+              </span>
+            </div>
+            <label class="switch">
+              <input id="voice" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!--
+            按住说话（用户要求：「设置自定义按键，按下按键发声，停下结束」）。
+
+            ⚠️ 它和上面那个语音开关**各管一半**：
+              · 语音开关 —— 允不允许听（麦克风开不开）
+              · 这个键   —— 这一句从哪到哪（按下开始、松开结束）
+            两个都开才起作用。
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">按住说话</span>
+              <span class="setting-desc">
+                按住下面这个键说话，<strong>松开就结束</strong>（不用等静音判定）。
+                <br />
+                适合"说一句就发"的场景。需要先打开上面的语音对话开关。
+                <br />
+                <span id="ptt-state" class="muted">未启用</span>
+              </span>
+            </div>
+            <label class="switch">
+              <input id="ptt-enabled" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">按住说话的按键</span>
+              <span class="setting-desc">
+                点右边按钮，然后<strong>按一下你想用的键</strong>。
+                <br />
+                建议用平时打字不会碰到的键（右 Alt / 右 Ctrl / F 系列）。
+                <br />
+                <!--
+                  ⚠️ **必须告诉用户"要先让宠物窗口有焦点"**（2026-10-10 加）。
+
+                  实测：宠物窗口是鼠标穿透的，点击会穿到下面的窗口 ——
+                  所以"点一下宠物"**不会**让它聚焦。而按住说话依赖焦点
+                  （`before-input-event` 失焦时 0 个事件）。
+                  不说清楚的话，用户按住这个键永远没反应，而日志里一切正常。
+                -->
+                <strong>用法</strong>：先按 <code>Ctrl+Alt+K</code> 把焦点给宠物
+                （或者宠物窗口刚好是当前窗口），然后<strong>按住</strong>这个键说话，
+                <strong>松开</strong>结束。
+                <br />
+                <span id="ptt-key-state" class="muted"></span>
+              </span>
+            </div>
+            <button id="ptt-capture" class="btn">按键设置</button>
+          </div>
+
+          <!--
+            **全局键**（宠物窗口没有焦点时用的那个）。
+
+            ⚠️ 它和上面那个是**两个不同的键**，因为能力不同：
+
+                  聚焦时   按住说话用的键  -> 能拿到"松开"，真正的按住说
+                  不聚焦时 全局键          -> 只有"按下"，只能做切换式
+
+            为什么不能共用一个：全局键走 Electron 的 accelerator，而
+            accelerator **表达不了单独的修饰键** —— 实测 `Ctrl` / `Alt` /
+            `ControlRight` 都在解析阶段抛异常（`conversion failed`），
+            鼠标键（`XButton1`）同理。
+
+            所以：
+              「按住说话的按键」可以是右 Alt 这类修饰键（只在聚焦时有效）
+              「全局键」       必须是普通键（F9 / ScrollLock / 媒体键…）
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">全局键（窗口没焦点时用）</span>
+              <span class="setting-desc">
+                点右边按钮，然后<strong>按一下你想用的键</strong>。
+                <br />
+                <strong>必须是普通键</strong>（F 系列 / ScrollLock / 媒体键…）——
+                单独的 Ctrl、Alt 这类修饰键在全局热键里用不了。
+                <br />
+                用法：按一次开始说，<strong>再按一次结束</strong>（不是按住）。
+                <br />
+                <span id="ptt-global-state" class="muted"></span>
+              </span>
+            </div>
+            <button id="ptt-global-capture" class="btn">全局键设置</button>
+          </div>
+
+          <!--
+            语音识别：本地大模型 vs 云端 API（用户要求 2026-10-07）。
+
+            ⚠️ 这是**两条完全不同的取舍**，所以界面上要把差别写清楚：
+              本地 = 免费 + 语音不出本机，但占显存、首次要下模型
+              云端 = 零安装 + 中文最好，但语音要上传、要花钱
+          -->
+          <!--
+            麦克风选择**移到了宠物右键菜单**（用户要求 2026-10-08：
+            「麦克风选项移到宠物菜单里面」）。
+
+            这里只留一行状态说明 —— 让用户知道该去哪儿换，而不是找不到入口。
+            （菜单位置：右键宠物 / 托盘 -> 「麦克风」子菜单）
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">麦克风</span>
+              <span class="setting-desc">
+                **在宠物菜单里选**：右键宠物本体（或托盘图标）→「麦克风」。
+                <br />
+                说话没反应时先去那儿换一支试试 —— 系统默认的那个不一定是你在用的。
+                <br />
+                <span id="mic-state" class="muted">未启用语音</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">语音识别方式</span>              <span class="setting-desc">
+                <strong>本地大模型</strong>：离线、免费。占约 1.6GB 显存。
+                <br />
+                <strong>云端 API</strong>：零安装、中文更准，按量计费。
+                <span class="privacy-note">
+                  🔒 隐私：选<strong>本地</strong>时你的语音<strong>不出本机</strong>；
+                  选<strong>云端</strong>时录到的语音会<strong>上传到硅基流动</strong>的服务器做识别。
+                </span>
+                <br />
+                <span id="asr-state" class="muted">未启用语音</span>
+              </span>
+            </div>
+            <select id="asr-mode">
+              <option value="local">本地大模型（离线）</option>
+              <option value="openai">云端 API（硅基流动）</option>
+              <option value="mock">不用（假识别，仅调试）</option>
+            </select>
+          </div>
+
+          <div class="setting" id="asr-local-row">
+            <div class="setting-text">
+              <span class="setting-title">本地模型</span>
+              <span class="setting-desc">
+                <code>large-v3-turbo</code> 实测最优（又准又快、输出简体）；
+                <code>small</code> 更省显存但偶尔听错；<code>tiny</code> 中文不可用。
+              </span>
+            </div>
+            <select id="asr-local-model">
+              <option value="large-v3-turbo">large-v3-turbo（推荐）</option>
+              <option value="medium">medium</option>
+              <option value="small">small</option>
+              <option value="base">base</option>
+              <option value="tiny">tiny（中文不可用）</option>
+            </select>
+          </div>
+
+          <!--
+            模型下载地址（2026-10-19 用户要求）：
+            「不是每个人都开 VPN 的，我们要留个下载地址」。
+            所以这里把**国内镜像**摆在最前面，官方地址作为备选，
+            并且把"该放哪个目录"和"现在有没有"都写出来 ——
+            否则用户把模型下到 Downloads 里，程序永远也找不到。
+          -->
+          <div class="setting" id="asr-model-row" style="display: block">
+            <div class="setting-text">
+              <span class="setting-title">本地模型下载地址</span>
+              <span class="setting-desc">
+                <strong>国内镜像（不用 VPN）</strong>：
+                <code id="asr-model-mirror" style="word-break: break-all">https://hf-mirror.com/mobiuslabsgmbh/faster-whisper-large-v3-turbo</code>
+                <br />
+                <strong>官方地址（需能直连 huggingface.co）</strong>：
+                <code id="asr-model-official" style="word-break: break-all">https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo</code>
+                <br />
+                <strong>放这里</strong>：<code id="asr-model-dir" style="word-break: break-all">读取中…</code>
+                <br />
+                <span id="asr-model-state" class="muted">正在检查本地是否已有模型…</span>
+              </span>
+            </div>
+            <div class="row buttons" style="margin-top: 8px">
+              <button id="asr-open-dir" class="btn">打开模型文件夹</button>
+              <button id="asr-copy-cmd" class="btn">复制下载命令</button>
+            </div>
+          </div>
+
+          <div class="setting" id="asr-cloud-row">
+            <div class="setting-text">
+              <span class="setting-title">云端接口地址</span>
+              <span class="setting-desc">
+                默认硅基流动，模型 <code id="asr-cloud-model-hint">FunAudioLLM/SenseVoiceSmall</code>。
+              </span>
+            </div>
+            <input id="asr-cloud-base" type="text" spellcheck="false" placeholder="https://api.siliconflow.cn/v1" />
+          </div>
+
+          <div class="setting" id="asr-cloud-key-row">
+            <div class="setting-text">
+              <span class="setting-title">语音识别 API 密钥</span>
+              <span class="setting-desc">
+                存在本地凭据文件里，不进项目配置。
+                <br />
+                <span id="asr-cloud-key-state" class="muted"></span>
+              </span>
+            </div>
+            <input id="asr-cloud-key" type="password" spellcheck="false" placeholder="留空表示不修改" />
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">&nbsp;</span>
+              <span class="setting-desc" id="asr-save-state"></span>
+            </div>
+            <button id="asr-save" class="btn">保存语音识别设置</button>
+          </div>
+          </section>
+
+          <h3 class="sub-title"><span class="sub-idx">2</span>文字转语音（它说给你听）</h3>
+
+          <!--
+            ⚠️ 「试听」刻意走**真实链路**（协议 voice.say -> sidecar 的
+            `VoiceSession.speak()`），而不是在这里直接合成。
+
+            原因：本地 SAPI 在**主进程里能枚举音色、却一个都取不到**
+            （`$synth.Voice.Name` 是空串）。如果试听走主进程自己合成，
+            就会得出"能用"的错误结论 —— 这个项目里已经吃过一次这种亏。
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">合成方式</span>
+              <span class="setting-desc">
+                <strong>云端</strong>：硅基流动 CosyVoice2，中文自然、零安装，按量计费。
+                <br />
+                <span class="privacy-note">
+                  🔒 隐私：宠物要说的话会变成<strong>文字</strong>发给合成服务。
+                  <strong>上传到硅基流动</strong>合成。
+                  （和你打的字、宠物看到的内容无关 —— 只发它要说出口的那句。）
+                </span>
+                <br />
+                <span id="tts-state" class="muted">未启用</span>
+              </span>
+            </div>
+            <select id="tts-provider">
+              <option value="edge">edge-tts（免费在线，推荐）</option>
+              <option value="openai">云端 API（硅基流动 CosyVoice2，收费）</option>
+              <option value="none">不出声（只显示文字）</option>
+            </select>
+          </div>
+
+          <!--
+            edge-tts 的音色（2026-10-11 加）。
+
+            ⚠️ 它和下面「云端音色」是**两套完全不同的名字格式**，所以是两个控件、
+            两个配置字段（`edge_voice` / `voice`）。混用一个字段的实际后果：
+            切到 edge 保存后 `voice` 变成 `zh-CN-XiaoxiaoNeural`，
+            再切回云端就 400 Invalid voice（这个坑在 local_voice 上踩过）。
+          -->
+          <div class="setting" id="tts-edge-row">
+            <div class="setting-text">
+              <span class="setting-title">edge 音色</span>
+              <span class="setting-desc">
+                微软 Edge 的在线音色，<strong>14 个中文音色</strong>（含东北话 / 陕西话 / 粤语 / 台湾）。
+                <br />
+                <span class="muted">免费、不用密钥；但<strong>文本会发到微软的服务器</strong>。</span>
+                <br />
+                <span id="tts-edge-hint" class="muted"></span>
+              </span>
+            </div>
+            <select id="tts-edge-voice"></select>
+          </div>
+
+          <div class="setting" id="tts-cloud-row">
+            <div class="setting-text">
+              <span class="setting-title">云端音色</span>
+              <span class="setting-desc">
+                硅基流动 CosyVoice2 的 8 个预设音色，<strong>男声 4 个、女声 4 个</strong>。
+                <br />
+                <span id="tts-cloud-hint" class="muted"></span>
+                <br />
+                密钥<strong>和上面「语音识别」共用同一个</strong>（同一个服务商），
+                不在这里重复填。
+              </span>
+            </div>
+            <!--
+              选项的 value 是**完整的 `模型名:音色名`**。
+              为什么不只存 `alex` 再在保存时拼：服务端要求这个完整格式，
+              拼的话模型名一改（或换服务商）就会对不上；
+              直接存完整值，读回来也能原样匹配上。
+            -->
+            <select id="tts-cloud-voice">
+              <optgroup label="男声">
+                <option value="alex">alex —— 稳重</option>
+                <option value="benjamin">benjamin —— 低沉</option>
+                <option value="charles">charles —— 磁性</option>
+                <option value="david">david —— 开朗</option>
+              </optgroup>
+              <optgroup label="女声">
+                <option value="anna">anna —— 稳重</option>
+                <option value="bella">bella —— 热情</option>
+                <option value="claire">claire —— 温柔</option>
+                <option value="diana">diana —— 开朗</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">&nbsp;</span>
+              <span class="setting-desc" id="tts-save-state"></span>
+            </div>
+            <button id="tts-save" class="btn">保存</button>
+            <button id="tts-test" class="btn">试听</button>
+          </div>
+        </section>
+
+
+        <section id="tab-modules" class="tab-panel">
+          <h2>模块</h2>
+          <!--
+            模块化（2026-10-18）：把后端功能拆成一个个能单独关掉的模块。
+
+            ⚠️ 界面上**只允许热切 5 个**（语音 / 自主行为 / 自言自语 / 看屏幕 / 联网搜索），
+            其余是地基（记忆、人设、聊天）或前端模块（立绘、窗口），一律置灰 ——
+            关了它们宠物就不存在了，那不是"开关"，是"自毁"。
+          -->
+          <p class="hint">
+            每个模块都能单独关掉 —— 关掉的意思是**它根本不启动**，不是启动后再拒绝。
+            <br />「能热切」的改完立刻生效；标着「需重启」的（语音引擎）要重启程序。
+          </p>
+          <div id="modules-list"></div>
+          <p class="hint" id="modules-state"></p>
+          <div class="row buttons">
+            <button id="modules-refresh" class="btn">刷新状态</button>
+          </div>
+          <p class="hint">
+            改完想改回来？再点一次开关即可；配置文件里也有同样的开关
+            （<code>persona.yaml</code> 的 <code>modules</code> 段）。
+          </p>
+        </section>
+
+<section id="tab-privacy" class="tab-panel">
+          <h2>屏幕</h2>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">允许偶尔截图</span>
+              <span class="setting-desc">
+                开启后，宠物在「好奇」「自言自语」两档里会偶尔自己截一帧，看看你在干什么，
+                再决定要不要搭话。默认关闭。
+                <br />
+                这是权限，不是频率：活泼度只决定它多常想说话，永远不能替你打开这一项。
+                窗口标题含「密码 / 银行 / 私密 / 无痕」等词时会整帧跳过，不读取内容。
+              </span>
+            </div>
+            <label class="switch">
+              <input id="vision" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <!--
+            截图对话（2026-10-17 用户要求）：
+            「这个看看它看到了什么的按钮就是开启后，截图对话传来的第一次回复会
+              控制在api说话的最后分一段带上图片的信息就行，这个按钮放在设置里面开启。」
+
+            ⚠️ 它和上面的「允许偶尔截图」是**两件事**：
+               允许偶尔截图   宠物自己偶尔看一帧（默认关，隐私敏感）
+               这一项         用户按下 Ctrl+Alt+S 之后，把那一次的**画面描述**念出来
+            -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">截图对话时说一句"它看到了什么"</span>
+              <span class="setting-desc">
+                开启后，截图对话（Ctrl+Alt+S）的那一次回复会在最后另起一段，
+                念出它实际看到的画面内容 —— 用来核对它有没有看错。默认关闭。
+                这一段不会写进对话历史，也不会变成记忆。
+              </span>
+            </div>
+            <label class="switch">
+              <input id="snapshot-desc" type="checkbox" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+                  <!-- ======================= 联网 ======================= -->
+          <h2>联网</h2>
+
+          <!--
+            「联网搜索」的开关在**宠物右键菜单**里（用户明确要求
+            「联网功能默认关闭，在菜单里面打开之后…」），这里只放
+            菜单里没有的那个 —— 浏览器兜底。
+
+            ⚠️ 两处开关放两个地方是**用户指定的**，不是遗漏。
+            所以这里要写清楚"另一个在哪"，否则用户会在这里找不到它。
+          -->
+          <p class="hint">
+            「联网搜索」在<strong>宠物右键菜单</strong>里开关。
+            下面这一项是它之外的补充能力。
+          </p>
+
+          <label class="check">
+            <input id="browser-fallback" type="checkbox" />
+            <span>读不动的网页用浏览器重试（浏览器兜底）</span>
+          </label>
+
+          <p class="hint" id="browser-state"></p>
+
+          <p class="hint">
+            有些网站（比如<strong>起点中文网</strong>）用「要执行 JS 才能过的验证」
+            挡住抓取，普通方式读不到。打开这一项后，宠物会用
+            <strong>一个隐藏的浏览器窗口</strong>去读这类页面。
+            <br />
+            ⚠️ 代价有两面：<br />
+            · <strong>慢</strong> —— 读一个页面要多等 15~25 秒（等验证跑完）<br />
+            · <strong>等于「以你的身份浏览」</strong> —— 会带真实的浏览器标识、
+            在对方网站上留下记录，比匿名抓取的暴露面大。<br />
+            所以<strong>默认关闭</strong>，由你自己决定。
+          </p>
+
+          <!--
+            清空浏览数据（2026-10-13 用户要求）。
+
+            ⚠️ 用户的原话是「清楚的是我**浏览器**上的缓存吗」——
+            那个疑问正好说明这个按钮**必须把归属写清楚**。
+
+            所以界面上：
+              · 标题写「宠物的浏览记录」（不是"浏览器数据"）
+              · 显示**真实磁盘路径**（说"不会动你的浏览器"不如给他看路径）
+              · 显示实际占用体积
+          -->
+          <div class="setting setting-row">
+            <div class="setting-text">
+              <span class="setting-title">清空宠物的浏览记录</span>
+              <span class="setting-desc" id="browser-data-size">正在读取占用…</span>
+            </div>
+            <button id="clear-browser-data" class="btn">清空</button>
+          </div>
+          <p class="hint" id="browser-data-state"></p>
+
+          <p class="hint">
+            <strong>只清宠物自己那一份</strong>，和你平时用的浏览器
+            （Chrome / Edge / Firefox…）完全无关 —— 它们的数据存在另一个地方。
+            清空之后，下次读那类网站要<strong>重新过一次验证</strong>（慢一点，但干净）。
+          </p>
+
+          <!--
+            试读一个网址（2026-10-13）。
+
+            ⚠️ 它走的是**和宠物真实读网页相同的判据**：
+            先普通抓取，只有被 WAF 挡住才用浏览器。所以它能如实回答
+            「这个站到底读不读得了」—— 而不是"我直接调浏览器所以一定成功"。
+          -->
+          <div class="field field-block">
+            <label class="field-label" for="browser-probe-url">试读一个网址</label>
+            <div class="row">
+              <input
+                id="browser-probe-url"
+                type="text"
+                spellcheck="false"
+                placeholder="https://www.qidian.com/book/1037780233/"
+              />
+              <button id="browser-probe" class="btn">试读</button>
+            </div>
+            <p class="hint" id="browser-probe-state">
+              先用普通方式抓，抓不动才用浏览器 —— 和宠物实际读网页的走法一样，
+              所以结果可信。
+            </p>
+          </div>
+
+</section>
+
+        <!-- ============================ 关于 ============================ -->
+        <section id="tab-about" class="tab-panel">
+          <h2>文件都在哪</h2>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">API 密钥</span>
+              <span class="setting-desc" id="store-path"></span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">桌宠设置</span>
+              <span class="setting-desc" id="settings-path"></span>
+            </div>
+          </div>
+
+          <p class="hint">
+            密钥<strong>不写进项目的配置文件</strong>（那样会被 git 带走），只保留在本机。
+            环境变量（如 <code>DEEPSEEK_API_KEY</code>）优先级更高，方便脚本化使用。
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="settings.js"></script>
+  </body>
+</html>

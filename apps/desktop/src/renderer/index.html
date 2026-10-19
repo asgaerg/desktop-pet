@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP 说明（改这里之前先读）：
+
+      · `connect-src 'self'` 是**必需**的，不是宽松。渲染层要读同目录下的
+        `assets/avatar/default/avatar.json` 才知道怎么切帧，而读它是用 fetch。
+        早先写的是 `connect-src 'none'`，结果 fetch 被拒、立绘静默退回程序化占位 ——
+        界面上看起来"有只宠物"，只是永远不是序列帧那套素材。
+        实测（真实 Electron + file:// 页面）：`'none'` → BLOCKED；`'self'` → OK。
+
+      · `img-src 'self' data:` 负责贴图本身，实测一直可用。
+
+      · **`media-src 'self'` 是 webm 视频立绘必需的**（第二个立绘形态，见
+        `assets/avatar/default/avatar.json` 的 `kind: "video"`）。
+        从 `<video>` 加载视频走的是 media-src，而它没写时会回落到
+        `default-src 'none'`。实测报错：
+          Refused to load media from '...webm' because it violates the following
+          Content Security Policy directive: "default-src 'none'".
+          Note that 'media-src' was not explicitly set, so 'default-src' is used as a fallback
+        结果是所有视频加载失败、立绘退化成程序化占位宠物（而且只在控制台有线索）。
+
+      · 渲染层**不发起任何网络请求**（一切走主进程转发的本机 WebSocket），
+        所以这里没有 http/https 来源，攻击面依然很窄。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+    />
+    <title>桌面宠物</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!--
+      布局只有两层（原来还有一层输入卡片，已拆成**独立窗口** chat.html）：
+        1. #hud     整块 HUD，默认穿透，让桌面图标照常可点
+        2. #stage   宠物本体 + 气泡，属于交互区
+
+      为什么把输入框拆出去：用户要求"仅保留对话的输入框和发送按钮设置在宠物下面，
+      且不会超出电脑屏幕，无论是宠物边缘探头还是手动拖拽都不影响窗口以相反方向存在"。
+      挤在同一个窗口里做不到 —— 探头时窗口会贴到屏幕外、立绘还会旋转 45°，
+      输入框要么跟着旋转、要么被推出屏幕。拆成两个窗口后各自独立定位。
+    -->
+    <div id="hud">
+      <!--
+        ⚠️ 文字弹窗（气泡）**重新加回来了** —— 用户在做聊天功能时明确要求：
+        「宠物的文字回应使用弹窗来显示……显示在宠物的上方」。
+
+        上次删它的两个理由，这次都处理掉了：
+
+        ① 「上面出现的气泡先删除」—— 那是用户当时的临时要求（"后续我给你说需求"），
+           现在需求到了：文字回应显示在宠物上方。
+        ② 那个**实测 bug**：气泡曾经放在 `.stage` 里，而 `.stage` 是
+           `display:flex; justify-content:flex-end`，于是气泡被压到
+           **y = -42**（整个跑到窗口外、看不见），但它的 `box-shadow` 往上溢出，
+           在窗口顶部形成一条**黑色渐变**（alpha 30 → 1，正好约 28px 模糊半径）。
+           用户当时看到的就是"点击时顶部出现灰条"。
+
+        所以这次它**不参与 flex 布局**：`position: absolute` + `left: 50%`，
+        贴窗口顶部。既不会被挤出窗口，也便于按"探头时不出屏"做左右平移。
+      -->
+      <!--
+        ⚠️ 气泡的内容**必须写在一行里**，不要为了好看把三个元素折行缩进。
+        折行会在标签之间产生纯空白文本节点（`"\n "`），而气泡用了
+        `white-space: pre-line/pre-wrap` 来保留宠物回复里的换行 ——
+        那些缩进就被当成"换行"渲染成空行。实测"嗯嗯"两个字的气泡
+        下方多出一大截空白（3 行高）。
+      -->
+      <!--
+        ⚠️ 文字弹窗（气泡）已**移到独立窗口** `bubble.html`。
+        原因：宠物窗口里头顶以上只有 34px（画布贴窗口顶，加高也改变不了），
+        长回复必然压到宠物脸。独立窗口的位置只受屏幕工作区约束。
+        这里保留一段注释而不是直接删掉，是为了让后来的人知道"气泡去哪儿了"。
+      -->
+
+      <div id="stage" class="stage interactive">
+        <div id="pet-wrap" class="pet-wrap" data-module="sprite">
+          <canvas id="pet" class="pet" width="240" height="240" title="拖我（右键有菜单）"></canvas>
+        </div>
+      </div>
+
+      <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
