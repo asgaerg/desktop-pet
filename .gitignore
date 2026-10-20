@@ -94,4 +94,7 @@ build/installer-screen.png
 /tmp*/
 
 # pip 下载时的临时解包目录
-pip-unpack-*/
+# 实测 10-17 那次 pip 调用留下了 5 个**空空如也**的目录（build-tracker / ephem-wheel-cache /
+# install / unpack x2），只有 unpack 那个被下面这条覆盖。另外四种以前会被 git status 报成未跟踪。
+# 统一按前缀忽略 —— 它们在仓库根**不可能**是项目内容。
+pip-*-*/

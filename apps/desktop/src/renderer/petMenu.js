@@ -658,9 +658,11 @@
       { type: 'separator' },
       { label: '麦克风（未枚举）', icon: 'mic', submenu: [{ label: '（系统默认）', type: 'radio', checked: true, action: 'mic:default' }] },
       // 联网搜索（2026-10-16）：演示数据与真菜单一致（一级 radio 子菜单）
+      // 「快速搜索」下面那行灰字是 2026-10-19 加的说明（真菜单里同样是对齐的）
       { label: '联网搜索', icon: 'globe', submenu: [
         { label: '精准搜索（约 10~20 秒）', type: 'radio', checked: true, action: 'web-search-mode:accurate' },
         { label: '快速搜索（约 2 秒）', type: 'radio', checked: false, action: 'web-search-mode:fast' },
+        { label: '仅 DeepSeek API 可用', enabled: false },
         { label: '关闭联网搜索', type: 'radio', checked: false, action: 'web-search-mode:off' },
       ] },
       // 活泼度四档（2026-10-17 改名）：名字必须与

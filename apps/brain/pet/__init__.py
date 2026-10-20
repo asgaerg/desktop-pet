@@ -12,7 +12,7 @@ pet —— 桌面宠物的 Python 大脑（sidecar）。
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .config import Config, ConfigError, load_config
 from .gateway import Conversation, Gateway

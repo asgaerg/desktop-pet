@@ -2658,15 +2658,29 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
     );
   }
 
-  // **关键不变量**：所有置灰项都必须标明「未实现」。
+  // **关键不变量**：所有置灰的**功能项**都必须标明「未实现」。
 
   // 理由：这个项目出过好几次"界面上写着、实际没实现"的问题，
 
   // 那种失败不报错、只是什么都不发生，最难排查。
 
-  const unmarked = disabled.filter((i) => !(i.label ?? '').includes(TODO_SUFFIX));
+  //
 
-  check('所有置灰项都标了「未实现」', unmarked.length === 0,
+  // ⚠️ 2026-10-19 补：**说明行**（置灰 + 没有 action）不算功能项 ——
+
+  //    例如「仅 DeepSeek API 可用」（联网搜索子菜单）和
+
+  //    「沉浸模式正在托管对话框」（桌宠控制子菜单）。它们本来就只是备注，
+
+  //    没有 action 就不可能"点了没反应"，不该被要求写「未实现」。
+
+  const isHintRow = (i) => i.enabled === false && !i.action;
+
+  const unmarked = disabled.filter(
+    (i) => !isHintRow(i) && !(i.label ?? '').includes(TODO_SUFFIX),
+  );
+
+  check('所有置灰的功能项都标了「未实现」', unmarked.length === 0,
 
     `没标的：${unmarked.map((i) => i.label).join(', ')}`);
 
@@ -4064,6 +4078,53 @@ console.log('\n11. petLayout：窗口尺寸与右下角锚定');
     );
   }
 
+  /*
+   * 🔴 全屏时**不再自动靠边探头**（2026-10-20 用户要求）。
+   *
+   * 用户原话：「把全屏时宠物自动移动靠边探头删除，但是宠物被用户拖拽靠近屏幕边缘时
+   * 仍能自动探头。」
+   *
+   * 这一组是**源码级**断言，因为 PetWindow 需要真的 BrowserWindow 才能实例化
+   * （测试环境里没有），而这里要守的恰恰是"没人再偷偷把姿态写回去了"。
+   * 判据跟上面的任务栏那组一样：**去掉注释再匹配**（注释里解释历史不算行为）。
+   */
+  {
+    const raw = readFileSync(path.join(here, '..', 'src', 'main', 'petWindow.ts'), 'utf-8');
+    const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+
+    // 把 setCompact 的函数体单独抠出来，只查它 —— 否则别的函数里合法的
+    // `applyPeekLayout` 调用（比如 enterEdgePeek）会让断言永远为假。
+    const start = code.indexOf('setCompact(compact: boolean');
+    const body = start < 0 ? '' : code.slice(start, code.indexOf('\n  }', start));
+    check(
+      '全屏切换不再自动探头（setCompact 不调 applyPeekLayout / enterEdgePeek）',
+      body.length > 0 && !/applyPeekLayout|enterEdgePeek/.test(body),
+      '全屏时自动摆成探头样子正是用户要删掉的行为（还会带来一帧闪现）',
+    );
+    check(
+      '退出全屏不再发 pet:peek 回正（姿态本来就没变）',
+      body.length > 0 && !/pet:peek'/.test(body),
+      '发 peeking:false 会把用户自己探头拖出来的姿态拉直',
+    );
+    check(
+      '退出全屏不再归位（没有 preCompact / setBounds 还原）',
+      body.length > 0 && !/preCompact|setBounds/.test(body),
+      '不该为了让"自动探头"复位而搬窗口 —— 用户要求退出时不归位',
+    );
+
+    // 拖拽贴边的探头必须保留：drag-end 的贴边判定不能再被 compact 挡掉
+    check(
+      '全屏中拖拽贴边**仍能**探头（贴边判定不再排除 compact）',
+      /this\.edgePeekEnabled\s*\)\s*\{/.test(code) && !/edgePeekEnabled\s*&&\s*!this\.compact/.test(code),
+      '用户明确要求「拖拽靠近屏幕边缘时仍能自动探头」',
+    );
+    check(
+      '全屏时不再强制改姿态（applyLayout 无 compact 专用分支）',
+      !/if\s*\(form === 'compact'\)/.test(code),
+      'applyLayout 里那条 compact 分支会把宠物摆成贴边探头',
+    );
+  }
+
   // 贴上下边时钉的是横向
   {
     const scale = 1;
@@ -4371,6 +4432,36 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
   check('状态稳定后不重复触发 onChange', changes === 0,
 
     `触发了 ${changes} 次 —— 否则会反复重设窗口层级，表现为宠物抖动`);
+
+  /*
+   * 🔴 去抖：**单次**读到"全屏"不能立刻翻转状态（2026-10-20 用户报）。
+   *
+   * 真机日志（06:47）：B 站页面本是非全屏，探测却连报两次「全屏」，
+   * 于是 4 秒里「进/退全屏」闪了两下 —— 每次"退出"都把探头姿态拉直，
+   * 用户看到的就是「退出全屏后探头旋转没了」。
+   *
+   * 这里用真实探测器的输出做验证：不确定当前到底全屏与否，
+   * 所以只断言**行为规则**——开去抖后，一次读数绝不该改变状态。
+   * （`confirmSamples: 1` 是关掉去抖，等价于 10-20 之前的行为，上面几条已覆盖。）
+   */
+  {
+    let flips = 0;
+    const debounced = new FullscreenWatcher({
+      idleIntervalMs: 60,
+      fullscreenIntervalMs: 60,
+      confirmSamples: 3,
+      onChange: () => { flips += 1; },
+    });
+    await debounced.probeOnce();
+    flips = 0;
+    await debounced.probeOnce();
+    check(
+      '去抖：一次读数不足以翻转（哪怕它与当前状态不同）',
+      flips === 0,
+      `第 2 次读数就翻转了（阈值 3）—— 抖动会直接打穿到窗口布局`,
+    );
+    debounced.stop();
+  }
 
 
 
@@ -5002,21 +5093,35 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
   })(items);
   check('联网搜索是三选一子菜单', Boolean(webSub), '找不到 web-search-mode:* 这组项');
   if (webSub) {
-    check('子菜单恰好三项（精准/快速/关闭）', webSub.length === 3, `实际 ${webSub.length} 项`);
-    const modes = webSub.map((s) => s.action?.split(':')[1]);
+    /*
+     * 2026-10-19：子菜单多了一行**灰色说明**（「仅 DeepSeek API 可用」），
+     * 所以条数不再是 3。这里钉的是"**radio 恰好三项** + 一项不可点的说明"，
+     * 而不是简单数长度 —— 以后再加说明行也不该让这条测试变红。
+     */
+    const radios = webSub.filter((s) => s.type === 'radio');
+    check('radio 恰好三项（精准/快速/关闭）', radios.length === 3, `实际 ${radios.length} 项`);
+    const modes = radios.map((s) => s.action?.split(':')[1]);
     check(
       '三个 action 的模式值正确',
       modes.join(',') === 'accurate,fast,off',
       `实际 ${modes.join(',')}`,
     );
-    check('全部是 radio 类型', webSub.every((s) => s.type === 'radio'), '有一项不是 radio');
-    const checkedOne = webSub.filter((s) => s.checked);
+    const checkedOne = radios.filter((s) => s.checked);
     check('当前模式的 radio 打勾（state.webSearchMode=off）',
       checkedOne.length === 1 && checkedOne[0].action === 'web-search-mode:off',
       `打勾的是 ${checkedOne.map((s) => s.action).join(',') || '无'}`);
     check('子菜单的处理器可解析（不是「未实现」灰项）',
       resolveHandlerKey('web-search-mode:accurate') === 'webSearchMode',
       `实际 ${resolveHandlerKey('web-search-mode:accurate')}`);
+    // 「快速搜索」紧跟一行说明：仅 DeepSeek API 可用（用户 2026-10-19 要求标注）
+    const fastIdx = webSub.findIndex((s) => s.action === 'web-search-mode:fast');
+    const note = fastIdx >= 0 ? webSub[fastIdx + 1] : null;
+    check(
+      '「快速搜索」下面有「仅 DeepSeek API 可用」说明',
+      Boolean(note && note.enabled === false && String(note.label).includes('DeepSeek')),
+      `实际下一项是 ${JSON.stringify(note)}`,
+    );
+    check('说明行没有 action（点了不该有反应）', !note || !note.action, `实际 ${note?.action}`);
   }
 }
 

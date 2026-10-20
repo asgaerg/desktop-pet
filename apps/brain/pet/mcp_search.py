@@ -69,7 +69,7 @@ mcp 2.3.0 的 streamable_http_client：
 
 from __future__ import annotations
 
-from . import paths
+from . import netutil, paths
 
 import json
 import logging
@@ -720,7 +720,9 @@ class McpClient:
         )
         timeout = timeout_s if timeout_s is not None else self.timeout_s
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            # 本地 127.0.0.1 的 MCP 服务：**强制直连**。
+            # 系统代理若不排除 localhost，请求会被丢给代理（连不上/慢）。
+            with netutil.urlopen(request, timeout=timeout, force_direct=True) as response:
                 return response.status, dict(response.headers), response.read().decode(
                     "utf-8", "replace"
                 )
@@ -1008,6 +1010,13 @@ def search_free(
     命中质量明显更好——搜「二重螺旋 新版本」它能拿到官网公测公告，
     而老后端只会命中"二"字百科 —— 但要 10~20 秒。所以菜单里是
     「精准搜索」（free-search 优先）与「快速搜索」（老后端）两档。
+
+    ## ⚠️ 2026-10-19 起「快速搜索」的第一后端不是 `search()` 了
+
+    用户要求接入 DeepSeek 官方搜索，它成了 fast 档的首选（实测 0.3~0.5 秒，
+    见 `pet/deepseek_search.py`）。本模块的 `search()` 从"快速档首选"
+    降级为**它的兜底**（没有 DeepSeek 密钥、或官方接口失败时才用）。
+    所以这里的实现不用改，变的是 `tools._web_search` 里的调用顺序。
 
     ⚠️ 与 `search()` 相同的三条纪律：
       · **同步阻塞**（urllib），调用方必须 `asyncio.to_thread`；

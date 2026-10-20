@@ -45,6 +45,7 @@ from typing import Any, Callable, Optional, Protocol
 
 from .bus import Bus
 from .config import Config
+from . import netutil
 from .protocol import clamp01
 
 log = logging.getLogger("pet.voice")
@@ -2584,7 +2585,7 @@ class OpenAIAsrEngine:
                 "User-Agent": "desktop-pet/0.1",
             },
         )
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+        with netutil.urlopen(request, timeout=self.timeout_s) as response:
             parsed = _json.loads(response.read().decode("utf-8", errors="replace"))
         return str(parsed.get("text") or "")
 
@@ -2641,7 +2642,7 @@ class OpenAITtsEngine:
                 "User-Agent": "desktop-pet/0.1",
             },
         )
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+        with netutil.urlopen(request, timeout=self.timeout_s) as response:
             payload = response.read()
         self.calls += 1
         return payload, "mp3"

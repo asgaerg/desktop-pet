@@ -240,6 +240,16 @@ def _is_long_sample_trigger(text: str) -> bool:
 MAX_TOOL_ROUNDS = 3
 
 
+# 模型偶尔只产出推理、正文 **0 字**（2026-10-19 真机见 §一百七十）。
+# 补救（关掉思考重试一次）也没救回来时用它顶一句 —— **不能沉默**：
+# 用户不知道区别，只会觉得"程序坏了/它不理我"。
+EMPTY_REPLY_FALLBACK = "诶……我刚才走神了。你再说一遍好不好？"
+
+# 请求直接失败（连不上 / 401 / 超时）时说的话。**和上面那句必须区分**：
+# 空回复是模型的问题（重说一遍可能就好），连不上是网络的问题（等一下再试）。
+FAILED_REPLY_FALLBACK = "诶，我这会儿连不上模型…你过一会儿再跟我说好吗？"
+
+
 def _default_state_dir() -> Path:
     """沙箱目录的默认落点：`apps/desktop/pet-data/`。
 
@@ -1054,6 +1064,7 @@ class Conversation:
         就会一直重试，等于把"无限循环"从工具调用搬到了重试上。
         """
         truncated_retried = False
+        empty_retried = False
         for round_index in range(MAX_TOOL_ROUNDS + 1):
             if self._interrupt.is_set():
                 reason = "interrupted"
@@ -1113,6 +1124,36 @@ class Conversation:
                         reason,
                     )
 
+            """
+            ## 🔴 只出了推理、正文 0 字 -> 关掉思考重试一次（2026-10-19）
+
+            和上面那条**不是**一回事：这里 `finish_reason` 不是 `length`，
+            流是正常结束的，只是模型把 token 全花在推理上、正文一个字没给。
+            真机原始数据（阿拾，22:49:33）：
+
+                prompt_tokens=12997  completion_tokens=76
+                completion_tokens_details={'reasoning_tokens': 76}   <- 全是推理
+                正文 delta 共 0 字
+                （然后 `_remember_assistant` 和 `say.delta` 全都没触发：
+                  用户在气泡里什么也没看到，历史里也没这一轮）
+
+            上面那条救不了它 —— 预算够、`finish_reason` 也不是 `length`。
+            唯一可靠的解法是**关掉思考再问一次**：DeepSeek 关掉思考后
+            `reasoning_tokens` 恒为 0，正文一定会出来（实测 1.3 秒）。
+            代价是一次多余调用（约 ¥0.003），远低于"没回复"的体验损失。
+            """
+            if reason == "empty" and not empty_retried:
+                empty_retried = True
+                bumped = max(int(req.max_tokens) * 3, 1200)
+                log.info(
+                    "本轮只出了推理、正文 0 字 —— 关掉思考 + 预算 %s->%d 重试一次",
+                    req.max_tokens,
+                    bumped,
+                )
+                req.thinking = False
+                req.max_tokens = bumped
+                continue
+
             if reason != "done" or not tool_calls:
                 break
             if round_index >= MAX_TOOL_ROUNDS:
@@ -1168,6 +1209,37 @@ class Conversation:
           · `conversation.finished`（少了调度器的冷却不重置，它会立刻再说一句）
         """
         final_text = "".join(collected)
+        if not final_text and not idle and reason != "interrupted":
+            """
+            🔴 最后一层兜底（2026-10-19）：**绝不让用户面对空白**。
+
+            上面两条补救（加大预算 / 关掉思考）都可能失败 —— 也可能走的是
+            "工具轮用尽 -> 强制回答"那条路，那里本来就不回传 reason。
+            用户分不清"模型没说话"和"程序坏了"，所以这里必须给一句人话。
+            日志留 WARNING：兜底句不该是常态，出现就说明模型那边有问题。
+
+            ## 连不上模型的那些也要说话（10-18 的真机数据）
+
+            10-18 20:10「我挺喜欢曲娘的」那一轮，日志里是两次
+
+                LLM 流式请求失败：<urlopen error [WinError 10061] 目标计算机积极拒绝>
+
+            （V2Ray 没开、系统代理却还指着 10809 —— 见 §一百六十九）。
+            当时用户看到的是**气泡空着**，只有聊天窗里一句 toaster 报错。
+            所以这里按"是空还是错"给不同的句子：错的要让用户知道该等一下，
+            而不是以为自己在跟空气说话。
+            """
+            if error_text:
+                final_text = FAILED_REPLY_FALLBACK
+                log.warning(
+                    "这一轮生成失败且没有正文 —— 用「连不上」的兜底句顶住（%s）",
+                    error_text[:80],
+                )
+            else:
+                final_text = EMPTY_REPLY_FALLBACK
+                log.warning(
+                    "这一轮没拿到任何正文 —— 用兜底句顶住（reason=%s）", reason
+                )
         # 只给**发出去的文本**加这一段，历史仍然记 `final_text`（见函数说明）。
         note = screen_seen_note(trigger, self.config.screenshot)
         say_text = f"{final_text}\n\n{note}" if (final_text and note) else final_text
@@ -1430,6 +1502,18 @@ class Conversation:
         # 搜索模式（2026-10-16）：accurate / fast / off —— 菜单三选一的真源
         try:
             section = self.config.root.get("tools", {}) or {}
+            # ⚠️ 顺序有讲究：DeepSeek 的可用性要**先**同步，下面
+            # `set_search_mode` 才能把 fast 档的日志写成「DeepSeek 官方搜索优先」
+            # 而不是旧的「websearch-mcp」—— 那行日志是排查时最先看的。
+            # DeepSeek 官方搜索（2026-10-19）：fast 档的首选后端。
+            # ⚠️ 密钥按**厂商标**取（`api_key_for`）而不是 `api_key()` ——
+            # 后者只认"当前生效的大脑"，用户大脑用硅基流动但另外配了 DeepSeek
+            # 密钥时，官方搜索依然该能用。
+            tools_module.set_deepseek_search(
+                self.config.api_key_for("deepseek"),
+                url=str(section.get("deepseek_search_url") or ""),
+                use_system_proxy=bool(section.get("deepseek_search_use_system_proxy", False)),
+            )
             tools_module.set_search_mode(
                 self._web_search_mode(),
                 free_url=str(section.get("free_search_url") or ""),
@@ -1437,6 +1521,21 @@ class Conversation:
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("同步搜索模式失败（用默认值继续）：%s", exc)
+
+        # 按域名绕系统代理（2026-10-19）。配置放在 `net.direct_hosts`；
+        # 没写这个键 = 用 netutil 的默认名单（DeepSeek / 硅基流动）。
+        try:
+            from . import netutil
+
+            net_section = self.config.root.get("net", {}) or {}
+            hosts = net_section.get("direct_hosts")
+            netutil.set_direct_hosts(hosts if isinstance(hosts, list) else None)
+            log.info(
+                "直连名单（绕系统代理）：%s",
+                ", ".join(netutil.direct_hosts()) or "(空 —— 全部走系统代理)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("同步直连名单失败（用默认值继续）：%s", exc)
 
     def _web_search_mode(self) -> str:
         """联网搜索模式（2026-10-16 用户要求）：accurate / fast / off。
@@ -1560,7 +1659,11 @@ class Conversation:
 
                     用户报的「我说了话，但是它没有回答」就是这个。
                     """
-                    if str(item.get("finish_reason") or "") == "length":
+                    finish_reason = str(item.get("finish_reason") or "")
+                    if finish_reason:
+                        # 原值留着：日志里要能一眼看出"到底为什么空"
+                        state_finish["finish"] = finish_reason
+                    if finish_reason == "length":
                         state_finish["length"] = True
                 elif kind == "tool_calls":
                     """
@@ -1599,6 +1702,25 @@ class Conversation:
             log.debug(
                 "本轮被 max_tokens 截断且正文为空（推理吃光了预算）。max_tokens=%s",
                 req.max_tokens,
+            )
+        elif reason == "done" and not produced and not collected and not tool_calls:
+            """
+            🔴 正常结束、但**正文一个字都没有**（2026-10-19 真机）。
+
+            和上面 `truncated` 的区别：`finish_reason` 不是 `length`
+            （真机那次是 `stop`），预算也没打满 —— 模型把 76 个 token
+            全花在推理上，正文 delta 一个都没发，流就正常收尾了。
+
+            不单独标出来的后果：上层按 `reason == "done"` 处理，
+            `final_text` 是空串 -> 不发 `pet.say.delta`、不写 `_remember_assistant`
+            -> 用户看到**气泡空着、历史里也没有这一轮**，像什么都没发生。
+
+            标成 `empty` 后由 `_generate` 关掉思考重试（那条路一定能拿到正文）。
+            """
+            reason = "empty"
+            log.info(
+                "本轮正文 0 字（finish_reason=%s）—— 交给上层关掉思考重试",
+                state_finish.get("finish") or "?",
             )
         return tool_calls, reasoning, error_text, reason
 

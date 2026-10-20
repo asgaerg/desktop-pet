@@ -148,12 +148,12 @@ export class PetWindow {
   private peekSide: 'right' | 'left' = 'right';
 
   /**
-   * 进入紧凑模式（别人全屏）**之前**窗口在哪、以及当时是不是探头姿态。
+   * 进入全屏**那一刻**宠物是什么姿态（只给日志/排查用，2026-10-20）。
    *
-   * 用户要求（原话）：「取消全屏时要能变成之前的位置和状态」。
-   * 不记的话退出全屏就只会回到默认的右下角，用户之前把宠物拖到哪儿就丢了。
+   * ⚠️ 它**不用于恢复**：现在的全屏模式不改姿态、不改位置，
+   * 记下来只是为了能回答"进全屏时它是探头还是站着"这种排查问题。
    */
-  private preCompact: { x: number; y: number; peeking: boolean; peekSide: PeekSide } | null = null;
+  private compactEnterState: string | null = null;
 
   // ---- 边缘探头（手动拖到屏幕边缘触发）----
 
@@ -251,9 +251,13 @@ export class PetWindow {
   enterEdgePeek(side: PeekSide, cursor?: { x: number; y: number }): void {
     const window = this.window;
     if (!window || window.isDestroyed()) return;
-    // 全屏模式下的定位由 setCompact 直接调 applyPeekLayout，
-    // 不走这里 —— 否则会把 edgePeek 置 true，让 drag-end 误以为"用户拖出了探头"。
-    if (this.compact) return;
+    /*
+     * ⚠️ 全屏时**不再**禁止探头（2026-10-20）。
+     *
+     * 原来这里有 `if (this.compact) return;`，理由是"全屏的定位由 setCompact
+     * 直接调 applyPeekLayout"。现在 setCompact 不再动姿态，全屏时用户拖到边上
+     * 就该跟平时一样探头 —— 这条守卫反而会让"全屏中拖不清探头"变成缺陷。
+     */
     /*
      * ## ⚠️ 守卫必须**同时**检查"窗口尺寸对不对"（2026-10-04 探针实测）
      *
@@ -887,21 +891,15 @@ export class PetWindow {
     const petCenter = petCenterInWindow(this.petScale, form);
 
     let next: { x: number; y: number; width: number; height: number };
-    if (form === 'compact') {
-      // 紧凑（别人全屏）：**走和手动贴边完全相同的探头定位**。
-      //
-      // 用户要求：「全屏时固定成现在普通状态下在屏幕左右边最终位置的探头样子」。
-      // 所以这里不再自己用 `anchorPeekRight` 算一个"只露一条"的位置 ——
-      // 那和手动贴边的样子不一样（露出比例、留白、旋转都不同）。
-      // 现在统一交给 `applyPeekLayout`（`enterEdgePeek` 用的也是它），
-      // 两侧必然一致；"两处各算一次"是这个项目反复踩的坑。
-      //
-      // 边由 `pickNearestSide()` 按宠物当前水平位置决定（左半屏贴左、右半屏贴右）。
-      const side = this.pickNearestSide();
-      this.diagnostic(`紧凑模式（${reason}）：按当前位置选边 -> 贴${PEEK_SIDE_TEXT[side]}边`);
-      this.applyPeekLayout(side);
-      return;
-    }
+    /*
+     * ⚠️ 全屏（compact）**不再单独走一条布局分支**（2026-10-20）。
+     *
+     * 原来这里是：`if (form === 'compact') { …applyPeekLayout(最近的一边); return; }`
+     * —— 那就是"全屏时自动靠边探头"本身，用户要求删掉。
+     *
+     * 现在全屏和常态用**同一条**路径（锚右下角）；`form` 只影响窗口尺寸常量
+     * （目前两者尺寸相同），不再影响姿态。
+     */
     {
       // 常态：窗口锚在右下角。
       //
@@ -2007,7 +2005,11 @@ export class PetWindow {
       //
       // 依据参考应用的说明：「拖到屏幕左/右边缘后自动以 45° 探头姿态窥视；
       // 点击真实角色会拉直，约 5 秒后自动退回。」
-      if (bounds && this.edgePeekEnabled && !this.compact) {
+      //
+      // ⚠️ 全屏时**照样能探头**（2026-10-20 起）：去掉了 `&& !this.compact`。
+      //    用户明确要「全屏时不再**自动**靠边，但**拖拽**靠近边缘仍能探头」——
+      //    这条判定的触发源正是"用户松手"，与自动模式无关。
+      if (bounds && this.edgePeekEnabled) {
         const display = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
         const wa = display.workArea;
         // 把判定的**输入**也记下来 —— 贴边判断出错时，光看"进/出探头"
@@ -2223,101 +2225,76 @@ export class PetWindow {
   }
 
   /**
-   * 进入 / 退出紧凑模式（"别人全屏时趴着"）。
+   * 进入 / 退出紧凑模式（"别人全屏"）。
    *
-   * 两件事一起做：
-   *   ① 窗口层级切到 `screen-saver` —— 只有这个层级能浮在**全屏**应用之上。
-   *      平时不能用它，因为它**也会盖住任务栏**，让用户点不到开始菜单；
-   *   ② 窗口缩成只包住立绘，并通知渲染层隐藏输入卡片。
+   * ## 🔴 2026-10-20：全屏时**不再自动靠边探头**
    *
-   * 退出时反向恢复。
+   * 用户原话：「把全屏时宠物自动移动靠边探头删除，但是宠物被用户拖拽靠近屏幕边缘时
+   * 仍能自动探头。」
+   *
+   * 原来全屏会把宠物自动摆成"贴边探头"的样子（调 `applyPeekLayout`），退出时再
+   * 强行回正并归位 —— 这套自动变换踩了两类问题：
+   *
+   *   · 探测抖动时"进/退"闪一下，每次都把姿态拉直（见 §一百七十三）；
+   *   · 用户在全屏中拖到边上，会与自动姿态打架。
+   *
+   * 现在这个函数**只做两件与布局无关的事**：
+   *   ① 窗口层级切到 `screen-saver`（只有它能浮在全屏应用之上）；
+   *   ② 通知渲染层"只露立绘"（藏掉气泡与输入卡片）。
+   *
+   * 宠物**留在原地、保持原姿态**：全屏前在探头就继续探头，全屏前在中间就继续站着。
+   * 退出全屏也**不归位** —— 它一直在原处，没有任何需要恢复的东西。
+   *
+   * 拖拽贴边的探头完全不受影响：那条路走 `enterEdgePeek`（drag-end 的贴边判定），
+   * 与 compact 无关。
    */
   setCompact(compact: boolean, reason = ''): void {
     const window = this.window;
     if (!window || window.isDestroyed()) return;
     if (this.compact === compact) return;
 
-    // ① 进全屏前先记住状态 —— 用户要求「取消全屏时要能变成之前的位置和状态」。
-    if (compact) {
-      const b = window.getBounds();
-      this.preCompact = {
-        x: b.x,
-        y: b.y,
-        peeking: this.edgePeek,
-        peekSide: this.edgePeekSide,
-      };
-      this.diagnostic(
-        `进入全屏模式（${reason || '检测到全屏'}），记住原位置 ${b.x},${b.y}，` +
-          `原状态 ${this.edgePeek ? `探头·贴${PEEK_SIDE_TEXT[this.edgePeekSide]}边` : '常态'}`,
-      );
-    }
-
     this.compact = compact;
+    this.diagnostic(
+      compact
+        ? `进入全屏模式（${reason || '检测到全屏'}），宠物留在原地` +
+            `（${this.edgePeek ? `当前探头·贴${PEEK_SIDE_TEXT[this.edgePeekSide]}边` : '当前常态'}），` +
+            `隐藏输入卡片`
+        : `退出全屏模式，宠物仍在原地（${this.edgePeek ? '探头' : '常态'}）`,
+    );
 
-    // ② 层级
+    // ① 层级：全屏时升到 screen-saver（能盖全屏），退出时降回用户设定的层级。
     const level: 'normal' | 'screen-saver' = compact ? 'screen-saver' : this.topLevel;
     window.setAlwaysOnTop(true, level);
     // 全屏应用会创建自己的全屏空间，必须同时声明"在所有工作区可见"
     window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-    // ③ 布局
-    if (compact) {
-      // 全屏：固定成"普通状态下贴到左右边缘的探头样子"（用户要求）。
-      //
-      // 走**和手动贴边完全相同的定位函数**（`applyPeekLayout`），不另写一套 ——
-      // 否则角度/露出宽度/留白迟早不一致（这个项目因为"两处各算一次"踩过几次）。
-      //
-      // 但**不置 `edgePeek = true`**（不算"用户拖出来的探头"），
-      // 否则 drag-end 的贴边判定会把全屏误当成探头态。
-      const side = this.pickNearestSide();
-      this.applyPeekLayout(side);
-      window.webContents.send('pet:compact', { compact: true, side });
-    } else {
-      // 退出全屏：先**回正姿态**，再恢复基准布局，最后回到记住的坐标。
-      //
-      // ⚠️ 必须显式发这条 `pet:peek` 回正消息。
-      //
-      // 我原来以为 `applyLayout` 会顺手清掉旋转 —— **它不会**。
-      // 渲染层的旋转是主进程通过 `pet:peek` 下发的（`app.js` 里写 canvas 的
-      // `style.transform`），没人发"peeking:false"它就一直斜着。
-      // 用户报的「切换回来之后探头旋转姿态没回正」就是这个。
-      window.webContents.send('pet:peek', {
-        peeking: false,
-        side: this.peekSide,
-        angle: 0,
-        offsetX: 0,
-        offsetY: 0,
-      });
-      this.applyLayout('退出紧凑模式');
-      const saved = this.preCompact;
-      this.preCompact = null;
-      if (saved) {
-        const want = windowSizeFor(this.petScale, 'normal');
-        window.setBounds({
-          x: Math.round(saved.x),
-          y: Math.round(saved.y),
-          width: want.width,
-          height: want.height,
-        });
-        this.diagnostic(
-          `退出全屏，恢复位置 ${Math.round(saved.x)},${Math.round(saved.y)}` +
-            `（原状态 ${saved.peeking ? `探头·贴${PEEK_SIDE_TEXT[saved.peekSide]}边` : '常态'}，` +
-            `按当前设置不自动恢复探头）`,
-        );
-      }
-      window.webContents.send('pet:compact', { compact: false });
-      this.onLayoutChanged?.('normal');
-    }
-  }
+    /*
+     * ② 只露立绘：`body.compact` 负责藏掉气泡与输入卡片。
+     *
+     * ⚠️ **不发 `pet:peek`** —— 姿态由用户自己决定（拖到边上才是探头）。
+     * 之前这里会在两端各发一次：进全屏时发"探头"，退出时发"回正"，
+     * 那两次就是"自动变换姿态"本身。
+     *
+     * `side` 只在探头时给（CSS 里那两条 `body.compact.peek-*` 规则已作废，
+     * 现在纯属给调试日志看）。
+     */
+    window.webContents.send('pet:compact', {
+      compact,
+      side: this.edgePeekSide,
+    });
 
-  /** 按宠物当前水平位置选**最近的**一侧（左/右） */
-  private pickNearestSide(): PeekSide {
-    const window = this.window;
-    if (!window || window.isDestroyed()) return 'right';
-    const b = window.getBounds();
-    const { workArea } = screen.getDisplayNearestPoint({ x: b.x, y: b.y });
-    const centerX = b.x + b.width / 2;
-    return centerX < workArea.x + workArea.width / 2 ? 'left' : 'right';
+    if (compact) {
+      // 进全屏：把"探头中"这件事记下来，只为**日志**能对照（比如探测抖动时
+      // 看它有没有被误拉直）。⚠️ 退出时**不用它恢复任何东西** —— 姿态没变过。
+      this.compactEnterState = this.edgePeek
+        ? `探头·贴${PEEK_SIDE_TEXT[this.edgePeekSide]}边`
+        : '常态';
+    } else {
+      this.compactEnterState = null;
+      // 退出全屏不 onLayoutChanged：
+      //   ① 位置没动，对话条不需要重排（重排反而会把它挪走）；
+      //   ② 对话条在全屏期间的显示由 `compact` 决定，它自己会跟着恢复。
+    }
   }
 
   /** 让窗口临时整体可交互（打开设置面板时用）。 */
@@ -2460,8 +2437,11 @@ export class PetWindow {
     if (!window || window.isDestroyed()) return null;
     const bounds = window.getBounds();
     // `peeking` 让气泡知道要不要额外往下挪（见 bubbleWindow 的 PEEK_EXTRA_DROP）。
-    // 探头 = 用户拖出来的边缘探头，或"别人全屏"触发的紧凑形态 —— 两者姿态一致。
-    const peeking = this.edgePeek || this.compact;
+    //
+    // ⚠️ **只看 `edgePeek`**（2026-10-20 改）：全屏早先会被强制摆成探头样子，
+    // 所以这里要 `|| this.compact`。现在全屏不再自动探头，姿态完全由用户决定 ——
+    // 再把 compact 算进来，会让"站着被全屏"的宠物下方多挪 26px，而实际没旋转。
+    const peeking = this.edgePeek;
 
     // 优先：**未旋转**的实测矩形（姿态无关，头在哪就是哪）
     const up = this.uprightArtRect;

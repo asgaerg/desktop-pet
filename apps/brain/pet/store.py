@@ -2057,6 +2057,89 @@ class PetDatabase:
             )
         )
 
+    def search_memory_like(self, term: str, limit: int = 20) -> list[sqlite3.Row]:
+        """按**子串**找记忆（专有名词兜底用，2026-10-20 加）。
+
+        ## 为什么 FTS 不够，还要一条 LIKE 路
+
+        `search_memory` 走 FTS5 + `jieba_query` 改写。实测对**专有名词**反而更容易漏：
+
+        · 分词会把"银松镇"切开（它不在词典里），于是 MATCH 变成了
+          `"银" AND "松" AND "镇"` —— 三个字分别命中一大堆无关记忆，
+          真正那条被挤到候选外；
+        · 而用户问「银松镇那个机关怎么过」时，人名/作品名**恰恰是最该命中的锚点**。
+
+        子串匹配不吃分词，只要那段字面出现过就命中。代价是慢（无法走索引），
+        但记忆表就几百到几千行，实测一次 LIKE 全表在 5ms 量级 —— 每轮检索
+        只对**几个**专有名词各跑一次，够用。
+
+        ⚠️ 排除已压缩（`merged_into`）与已归档（`archived`）：它们不该被召回。
+        """
+        keyword = str(term or "").strip()
+        if not keyword:
+            return []
+        # 转义 LIKE 的通配符 —— 书名号里的名字可能含 `_` 或 `%`（如 `C_Thru`）
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        try:
+            return list(
+                self.conn.execute(
+                    """
+                    SELECT m.id, m.summary, m.kind, m.tags, m.level, m.importance,
+                           m.src_table, m.src_id, m.created_at, m.ts
+                    FROM memory m
+                    WHERE m.summary LIKE ? ESCAPE '\\'
+                      AND m.merged_into IS NULL
+                      AND m.level != 'archived'
+                    ORDER BY m.ts DESC
+                    LIMIT ?
+                    """,
+                    (f"%{escaped}%", max(1, min(50, int(limit)))),
+                )
+            )
+        except sqlite3.OperationalError as exc:
+            log.warning("专有名词兜底检索失败（已忽略）：%s", exc)
+            return []
+
+    def memory_candidates_for_contradiction(
+        self, keywords: list[str], limit: int = 40
+    ) -> list[sqlite3.Row]:
+        """取出**可能**与本次写入矛盾的既有记忆（2026-10-20，§114 改动 5 用）。
+
+        判据只做"至少含一个关键词"这一层粗筛，真正的极性判断在调用方
+        （`memory2._find_contradiction`）。粗筛必须放 SQL 里 —— 否则每次写入
+        都要把整张记忆表搬进 Python 再逐条比对。
+
+        ⚠️ 排除 `archived`：它已经是被取代的旧说法，不该再参与判断
+        （否则第三次写入会跟"已被推翻的那条"再比一次，日志里出现循环取代）。
+        """
+        words = [str(w).strip() for w in (keywords or []) if str(w).strip()]
+        if not words:
+            return []
+        clauses = " OR ".join(["m.summary LIKE ? ESCAPE '\\'"] * len(words))
+        args: list[Any] = [
+            "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            for w in words
+        ]
+        args.append(max(1, min(200, int(limit))))
+        try:
+            return list(
+                self.conn.execute(
+                    f"""
+                    SELECT m.id, m.summary, m.kind, m.level, m.ts
+                    FROM memory m
+                    WHERE ({clauses})
+                      AND m.merged_into IS NULL
+                      AND m.level != 'archived'
+                    ORDER BY m.ts DESC
+                    LIMIT ?
+                    """,
+                    args,
+                )
+            )
+        except sqlite3.OperationalError as exc:
+            log.warning("矛盾检测的候选查询失败（已忽略）：%s", exc)
+            return []
+
     def search_memory(self, query: str, limit: int = 5) -> list[sqlite3.Row]:
         """关键词检索（中文走 `jieba_query` 改写，精度靠它）。
 

@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, AsyncIterator, Iterator, Optional
 
+from .. import netutil
 from ..config import Config
 from .base import Brain, EmotionState, LLMRequest, StreamEvent, new_tool_call
 
@@ -379,7 +380,7 @@ class OpenAIBrain(Brain):
         # 每个工具调用一个槽位，键是 index（模型给的）
         slots: dict[int, dict[str, Any]] = {}
         # 不用 urlopen 全局超时：流式连接会持续很久，只设读超时
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+        with netutil.urlopen(request, timeout=self.timeout_s) as response:
             if response.status != 200:
                 raise urllib.error.HTTPError(
                     self._endpoint(), response.status, "非 200 响应", response.headers, None

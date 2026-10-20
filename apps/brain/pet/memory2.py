@@ -49,6 +49,10 @@ class MemoryService:
         self._last_fact_ts = 0.0
         self.injections = 0
         self.facts_written = 0
+        # 因矛盾被归档的旧条目数（§114 改动 5，2026-10-20）。
+        # ⚠️ 单独计数而不是混进 `facts_written`：一个是"写了新的"，
+        # 一个是"旧的被取代了"，出问题时这两种要能分开看。
+        self.archived_by_contradiction = 0
         # 最近一次检索命中的记忆 id（「一段交流结束」时用来强化，2026-10-17）
         self.last_hit_ids: list[int] = []
         # 单条检索记忆的字数上限（超过就切段，见 `_split_for_embedding`）。
@@ -783,6 +787,29 @@ class MemoryService:
             return "bge" if getattr(self.embedder, "_session", None) is not None else "bge(未加载)"
         return "hashing"
 
+    def _lexical_fallback_enabled(self) -> bool:
+        """专有名词兜底路开不开（`memory.lexical_fallback`，默认开）。
+
+        ⚠️ 留这个开关不是为了"调参"，而是为了**能做对照实验**：
+        改动 4 到底有没有提升召回，唯一可靠的验证方法是关掉它跑同一批问句再对比。
+        没有开关就只能靠"感觉变好了"——那不叫验证。
+        """
+        value = (self.config.memory or {}).get("lexical_fallback")
+        return True if value is None else bool(value)
+
+    def _lexical_fallback_max_terms(self) -> int:
+        """一句话里最多拿几个专有名词去做子串匹配（默认 6）。
+
+        每个词一次全表 LIKE，实测单次 5ms 量级 —— 6 个约 30ms，
+        相对一次向量编码（bge 约 15~40ms）不算大头，但也没必要更多：
+        一句话里真有 6 个以上专有名词时，前 6 个已经覆盖了主体。
+        """
+        raw = (self.config.memory or {}).get("lexical_max_terms")
+        try:
+            return max(1, min(20, int(raw if raw is not None else 6)))
+        except (TypeError, ValueError):
+            return 6
+
     def _retrieve_hits(self, query: str) -> list[dict[str, Any]]:
         """两路检索后合并，返回**带元数据**的命中列表。
 
@@ -818,6 +845,39 @@ class MemoryService:
         # 关键词路
         for rank, row in enumerate(self.db.search_memory(query, limit=top_k * 2)):
             seen[int(row["id"])] = seen.get(int(row["id"]), 0.0) + 1.0 / (1.0 + rank)
+
+        # ---- 专有名词兜底路（§114 改动 4，2026-10-20 接入）----
+        #
+        # 用户问「银松镇那个机关怎么过」时，最该命中的是含「银松镇」的那条记忆。
+        # 但两条正路都可能漏掉它：
+        #
+        #   · 关键词路：`jieba_query` 不认识"银松镇"，把它切成
+        #     `"银" AND "松" AND "镇"` —— 三个字各自命中一堆无关条目，
+        #     真正那条反而被挤出 top_k；
+        #   · 向量路：句意相似度对"专有名词"不敏感（"银松镇"和"明日方舟"在向量上
+        #     可能比"银松镇的机关"更近 —— 都是游戏名）。
+        #
+        # 所以加一条**字面子串**路：从问句里抽专有名词，命中就进候选。
+        # ⚠️ 权重刻意给得比正路低（0.5）：它是"保证不漏"，不是"保证排第一"。
+        #    真正排前面仍靠语义分 —— 否则一个被反复提到的词会永远霸占榜首。
+        fallback_hits = 0
+        if self._lexical_fallback_enabled():
+            try:
+                from . import nouns
+
+                terms = nouns.extract_terms(query)
+                for term in terms[: self._lexical_fallback_max_terms()]:
+                    rows = self.db.search_memory_like(term, limit=max(3, top_k))
+                    if not rows:
+                        continue
+                    fallback_hits += 1
+                    for rank, row in enumerate(rows):
+                        mid = int(row["id"])
+                        # `+0.5/(1+rank)`：比关键词路（1.0/(1+rank)）低一档，
+                        # 但比"没命中"高得多 —— 只要它出现在候选里就不会被剪掉。
+                        seen[mid] = seen.get(mid, 0.0) + 0.5 / (1.0 + rank)
+            except Exception:  # noqa: BLE001 —— 兜底失败绝不能影响主检索
+                log.debug("专有名词兜底检索跳过", exc_info=True)
 
         # 向量路
         try:
@@ -1184,6 +1244,34 @@ class MemoryService:
                         skipped += 1
                         continue
 
+                    # ---- 查 3：矛盾检测（§114 改动 5，2026-10-20）----
+                    #
+                    # 用户要求：「矛盾检测只在检索层对比」—— 就在这。
+                    # 前两步（精确 / 语义）解决"一样的话说两遍"，
+                    # 这一步解决"说的不一样、但互相否定"：
+                    #
+                    #     用户在打《银松镇》        <- 已在库
+                    #     用户还没开玩《银松镇》     <- 现在要写，与前一条矛盾
+                    #
+                    # 两条同时存在的话，检索会把两条都召回、一起塞进提示词，
+                    # AI 就会在"你在玩"和"你还没玩"之间摇摆 —— 比"想不起来"更糟，
+                    # 因为它会**说错**。
+                    #
+                    # ⚠️ 命中后旧条目不删，降成 `archived`（见 `_find_contradiction`）。
+                    contradicted = self._find_contradiction(text, level)
+                    if contradicted is not None:
+                        old_id, why = contradicted
+                        try:
+                            self.db.set_memory_level(old_id, "archived")
+                            # 已归档的要从向量索引里摘掉，否则 KNN 还会召回它
+                            # （`search_memory_like` 已经排除了 archived，
+                            #   但 `vec_search` 只看索引）。
+                            self.db.vec_drop(old_id)
+                            self.archived_by_contradiction += 1
+                            log.info("[记忆] 矛盾：#%d 被新条目取代（%s）", old_id, why)
+                        except Exception:  # noqa: BLE001 —— 归档失败就并存，绝不能让写入崩
+                            log.warning("[记忆] 矛盾命中但归档失败，两条并存（%s）", why)
+
                     vec = self._embed(text)
                     self.db.add_memory(
                         text,
@@ -1264,6 +1352,65 @@ class MemoryService:
             self.db.bump_interests(weak, strength="weak", source="memory")
         if strong or weak:
             log.info("兴趣更新：强信号 %s · 弱信号 %s", strong[:4], weak[:4])
+
+    def _find_contradiction(self, text: str, level: str) -> tuple[int, str] | None:
+        """找一条被 `text` **推翻**的既有记忆（§114 改动 5，2026-10-20）。
+
+        返回 `(旧条目 id, 人话原因)`；没有矛盾返回 `None`。
+
+        ## 为什么用纯文本、不走向量
+
+        隔壁 `_is_semantic_duplicate()` 走向量，而它在 `_embed()` 失败时
+        （`if not vec: return False`）**静默降级成"不重复"**。
+        矛盾检测若也走向量，嵌入一旦不可用（模型缺失、维度漂移、降级成 hashing）
+        它就会**悄悄失效** —— 用户看到的只是"它又开始把新旧说法混着说了"，
+        没有任何报错。这种无声失效最难查，所以这里不依赖向量。
+
+        而且语义相似度对**极性**本来就不敏感：「在打银松镇」和「还没玩银松镇」
+        的向量可能比「在打银松镇」和「在打明日方舟」还近。
+
+        ## 三个安全阀（缺一个都可能变成"悄悄删记忆"）
+
+        ```
+        ① 拿不准就不动 —— `nouns.is_contradiction` 要求两个条件同时满足，否则 False
+        ② 旧的**不删**，只降成 level='archived' —— 记忆管理页面还看得见、能改回来
+        ③ 每次命中都打日志 —— "[记忆] 矛盾：#12 被新条目取代（共用「银松镇」，玩没玩相反）"
+        ```
+
+        ⚠️ 第 ② 条尤其重要：**误判的代价必须是"能撤销"，不能是"信息没了"**。
+
+        ## 为什么候选只按专有名词粗筛
+
+        全表逐条比对太慢（每轮提炼都要跑）。而两条矛盾的记忆**必然**共用
+        同一个专有名词（否则说的根本不是同一个东西），所以先用
+        `memory_candidates_for_contradiction` 在 SQL 里筛出"至少含一个共同词"的，
+        再逐条做极性判断。实测库里有 100 多条记忆时，一次筛出 0~5 条。
+        """
+        from . import nouns
+
+        if level == "archived":
+            # 写进归档层的本来就不参与检索，没有矛盾可言
+            return None
+        try:
+            terms = nouns.extract_terms(text)
+            if not terms:
+                return None
+            candidates = self.db.memory_candidates_for_contradiction(terms)
+            for row in candidates:
+                old_text = str(row["summary"] or "")
+                old_level = str(row["level"] or "")
+                if old_level == "archived":
+                    continue
+                # ⚠️ 固定注入层不参与：那是用户手选的"每次都带上"，
+                #    自动归档它等于替用户改了设定。
+                if old_level == "fixed":
+                    continue
+                hit, why = nouns.is_contradiction(old_text, text)
+                if hit:
+                    return int(row["id"]), why
+        except Exception:  # noqa: BLE001 —— 矛盾检测是加分项，失败就当没矛盾
+            log.debug("矛盾检测跳过（异常）", exc_info=True)
+        return None
 
     def _is_semantic_duplicate(self, text: str, level: str) -> bool:
         """这条是不是已经有一条**意思相同**的（正文不必相同）。

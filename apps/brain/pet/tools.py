@@ -54,7 +54,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
-from . import mcp_search, web
+from . import deepseek_search, mcp_search, web
 from .protocol import msg
 
 log = logging.getLogger("pet.tools")
@@ -104,7 +104,8 @@ def _mcp_search_on() -> bool:
 菜单里的「联网搜索」从 checkbox 改成了**三选一**：
 
     accurate  精准搜索（约 10~20 秒）—— free-search-mcp 多引擎为主
-    fast      快速搜索（约 2 秒）—— websearch-mcp.exe（原行为）
+    fast      快速搜索（约 1~2 秒）—— **DeepSeek 官方搜索**（2026-10-19 起）
+                                       没有 DeepSeek 密钥时退回 websearch-mcp.exe
     off       关闭联网搜索（工具不注册，模型根本看不到）
 
 为什么做成模式而不是两个独立开关：用户原话是"可显示选择模式的方式"——
@@ -122,25 +123,63 @@ _free_search_url = ""
 _free_search_cmd = ""
 
 """
-## ⚠️ DeepSeek 也有官方联网搜索了 —— 但我们**故意不用**（2026-10-17 记）
+## DeepSeek 官方搜索接入（2026-10-19）
 
-DeepSeek 公告：API 现已支持**网页搜索与抓取**，通过服务端工具调用访问
-`search` / `fetch` 接口，**按请求次数计费**，自北京时间 2026-11-01 00:00
-开始按次收取调用费用。
+用户：「现在 deepseek 支持联网搜索了，你去接入到联网搜索里面，代替第二个搜索，
+并且标注一下只有 deepseekapi 才能使用此功能。」
 
-用户明确说：「deepseek开启联网搜索功能了，不过要花钱，我不弄这个」。
-所以这里保持现状 —— 走本地的 `free-search-mcp` / `websearch-mcp.exe`，不接官方那套。
+所以 **fast 档的第一后端改成 `deepseek_search`**（官方 REST，见
+`pet/deepseek_search.py`）。三条必须知道的约束：
 
-### 以后真要接的话，改哪里
+### ① 它是**我们自己调的 REST**，不是"模型侧的工具"
 
-不是改这里：官方那套是**模型侧的工具**（服务端自己调），传的是
-`tools: [{type: 'web_search'}]` 之类的声明，跟我们现在"自己实现工具 + 回填结果"
-的 agent loop 是两条路。接的话要在 `brains/openai_compat.py` 的请求体里声明，
-并把 `pet.say.end` 之前的工具轮次让给服务端 —— 那是一次**结构性改动**，
-不是加个开关。
+官方另外提供「在请求体里声明 tools、由服务端自己搜」的用法，那条路要改
+`brains/openai_compat.py` 的整套工具轮次（结构性改动）。这里走的是 REST：
 
-⚠️ 计费点：按**请求次数**，不是按 token。长对话里模型可能每轮都想搜一次。
+```
+模型要搜索 -> 我们调 POST /v1/tools/search -> 把结果当工具结果回填给模型
+```
+
+好处：和现有 agent loop 完全一致，任何 OpenAI 兼容模型都能用这套搜索；
+代价：**必须自带 DeepSeek 密钥** —— 这就是菜单里"仅 DeepSeek API 可用"的意思。
+
+### ② 计费按**请求次数**
+
+每 1000 次成功请求 5 元（失败/空结果不计费）。所以：
+  · 不重复搜同一个词（模型自己会控制，我们不加自动重试）
+  · `need_content` 保持 false（正文会多烧 token，而且 web_fetch 已经能读）
+
+### ③ 没有密钥时**静默退回**本地后端
+
+fast 档在老用户可以完全没配 DeepSeek 密钥（比如只用硅基流动）。这时
+`_deepseek_key` 是空串，`_web_search` 直接跳过官方后端走 `mcp_search` ——
+功能不受影响，只是少了"官方搜索质量"这一档。日志里会记一行，便于排查。
 """
+_deepseek_key = ""
+_deepseek_url = ""
+_deepseek_use_proxy = False
+
+
+def set_deepseek_search(api_key: str = "", url: str = "", use_system_proxy: bool = False) -> None:
+    """把 DeepSeek 搜索的密钥/端点推给本模块（网关在配置变更时调）。
+
+    ⚠️ 空密钥是**合法状态**（用户没配 DeepSeek）—— 这时 fast 档退回本地后端，
+    不是错误，也不要每次搜索都刷一条 warning。
+    """
+    global _deepseek_key, _deepseek_url, _deepseek_use_proxy
+    before = bool(_deepseek_key)
+    _deepseek_key = str(api_key or "").strip()
+    if url.strip():
+        _deepseek_url = url.strip()
+    _deepseek_use_proxy = bool(use_system_proxy)
+    now = bool(_deepseek_key)
+    if now != before:
+        log.info("DeepSeek 官方搜索：%s", "可用（fast 档首选）" if now else "不可用（缺密钥，fast 档退回本地）")
+
+
+def deepseek_search_ready() -> bool:
+    """给日志/诊断用：fast 档到底会不会走官方后端。"""
+    return bool(_deepseek_key)
 
 
 def mode_from_config(section: dict[str, Any] | None) -> str:
@@ -176,7 +215,13 @@ def set_search_mode(mode: str, free_url: str = "", free_cmd: str = "") -> None:
         _free_search_cmd = free_cmd.strip()
     log.info(
         "搜索模式：%s（free-search %s）",
-        {"accurate": "精准（free-search 优先）", "fast": "快速（websearch-mcp）", "off": "关"}[mode],
+        # ⚠️ 标签要说清**实际**走谁：2026-10-19 起 fast 档首选 DeepSeek 官方搜索，
+        #    本地 websearch-mcp 只是退路。写「快速（websearch-mcp）」会误导排查。
+        {
+            "accurate": "精准（free-search 优先）",
+            "fast": "快速（DeepSeek 官方搜索优先）" if _deepseek_key else "快速（websearch-mcp）",
+            "off": "关",
+        }[mode],
         "已配置" if _free_search_url else "未配置端点",
     )
 
@@ -384,35 +429,16 @@ async def _web_search(args: dict[str, Any]) -> str:
     except (TypeError, ValueError):
         count = 6
 
-    """
-    ## ① 先试 MCP 后端
-
-    ⚠️ `mcp_search.search()` 是**同步阻塞**的（urllib），要 `to_thread` ——
-    和下面 `web.search` 同理，直接在事件循环里调会卡住整个 sidecar。
-
-    ⚠️ 这里吞掉异常是**刻意**的：MCP 不可用时应该退到自己的抓取，
-    而不是让工具报错给模型看（模型会据此说"我搜不了"，而其实还能搜）。
-
-    ## 🔴 2026-10-16：按「搜索模式」分流
-
-        accurate  先走 **free-search-mcp**（多引擎融合，命中质量实测明显更好
-                  —— 能拿到官网公告而不是"二"字百科），失败落回 fast 链路
-        fast      websearch-mcp.exe（1.5 秒快筛）
-        off       不会进来（工具根本没注册）
-
-    A/B 实测数据见 `mcp_search.search_free` 的说明。
-    """
+    # ① 精准档：free-search 优先（失败落到下面的 fast 链路）
     if _search_mode == "accurate" and _free_search_url:
         try:
-            text = await asyncio.to_thread(
-                mcp_search.search_free, query, count,
-            )
-            if text.strip():
+            text_out = await asyncio.to_thread(mcp_search.search_free, query, count)
+            if text_out.strip():
                 log.info(
                     "web_search q=%r limit=%s -> free-search 后端，%d 字",
-                    query, count, len(text),
+                    query, count, len(text_out),
                 )
-                return text
+                return text_out
             log.warning("web_search q=%r free-search 返回空，退到 fast 链路", query)
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -420,20 +446,64 @@ async def _web_search(args: dict[str, Any]) -> str:
                 query, str(exc)[:160],
             )
 
+    """
+    ## ② fast 链路第一后端：**DeepSeek 官方搜索**（2026-10-19 用户要求）
+
+    用户原话：「现在 deepseek 支持联网搜索了，你去接入到联网搜索里面，
+    代替第二个搜索，并且标注一下只有 deepseekapi 才能使用此功能。」
+
+    实测（2026-10-19，本机、绕开系统代理）：**0.31~0.39 秒**，比本地
+    `websearch-mcp`（1.5 秒）还快，而且结果是 DeepSeek 自研引擎排过序的
+    （带 authority 权威度、date 时间）。代价是按**请求次数**计费
+    （5 元/1000 次成功请求），所以要避免无意义的重试。
+
+    ⚠️ `_deepseek_key` 为空（用户没配 DeepSeek）时**整段跳过** ——
+    这就是菜单里"仅 DeepSeek API 可用"的落地方式：没密钥就退回本地后端，
+    功能不受影响，只是少了官方搜索这一档。
+
+    ⚠️ 失败也**不报给模型**：退回本地后端继续搜。给模型看到"DeepSeek 401"
+    对回答没帮助，反而会让它说"我搜不了"。原因记 warning 日志即可。
+    """
+    if _deepseek_key:
+        try:
+            ds_outcome = await asyncio.to_thread(
+                deepseek_search.search,
+                query,
+                count,
+                api_key=_deepseek_key,
+                url=_deepseek_url or deepseek_search.DEFAULT_URL,
+                use_system_proxy=_deepseek_use_proxy,
+            )
+            if ds_outcome.ok:
+                log.info(
+                    "web_search q=%r limit=%s -> DeepSeek 官方，%d 条",
+                    query, count, len(ds_outcome.hits),
+                )
+                return _format_outcome(query, ds_outcome)
+            log.warning("web_search q=%r DeepSeek 返回空，退到本地 MCP", query)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "web_search q=%r DeepSeek 搜索失败（%s），退到本地 MCP",
+                query, str(exc)[:160],
+            )
+
+    # ③ 本地 MCP 后端（websearch-mcp.exe，1.5 秒；没 DeepSeek 密钥时就是它）
     if _mcp_search_on():
         try:
-            text = await asyncio.to_thread(mcp_search.search, query, count)
-            if text.strip():
+            text_out = await asyncio.to_thread(mcp_search.search, query, count)
+            if text_out.strip():
                 log.info(
                     "web_search q=%r limit=%s -> MCP 后端，%d 字",
-                    query, count, len(text),
+                    query, count, len(text_out),
                 )
-                return text
+                return text_out
             log.warning("web_search q=%r MCP 返回空，退到自抓后端", query)
         except Exception as exc:  # noqa: BLE001
             log.warning("web_search q=%r MCP 后端失败（%s），退到自抓后端",
                         query, str(exc)[:160])
 
+    # ④ 最后一道：自己抓 HTML（最慢，10 秒量级，但零依赖、不会没有）
+    #
     # ⚠️ `search()` 是**同步阻塞**的（urllib），放到线程里跑 ——
     # 直接在事件循环里调会卡住整个 sidecar（连语音都停）。
     outcome = await asyncio.to_thread(web.search, query, count)
@@ -463,7 +533,18 @@ async def _web_search(args: dict[str, Any]) -> str:
         len(outcome.hits),
         outcome.engine or "无",
     )
+    return _format_outcome(query, outcome)
 
+
+def _format_outcome(query: str, outcome: web.SearchOutcome) -> str:
+    """把一次搜索结果格式化成**给模型读的文本**（唯一的格式化实现）。
+
+    2026-10-19 从 `_web_search` 里抽出来。原因是后端变多了：
+    `deepseek_search` / `mcp_search` / `web.search` 里**最后两条**产出的是
+    同一个 `web.SearchOutcome`，格式化必须只有一份 ——
+    否则"先读摘要""用 web_fetch"这些提示语在两条路上迟早分叉，
+    而它们恰恰是让模型别乱编答案的关键（见下面几段说明）。
+    """
     if not outcome.ok:
         # ⚠️ 失败要说清"为什么" —— 含糊的失败会让模型编一个答案
         return f"搜索没有结果。尝试记录：{'；'.join(outcome.attempts) or '未知原因'}"
@@ -519,14 +600,14 @@ async def _web_search(args: dict[str, Any]) -> str:
     ignored = query_looks_ignored(current_urls, _last_search_urls)
     _last_search_urls = current_urls
     if ignored:
-        log.info("web_search q=%r 的结果与上次高度重叠 —— 查询可能没被理解", query)
+        log.info("q=%r 的结果与上次高度重叠 —— 查询可能没被理解", query)
 
     lines = [f"搜索「{query}」（来自 {outcome.engine}）的结果："]
     for idx, hit in enumerate(outcome.hits, 1):
         lines.append(f"{idx}. {hit.title}")
         lines.append(f"   {hit.url}")
         if hit.snippet:
-            lines.append(f"   {hit.snippet[:160]}")
+            lines.append(f"   {hit.snippet[:240]}")
     lines.append("")
     """
     ## 🔴 每次搜索结果末尾都要给「下一步」（2026-10-12）

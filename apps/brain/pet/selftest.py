@@ -406,8 +406,13 @@ def test_brains(suite: SelfTest) -> None:
         # 顶层包名，导致后续 `import pet.xxx` 全部失败（踩过一次）。
         import pet.brains.openai_compat as compat_mod
 
-        original = compat_mod.urllib.request.urlopen
-        compat_mod.urllib.request.urlopen = lambda *a, **k: _FakeResponse()  # type: ignore[assignment]
+        # ⚠️ 2026-10-19 起模型请求走 `pet.netutil.urlopen`（按域名绕系统代理），
+        # 所以假替身要 patch 那一层 —— patch `urllib.request.urlopen` 已经拦不到了
+        # （会真的发网络请求）。
+        import pet.netutil as netutil_mod
+
+        original = netutil_mod.urlopen
+        netutil_mod.urlopen = lambda *a, **k: _FakeResponse()  # type: ignore[assignment]
         try:
             events = list(
                 brain._iter_sse(
@@ -415,7 +420,7 @@ def test_brains(suite: SelfTest) -> None:
                 )
             )
         finally:
-            compat_mod.urllib.request.urlopen = original  # type: ignore[assignment]
+            netutil_mod.urlopen = original  # type: ignore[assignment]
 
         text = "".join(e["text"] for e in events if e["kind"] == "delta")
         _assert(text == "你好", f"SSE 解析结果错误：{text!r}")
@@ -1910,12 +1915,15 @@ def test_content(suite: SelfTest) -> None:
 
         import pet.content as content_mod
 
-        original = content_mod.urllib.request.urlopen
-        content_mod.urllib.request.urlopen = fake_urlopen  # type: ignore[assignment]
+        # 同上：走 netutil（2026-10-19 起）
+        import pet.netutil as netutil_mod2
+
+        original = netutil_mod2.urlopen
+        netutil_mod2.urlopen = fake_urlopen  # type: ignore[assignment]
         try:
             result = extractor.extract(frame)
         finally:
-            content_mod.urllib.request.urlopen = original  # type: ignore[assignment]
+            netutil_mod2.urlopen = original  # type: ignore[assignment]
 
         _assert(result.ok and "Python" in result.text, f"未解析出描述：{result}")
         _assert(captured["url"].endswith("/chat/completions"), f"接口路径不对：{captured['url']}")
@@ -1938,11 +1946,11 @@ def test_content(suite: SelfTest) -> None:
                 "http://x", 429, "Too Many Requests", {}, io.BytesIO(b'{"error":{"message":"quota"}}')
             )
 
-        content_mod.urllib.request.urlopen = fail_urlopen  # type: ignore[assignment]
+        netutil_mod2.urlopen = fail_urlopen  # type: ignore[assignment]
         try:
             failed = extractor.extract(frame)
         finally:
-            content_mod.urllib.request.urlopen = original  # type: ignore[assignment]
+            netutil_mod2.urlopen = original  # type: ignore[assignment]
         _assert(not failed.ok, "HTTP 错误时不该报告成功")
         _assert("限流" in failed.error or "配额" in failed.error, f"错误信息不可读：{failed.error}")
         return f"请求体/鉴权/图片编码正确；429 被翻译为「{failed.error[:28]}」"
@@ -4414,6 +4422,362 @@ class _BadPlugin(Plugin):
         raise RuntimeError("装载时就炸")
 
 
+def test_netutil(suite: SelfTest) -> None:
+    """按域名绕系统代理（2026-10-19）：名单匹配 + 假阳/假阴 + 调用点覆盖。"""
+
+    @suite.check("直连名单：国内模型接口命中，境外照旧走代理")
+    def _() -> str:
+        from . import netutil
+
+        cases = {
+            "https://api.deepseek.com/v1/chat/completions": True,
+            "https://api.deepseek.com:443/v1/tools/search": True,
+            "https://API.DeepSeek.com/v1/x": True,
+            "https://api.siliconflow.cn/v1/chat/completions": True,
+            "https://api.openai.com/v1/chat/completions": False,
+            "https://www.google.com/": False,
+            # 本地服务另走 force_direct，不靠名单
+            "http://127.0.0.1:8123/mcp": False,
+        }
+        for url, want in cases.items():
+            got = netutil.should_bypass(url)
+            _assert(got is want, f"{url} 判定错了：{got}（期望 {want}）")
+        return "deepseek / siliconflow 直连；openai / google 走代理"
+
+    @suite.check("直连名单：子域算、伪装域名不算（不能写成通配符）")
+    def _() -> str:
+        from . import netutil
+
+        _assert(netutil.should_bypass("https://beta.api.deepseek.com/x"), "子域应命中")
+        for bad in (
+            "https://evilapi.deepseek.com/x",   # 不是子域（少了点）
+            "https://api.deepseek.com.cn/x",    # 后缀不同
+            "https://deepseek.com.evil.io/x",   # 域名在中间
+        ):
+            _assert(not netutil.should_bypass(bad), f"{bad} 不该命中")
+        return "beta.api.deepseek.com 命中；3 个伪装域名都没命中"
+
+    @suite.check("直连名单：可配置，空列表/None 行为明确")
+    def _() -> str:
+        from . import netutil
+
+        before = netutil.direct_hosts()
+        try:
+            netutil.set_direct_hosts(["api.example.cn", ".sub.example.cn"])
+            _assert(netutil.should_bypass("https://api.example.cn/x"), "自定义名单没生效")
+            _assert(netutil.should_bypass("https://a.sub.example.cn/x"), "前导点没被清掉")
+            _assert(not netutil.should_bypass("https://api.deepseek.com/x"), "默认名单应被覆盖")
+            netutil.set_direct_hosts([])
+            _assert(not netutil.should_bypass("https://api.deepseek.com/x"), "空名单应全部走代理")
+            netutil.set_direct_hosts(None)
+            _assert(netutil.should_bypass("https://api.deepseek.com/x"), "None 应恢复默认")
+        finally:
+            netutil.set_direct_hosts(before)
+        return "自定义覆盖 / 空列表走代理 / None 回默认，都已验证"
+
+    @suite.check("直连名单：PET_FORCE_SYSTEM_PROXY=1 可临时全部走代理")
+    def _() -> str:
+        import os
+
+        from . import netutil
+
+        old = os.environ.get("PET_FORCE_SYSTEM_PROXY")
+        try:
+            os.environ["PET_FORCE_SYSTEM_PROXY"] = "1"
+            _assert(
+                not netutil.should_bypass("https://api.deepseek.com/x"),
+                "强制走代理时不该命中直连",
+            )
+        finally:
+            if old is None:
+                os.environ.pop("PET_FORCE_SYSTEM_PROXY", None)
+            else:
+                os.environ["PET_FORCE_SYSTEM_PROXY"] = old
+        _assert(netutil.should_bypass("https://api.deepseek.com/x"), "恢复后该重新命中")
+        return "环境变量能覆盖；清掉后恢复"
+
+    @suite.check("模型/语音/搜索的 HTTP 调用点都走 netutil（防止改回去）")
+    def _() -> str:
+        here = Path(__file__).resolve().parent
+        targets = [
+            "brains/openai_compat.py",
+            "content.py",
+            "voice.py",
+            "mcp_search.py",
+            "deepseek_search.py",
+        ]
+        offenders = []
+        for rel in targets:
+            source = (here / rel).read_text(encoding="utf-8")
+            # 只算真正的调用；文档里提到 `urllib.request.urlopen` 不算
+            for i, line in enumerate(source.splitlines(), 1):
+                s = line.strip()
+                if s.startswith("#") or s.startswith('"') or s.startswith("*"):
+                    continue
+                if "urllib.request.urlopen(" in line:
+                    offenders.append(f"{rel}:{i}")
+        _assert(not offenders, f"这些地方绕过了 netutil：{offenders}")
+        return f"{len(targets)} 个文件都走 netutil.urlopen"
+
+
+def test_empty_reply(suite: SelfTest) -> None:
+    """推理吃光预算、正文 0 字（2026-10-19 真机「连着两次没回复」）。
+
+    真机数据（阿拾，22:49:33）：`finish_reason='stop'`、`completion_tokens=76`、
+    `reasoning_tokens=76`、正文 delta 共 0 字 —— 流正常结束，所以
+    "被 max_tokens 截断"那条补救（只在 `finish_reason == 'length'` 时触发）
+    **完全没生效**，用户看到气泡空着、历史里连这一轮都没有。
+    """
+
+    @suite.check("空回复：关掉思考重试一次，正文能落到历史里")
+    def _() -> str:
+        import asyncio
+
+        from .config import Config
+        from .gateway import Gateway
+
+        class EmptyThenText:
+            name = "empty-then-text"
+
+            def __init__(self) -> None:
+                self.calls: list[Any] = []
+
+            async def stream(self, req: Any) -> Any:
+                self.calls.append(req)
+                if len(self.calls) == 1:
+                    # 复刻真机：正常结束、没有正文、没有任何 delta
+                    yield {"kind": "finish", "finish_reason": "stop"}
+                    yield {"kind": "done"}
+                    return
+                yield {"kind": "delta", "text": "诶，"}
+                yield {"kind": "delta", "text": "我在。"}
+                yield {"kind": "finish", "finish_reason": "stop"}
+                yield {"kind": "done"}
+
+            def available(self) -> bool:
+                return True
+
+        async def run() -> tuple[int, bool, str]:
+            cfg = Config()
+            cfg.apply_patch(
+                {
+                    "providers.brain.provider": "mock",
+                    "autonomy": {"enabled": False},
+                    "memory": {"path": str(_workspace_tmp("empty-reply") / "pet.db")},
+                }
+            )
+            gw = Gateway(cfg)
+            brain = EmptyThenText()
+            gw.conversation.brain = brain
+            question = "你觉得人的情感能不能让人感受到温度"
+            await gw.conversation.ask(question)
+            current = gw.conversation.current
+            if current is not None:
+                await current
+            await asyncio.sleep(0.05)
+            last = gw.conversation.history[-1].text if gw.conversation.history else ""
+            # ⚠️ 只数**这一轮对话**的请求：后台记忆提炼也用同一个 brain，
+            #    直接数 calls 会被它多算一次（踩过）。
+            main = [c for c in brain.calls if c.user_text == question]
+            _assert(len(main) == 2, f"对话请求应 2 次（空 + 重试），实际 {len(main)}")
+            return len(main), main[1].thinking is False, last
+
+        calls, thinking_off, last_text = asyncio.run(run())
+        _assert(calls == 2, f"空回复应重试一次，实际调用 {calls} 次")
+        _assert(thinking_off, "重试时必须关掉思考（否则推理照样吃光预算）")
+        _assert("我在" in last_text, f"重试拿到的正文没进历史：{last_text!r}")
+        return f"第 1 次空 -> 关思考重试 -> 「{last_text}」"
+
+    @suite.check("空回复：两次都空也不沉默（兜底句），且不写空历史")
+    def _() -> str:
+        import asyncio
+
+        from .config import Config
+        from .gateway import EMPTY_REPLY_FALLBACK, Gateway
+
+        class AlwaysEmpty:
+            name = "always-empty"
+
+            def __init__(self) -> None:
+                self.calls: list[Any] = []
+
+            async def stream(self, req: Any) -> Any:
+                self.calls.append(req)
+                yield {"kind": "finish", "finish_reason": "stop"}
+                yield {"kind": "done"}
+
+            def available(self) -> bool:
+                return True
+
+        async def run() -> tuple[int, str, str]:
+            cfg = Config()
+            cfg.apply_patch(
+                {
+                    "providers.brain.provider": "mock",
+                    "autonomy": {"enabled": False},
+                    "memory": {"path": str(_workspace_tmp("empty-reply-2") / "pet.db")},
+                }
+            )
+            gw = Gateway(cfg)
+            brain = AlwaysEmpty()
+            gw.conversation.brain = brain
+            await gw.conversation.ask("在吗")
+            current = gw.conversation.current
+            if current is not None:
+                await current
+            await asyncio.sleep(0.05)
+            last = gw.conversation.history[-1].text if gw.conversation.history else ""
+            # 同上：提炼请求不算
+            main = [c for c in brain.calls if c.user_text == "在吗"]
+            return len(main), last, brain.name
+
+        calls, last_text, _ = asyncio.run(run())
+        _assert(calls == 2, f"应只重试一次（避免死循环），实际 {calls} 次")
+        _assert(last_text == EMPTY_REPLY_FALLBACK, f"没用兜底句，实际 {last_text!r}")
+        return f"两次都空 -> 兜底句「{last_text}」"
+
+    @suite.check("连不上模型时也要说一句话（不能只有气泡空白）")
+    def _() -> str:
+        import asyncio
+
+        from .config import Config
+        from .gateway import FAILED_REPLY_FALLBACK, Gateway
+
+        class Broken:
+            name = "broken"
+
+            async def stream(self, req: Any) -> Any:
+                # 复刻 10-18 的真机：代理死了 -> 连接被拒
+                raise OSError(10061, "由于目标计算机积极拒绝，无法连接。")
+                yield  # pragma: no cover
+
+            def available(self) -> bool:
+                return True
+
+        async def run() -> str:
+            cfg = Config()
+            cfg.apply_patch(
+                {
+                    "providers.brain.provider": "mock",
+                    "autonomy": {"enabled": False},
+                    "memory": {"path": str(_workspace_tmp("failed-reply") / "pet.db")},
+                }
+            )
+            gw = Gateway(cfg)
+            gw.conversation.brain = Broken()
+            await gw.conversation.ask("我挺喜欢曲娘的")
+            current = gw.conversation.current
+            if current is not None:
+                await current
+            await asyncio.sleep(0.05)
+            return gw.conversation.history[-1].text if gw.conversation.history else ""
+
+        last_text = asyncio.run(run())
+        _assert(last_text == FAILED_REPLY_FALLBACK, f"没用「连不上」的兜底句，实际 {last_text!r}")
+        return f"连接被拒 -> 「{last_text}」"
+
+
+
+def test_search_backends(suite: SelfTest) -> None:
+    """搜索后端（2026-10-19）：DeepSeek 官方接入 + 统一的格式化出口。"""
+
+    @suite.check("DeepSeek 搜索：没有密钥就是「不可用」，不抛异常")
+    def _() -> str:
+        from . import deepseek_search
+
+        _assert(deepseek_search.available("") is False, "空密钥应不可用")
+        _assert(deepseek_search.available("   ") is False, "空白密钥应不可用")
+        _assert(deepseek_search.available("sk-test") is True, "有密钥应可用")
+        return "空 / 空白 -> 不可用；有密钥 -> 可用"
+
+    @suite.check("DeepSeek 搜索：请求体夹条数、去空白、空查询报错")
+    def _() -> str:
+        from . import deepseek_search
+
+        body = deepseek_search.build_body("  测试  ", 99)
+        _assert(body["query"] == "测试", f"查询词没 strip：{body['query']!r}")
+        _assert(body["count"] == 10, f"count 没夹到 10：{body['count']}")
+        _assert(body["need_content"] is False, "不该要正文（烧 token，web_fetch 负责读页面）")
+        body = deepseek_search.build_body("x", 0)
+        _assert(body["count"] == 1, f"count 没夹到 1：{body['count']}")
+        try:
+            deepseek_search.build_body("   ", 5)
+        except deepseek_search.DeepSeekSearchError:
+            pass
+        else:
+            _assert(False, "空查询应该抛 DeepSeekSearchError")
+        return "count 0->1 / 99->10；query 去空白；空查询抛错"
+
+    @suite.check("DeepSeek 搜索：长摘要优先、无 url 丢弃、超长截断")
+    def _() -> str:
+        from . import deepseek_search
+
+        payload = {
+            "results": [
+                {"title": " 标题A ", "url": "https://a.example", "summary": "长摘要\n换行", "snippet": "短"},
+                {"title": "没链接", "url": "", "summary": "x"},
+                {"title": "长", "url": "https://b.example", "summary": "字" * 400},
+                {"title": "只有短摘要", "url": "https://c.example", "snippet": "短摘要"},
+            ]
+        }
+        hits = deepseek_search.parse_results(payload)
+        _assert(len(hits) == 3, f"应丢弃无 url 的那条，实际 {len(hits)} 条")
+        _assert(hits[0].snippet.startswith("长摘要"), f"应优先 summary：{hits[0].snippet!r}")
+        _assert("\n" not in hits[0].snippet, "摘要里的换行应被压成空格")
+        _assert(
+            len(hits[1].snippet) <= deepseek_search.SNIPPET_CHARS + 1,
+            f"超长摘要没截断：{len(hits[1].snippet)} 字",
+        )
+        _assert(hits[2].snippet == "短摘要", "没有 summary 时应退回 snippet")
+        _assert(hits[0].title == "标题A", f"标题没清理：{hits[0].title!r}")
+        return f"3 条；summary 优先；{deepseek_search.SNIPPET_CHARS} 字截断；换行压平"
+
+    @suite.check("DeepSeek 搜索：401/402/429 的提示能指导用户行动")
+    def _() -> str:
+        from . import deepseek_search
+
+        e401 = deepseek_search.describe_http_error(401)
+        e402 = deepseek_search.describe_http_error(402)
+        e429 = deepseek_search.describe_http_error(429)
+        e500 = deepseek_search.describe_http_error(503)
+        _assert("密钥" in e401, f"401 应提示密钥：{e401}")
+        _assert("余额" in e402 or "充值" in e402, f"402 应提示充值：{e402}")
+        _assert("限速" in e429, f"429 应说明限速：{e429}")
+        _assert("服务端" in e500, f"5xx 应说是服务端问题：{e500}")
+        return "401->密钥 / 402->充值 / 429->限速 / 5xx->服务端"
+
+    @suite.check("搜索后端开关：空密钥自动退回本地，有密钥走官方")
+    def _() -> str:
+        from . import tools
+
+        before = tools.deepseek_search_ready()
+        try:
+            tools.set_deepseek_search("")
+            _assert(tools.deepseek_search_ready() is False, "空密钥应不可用")
+            tools.set_deepseek_search("sk-test")
+            _assert(tools.deepseek_search_ready() is True, "有密钥应可用")
+        finally:
+            tools.set_deepseek_search("sk-restore" if before else "")
+        return "set_deepseek_search('') -> False；有密钥 -> True"
+
+    @suite.check("搜索结果格式化只有一份（DeepSeek 与自抓后端共用提示语）")
+    def _() -> str:
+        from . import tools, web
+
+        outcome = web.SearchOutcome(
+            hits=[web.SearchHit(title="标题", url="https://x.example", snippet="摘要")],
+            engine="deepseek",
+        )
+        text = tools._format_outcome("查询", outcome)
+        _assert("搜索「查询」" in text, "没带查询词")
+        _assert("deepseek" in text, "没带引擎名")
+        _assert("先仔细读上面的标题和摘要" in text, "缺「先读摘要」的提示")
+        _assert("web_fetch" in text, "缺下一步提示")
+        empty = tools._format_outcome("查询", web.SearchOutcome(attempts=["没有结果"]))
+        _assert("搜索没有结果" in empty, f"空结果文案不对：{empty}")
+        return "非空带引擎/摘要提示；空结果给可读原因"
+
+
 def test_bus_and_plugins(suite: SelfTest) -> None:
     @suite.check("总线隔离：订阅者抛异常不影响其他订阅者")
     def _() -> str:
@@ -5022,11 +5386,217 @@ def test_subjectivity(suite: SelfTest) -> None:
         _assert(bare == [], f"没分词器时不该硬切中文：{bare}")
         return "强信号必提；模板动词挡住；共用词可识别；无分词器时不乱切"
 
-    @suite.check("兴趣表：反复提到的会长出来，模板动词与一次性的事不会")
+    @suite.check("检索层：专有名词兜底能把「语义远但字面命中」的记忆捞回来")
     def _() -> str:
+        """§114 改动 4（2026-10-20 接入）。
+
+        ## 这条测的是"兜底路真的在工作"，不是"整体检索变好了"
+
+        所以做成**对照实验**：同一条记忆、同一个问句，只在
+        `memory.lexical_fallback` 开关上不同 —— 关掉时漏，打开时中。
+        「感觉变好了」不算验证，能开关的对比才算。
+        """
         import os
         import shutil
         import tempfile
+
+        from . import nouns
+        from .config import Config
+        from .memory2 import MemoryService
+
+        tmp = Path(tempfile.mkdtemp(prefix="pet-selftest-lexical-"))
+        services: list[MemoryService] = []
+
+        def build(fallback: bool) -> MemoryService:
+            cfg = Config()
+            cfg.apply_patch(
+                {
+                    "memory": {
+                        "path": str(tmp / ("on.db" if fallback else "off.db")),
+                        "enabled": True,
+                        "lexical_fallback": fallback,
+                        "min_score": 0.99,  # 把向量路几乎关死，突出兜底路的作用
+                    }
+                }
+            )
+            svc = MemoryService(cfg)
+            # ⚠️ memory2 在**连上库之后**才会把 simple.dll 的分词器注进 nouns。
+            #    测试里必须等它那一刻过去，否则 `extract_terms` 提不出不带引号的中文
+            #    —— 那测的就不是真实链路（实测踩到：兜底路一条都没召回）。
+            _assert(
+                nouns._SEGMENTER is not None,
+                "MemoryService 没有注入分词器 —— 兜底路的前提不成立",
+            )
+            services.append(svc)
+            return svc
+
+        cwd = os.getcwd()
+        dll_parent = (
+            Path(__file__).resolve().parents[3]
+            / "apps"
+            / "desktop"
+            / "pet-data"
+            / "vendor"
+            / "simple"
+            / "libsimple-windows-x64"
+        )
+        try:
+            # simple.dll 要在 CWD 下才能被 SQLite 加载（与真实启动一致）
+            if dll_parent.exists():
+                os.chdir(dll_parent)
+
+            # 一条"专有名词是唯一线索"的记忆：问句与它用词完全不同，
+            # 只有"银松镇"三个字重合 —— 正是分词会切碎、向量又看不出来的情形。
+            fact = "用户在玩《银松镇》，被转盘机关卡住三天了"
+            query = "银松镇那个机关到底怎么过"
+
+            off = build(False)
+            off.remember_facts([fact])
+            off_hits = off._retrieve_hits(query)
+
+            on = build(True)
+            on.remember_facts([fact])
+            on_hits = on._retrieve_hits(query)
+
+            _assert(
+                any("银松镇" in h["text"] for h in on_hits),
+                f"开了兜底也召回不到（这条测试的前提被破坏了）：{[h['text'][:20] for h in on_hits]}",
+            )
+            _assert(
+                len(on_hits) >= len(off_hits),
+                f"开兜底后召回数反而变少：{len(off_hits)} -> {len(on_hits)}",
+            )
+            # 兜底不该"什么都召回" —— 无关问句仍然可以什么都有
+            unrelated = on._retrieve_hits("今天天气怎么样")
+            _assert(
+                not any("银松镇" in h["text"] for h in unrelated),
+                "无关问句把不相关记忆也召回了 —— 兜底路没有边界",
+            )
+            return (
+                f"兜底关闭 {len(off_hits)} 条 / 打开 {len(on_hits)} 条；"
+                "无关问句不误召回"
+            )
+        finally:
+            for svc in services:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            nouns.set_segmenter(None)
+            os.chdir(cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @suite.check("矛盾检测：新旧说法相反时旧条目转 archived，且**不删**")
+    def _() -> str:
+        """§114 改动 5（2026-10-20 落地）。
+
+        用户要求：「矛盾检测只在检索层对比」。这条同时守三个安全阀：
+          ① 拿不准不动（不相关/不同维度必须并存）
+          ② 旧的不删，只降 `archived`（能恢复）
+          ③ 有日志（这里用计数代替读日志）
+        """
+        import shutil
+        import tempfile
+
+        from .config import Config
+        from .memory2 import MemoryService
+
+        tmp = Path(tempfile.mkdtemp(prefix="pet-selftest-contradict-"))
+        svc = None
+        try:
+            cfg = Config()
+            cfg.apply_patch({"memory": {"path": str(tmp / "c.db"), "enabled": True}})
+            svc = MemoryService(cfg)
+
+            # ① 先写「在打」—— 正常入库
+            svc.remember_facts(["用户在打《银松镇》"])
+            # ② 再写「还没开玩」—— 与前一条矛盾
+            svc.remember_facts(["用户还没开玩《银松镇》，说等打折"])
+            # ③ 写一条**不矛盾**的（不同维度：买了没）—— 必须并存
+            svc.remember_facts(["用户买了《银松镇》的季票"])
+
+            rows = {str(r["summary"]): str(r["level"]) for r in svc.db.list_memory(limit=50)}
+            playing = [t for t in rows if "在打" in t and "银松镇" in t]
+            negated = [t for t in rows if "还没开玩" in t]
+            _assert(playing, f"「在打」那条不见了：{list(rows)}")
+            _assert(negated, f"「还没开玩」那条没写进去：{list(rows)}")
+
+            old_level = rows[playing[0]]
+            new_level = rows[negated[0]]
+            _assert(
+                old_level == "archived",
+                f"旧说法没被归档（level={old_level}）—— 两条并存会让它说话前后矛盾",
+            )
+            _assert(
+                new_level == "recent",
+                f"新说法被误归档了（level={new_level}）—— 矛盾检测方向反了",
+            )
+            _assert(
+                svc.archived_by_contradiction >= 1,
+                f"归档计数没增加：{svc.archived_by_contradiction}",
+            )
+            # ② 旧条目**还在库里**（能恢复），不是被删
+            _assert(
+                any("在打" in t for t in rows),
+                "旧条目被删掉了 —— 误判的代价必须是可撤销，不能是信息没了",
+            )
+            # 安全阀①：不同维度（买了季票）不参与矛盾，两条都在
+            both = [t for t in rows if "银松镇" in t and "季票" in t]
+            _assert(both, f"「买季票」那条不该被吞掉：{list(rows)}")
+
+            # 归档的条目不再被检索召回
+            hits = svc._retrieve_hits("银松镇怎么玩")
+            _assert(
+                not any("在打" in h["text"] for h in hits),
+                f"已归档的旧说法还被召回：{[h['text'][:16] for h in hits]}",
+            )
+            return (
+                f"「在打」-> archived、新说法保持 recent、季票那条并存；"
+                f"共归档 {svc.archived_by_contradiction} 条"
+            )
+        finally:
+            if svc is not None:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @suite.check("矛盾检测：同一维度、同向、不同对象都**不**判矛盾（防误杀）")
+    def _() -> str:
+        from . import nouns
+
+        # 同向（都在玩）—— 不是矛盾
+        _assert(
+            not nouns.is_contradiction("用户在打《银松镇》", "用户在玩《银松镇》")[0],
+            "同向的两条被误判成矛盾",
+        )
+        # 不同对象 —— 即使极性相反也不是矛盾
+        _assert(
+            not nouns.is_contradiction("用户在打《银松镇》", "用户还没开玩《明日方舟》")[0],
+            "不同游戏被误判成矛盾（会删掉不相关的记忆）",
+        )
+        # 不同维度（玩 vs 买）—— 是补充信息
+        _assert(
+            not nouns.is_contradiction("用户在打《银松镇》", "用户买了《银松镇》")[0],
+            "「买了」被当成「在玩」的反义 —— 维度混淆",
+        )
+        # 真正的矛盾必须认出来
+        hit, why = nouns.is_contradiction("用户在打《银松镇》", "用户还没开玩《银松镇》")
+        _assert(hit, "真正的矛盾没认出来")
+        _assert("银松镇" in why, f"原因里没说清共用哪个词：{why}")
+        # 否定词能覆盖同一维度里的肯定词（"不喜欢"含"喜欢"）
+        _assert(
+            nouns.polarity_of("用户不喜欢《银松镇》的结局") == ("liking", "neg"),
+            f"「不喜欢」判成了 {nouns.polarity_of('用户不喜欢《银松镇》的结局')}",
+        )
+        _assert(
+            nouns.is_contradiction("用户喜欢《银松镇》", "用户不喜欢《银松镇》的结局")[0],
+            "「喜欢 / 不喜欢」没被判成矛盾",
+        )
+        return "同向/异对象/异维度都放过；「在打 vs 还没开玩」「喜欢 vs 不喜欢」能认出"
+
+
 
         from . import nouns
         from .store import PetDatabase
@@ -5825,6 +6395,9 @@ def run_selftest(config_path: Optional[Path] = None) -> SelfTest:
     test_content(suite)
     test_voice(suite)
     test_memory(suite)
+    test_search_backends(suite)
+    test_netutil(suite)
+    test_empty_reply(suite)
     test_bus_and_plugins(suite)
     test_logging(suite)
     test_end_to_end(suite, config_path)

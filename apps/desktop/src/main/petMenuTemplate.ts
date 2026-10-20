@@ -86,16 +86,29 @@ export const WEB_SEARCH_MODES: readonly WebSearchMode[] = ['accurate', 'fast', '
  * （精准 10~20 秒、快速约 2 秒），是"给用户的承诺"而不是会变的配置 ——
  * 后端性能变了应该来这里改文案，而不是把变量塞进 UI。
  *
- * ⚠️ 刻意**不写引擎名**（free-search / websearch-mcp）：子菜单面板宽度
+ * ⚠️ 刻意**不写引擎名**（free-search / websearch-mcp / DeepSeek）：子菜单面板宽度
  * 固定，长标签会被截成半截（用户截图里父项的"约 1…"就是教训）。
- * 引擎名记录在这里的注释与 `tools.py` 的日志里就够 —— 用户关心的是
- * "快还是准、大概等多久"，不是实现叫什么。
+ * 唯一的例外是下面那条**灰色说明行**（"仅 DeepSeek API 可用"），
+ * 它是用户 2026-10-19 明确要求标注的**前提条件**，不是实现细节。
  */
 export const WEB_SEARCH_LABEL: Record<WebSearchMode, string> = {
   accurate: '精准搜索（约 10~20 秒）',
   fast: '快速搜索（约 2 秒）',
   off: '关闭联网搜索',
 };
+
+/**
+ * 「快速搜索」下面那行**灰色说明**（2026-10-19 加）。
+ *
+ * 用户原话：「接入到联网搜索里面，代替第二个搜索，并且标注一下
+ * 只有 deepseekapi 才能使用此功能」。
+ *
+ * ⚠️ 为什么用 disabled 菜单项而不是把字塞进 label：
+ *   · label 变长会被窄面板截断（见上一条注释）
+ *   · 独立一行、灰色、不可点 —— 语义上就是"这是备注，不是选项"
+ *   · 渲染层已经把 `enabled: false` 处理成 `data-disabled`（不可点、变灰）
+ */
+export const WEB_SEARCH_FAST_NOTE = '仅 DeepSeek API 可用';
 
 export interface PetMenuState {
   visible: boolean;
@@ -611,12 +624,28 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
        */
       label: '联网搜索',
       icon: 'globe',
-      submenu: WEB_SEARCH_MODES.map((mode) => ({
-        label: WEB_SEARCH_LABEL[mode],
-        type: 'radio' as const,
-        checked: state.webSearchMode === mode,
-        action: `web-search-mode:${mode}`,
-      })),
+      submenu: WEB_SEARCH_MODES.flatMap((mode) => {
+        const item: PetMenuItem = {
+          label: WEB_SEARCH_LABEL[mode],
+          type: 'radio' as const,
+          checked: state.webSearchMode === mode,
+          action: `web-search-mode:${mode}`,
+        };
+        if (mode !== 'fast') return [item];
+        /*
+         * 「快速搜索」下面紧跟一行灰色说明（2026-10-19）。
+         * 它在渲染层是不可点的（`enabled: false` → `data-disabled`），
+         * 键盘/鼠标都点不动，也不会被当成"第四种模式"。
+         */
+        return [
+          item,
+          {
+            label: WEB_SEARCH_FAST_NOTE,
+            type: 'normal' as const,
+            enabled: false,
+          },
+        ];
+      }),
     },
 
     {

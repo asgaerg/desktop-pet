@@ -341,3 +341,165 @@ def parse_jieba_query(expr: str) -> list[str]:
         if token and token not in out:
             out.append(token)
     return out
+
+
+# ────────────────────────────────────────────── 矛盾检测（§114 改动 5，2026-10-20）
+#
+# 用户明确要求：「矛盾检测只在检索层对比」。所以这份表只服务
+# `memory2.remember_facts()` 的"写入前查矛盾"这一步，**不**给提炼提示词用。
+#
+# ## 为什么按"成对"判，而不是按"有没有否定词"
+#
+# 真实条目长这样（都是库里实际出现过的形态）：
+#
+#     用户在打《银松镇》
+#     用户还没开玩《银松镇》          <- 矛盾
+#     用户买了《银松镇》              <- 不矛盾（补充信息）
+#     用户在打《银松镇》，被转盘机关卡住  <- 不矛盾（同向，更详细）
+#
+# 只看"有没有'没'"会把第三条判成矛盾吗？不会；但会把
+# 「用户不喜欢《银松镇》的结局」判成与「用户喜欢《银松镇》」矛盾 —— 那是对的。
+# 真正的风险在反方向：**同向的两条被误判**。所以每个词都要有明确的
+# 反义项才算一"对"，找不到对就不判（宁可并存）。
+#
+# ⚠️ 顺序有意义：先匹配长的（"还没开玩"必须先于"玩"被看到），
+#    否则「还没开玩」会因为含"玩"而被判成"在玩"，两条同向 —— 永远不会报矛盾。
+POLARITY_PAIRS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (维度名, 正面说法, 反面说法)
+    (
+        "playing",
+        ("在玩", "在打", "正在玩", "开玩了", "通关了", "玩过", "玩通了"),
+        ("还没开玩", "还没玩", "没玩过", "没玩", "没通关", "没打通", "弃坑了"),
+    ),
+    (
+        "owning",
+        ("买了", "入手了", "已购买", "已经在玩"),
+        ("没买", "没入手", "还没买", "没购买", "不打算买"),
+    ),
+    (
+        "liking",
+        ("喜欢", "爱玩", "挺喜欢", "很喜欢", "感兴趣"),
+        ("不喜欢", "讨厌", "不感兴趣", "不爱玩", "弃了"),
+    ),
+    (
+        "having",
+        ("有", "拥有", "已经装了", "装好了"),
+        ("没有", "还没安装", "没装", "没安装", "没有装"),
+    ),
+)
+
+
+def polarity_of(text: str) -> tuple[str, str] | None:
+    """判断一条记忆在**哪个维度**上是正还是负。
+
+    返回 `(维度, "pos"|"neg")`，判不出来返回 `None`。
+
+    ## 判定顺序：先找否定，再找肯定
+
+    这是**刻意**的，不是随手写的：
+
+        "用户还没玩《银松镇》"   含有"玩"（正面词）也含有"还没玩"（反面词）
+                                  -> 必须先命中反面，否则两条同向、永远不报矛盾
+        "用户不喜欢《银松镇》"   含"喜欢"和"不喜欢" -> 同理
+
+    所以每个维度内**反面词优先**。而且反面词按长度降序匹配，
+    保证"还没开玩"不会被更短的"没玩"抢先（两者都是反面，结果一样，但如果
+    将来加了"没玩过但预购了"这种，顺序就要紧）。
+
+    ## ⚠️ 一条只能有一个维度
+
+    返回单个维度而不是集合：矛盾检测要求"同一维度、方向相反"。
+    如果一条同时提到"喜欢"和"没买"（「喜欢《银松镇》但还没买」），
+    拿哪个？—— 实测这类复合句出现得少，且**误判代价高**（可能把一条
+    很真实的信息归档掉）。所以取"最先出现的那个说法"，并且同一个维度里
+    正反都出现时返回 `None`（自己跟自己矛盾，交给用户看，不自动处理）。
+    """
+    raw = str(text or "")
+    if not raw:
+        return None
+    best: tuple[int, str, str] | None = None  # (位置, 维度, 极性)
+    for name, pos_words, neg_words in POLARITY_PAIRS:
+        pos_pos = _first_index(raw, pos_words)
+        neg_pos = _first_index(raw, neg_words)
+        if pos_pos is not None and neg_pos is not None:
+            # 同一个维度里正反都出现了（"不喜欢"里含"喜欢"）。
+            #
+            # ⚠️ 这里**不是**直接丢掉 —— 那会让「用户不喜欢《X》的结局」
+            # 整条判不出极性（实测），而它恰恰是最该被抓到的一类。
+            # 规则：**否定词覆盖了肯定词**（否定出现在肯定之前，且两者相隔很近）
+            # 就当反面；否则认为是两句不同的评价，返回 None 不参与判断。
+            if neg_pos <= pos_pos and pos_pos - neg_pos <= _NEGATION_REACH:
+                candidate = (neg_pos, name, "neg")
+            else:
+                continue
+        elif neg_pos is not None:
+            candidate = (neg_pos, name, "neg")
+        elif pos_pos is not None:
+            candidate = (pos_pos, name, "pos")
+        else:
+            continue
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+# 否定词能"管到"后面多远的肯定词。
+#
+# 「不喜欢」：否定词"不喜欢"本身含"喜欢"，相隔 0 —— 必须覆盖。
+# 「没买…但很喜欢」：相隔很远，是两个评价，不该合并 —— 所以设个上限。
+# 实测中文记忆条目很短（`max_chars=200`，实际大多 <40 字），
+# 6 个字足够覆盖"不喜欢X的游戏""没买X但是"这类，又不会被长句误并。
+_NEGATION_REACH = 6
+
+
+def _first_index(text: str, words: tuple[str, ...]) -> int | None:
+    """第一个命中的词的位置（越靠前越可能是主谓）。"""
+    found: int | None = None
+    for word in sorted(words, key=len, reverse=True):
+        index = text.find(word)
+        if index >= 0 and (found is None or index < found):
+            found = index
+    return found
+
+
+def is_contradiction(old_text: str, new_text: str) -> tuple[bool, str]:
+    """两条记忆是否**互相矛盾**（§114 改动 5 的判据）。
+
+    返回 `(是否矛盾, 人话原因)`。
+
+    ## 两个条件必须**同时**满足
+
+    ```
+    ① 共用同一个专有名词   —— 否则"用户在打A"和"还没买B"会被判成矛盾
+    ② 同一维度、极性相反   —— 否则"在打"和"买了"（都是补充信息）会被误杀
+    ```
+
+    缺任何一个都会误杀，而误杀的代价是"一条真的信息被归档"。
+    所以这里**宁可漏判**：判不出来就并存，等以后有更好的办法再说。
+
+    ⚠️ 纯文本、不走向量。理由见 `memory2._find_contradiction` 的说明：
+    嵌入不可用时向量路会**静默降级**，而这种"悄悄失效"最难发现。
+    """
+    shared = shared_terms(old_text, new_text)
+    if not shared:
+        return False, ""
+    left = polarity_of(old_text)
+    right = polarity_of(new_text)
+    if left is None or right is None:
+        return False, ""
+    if left[0] != right[0]:
+        # 不同维度（比如一条说"买了"、一条说"不喜欢"）—— 补充信息，不是矛盾
+        return False, ""
+    if left[1] == right[1]:
+        return False, ""
+    return True, f"共用「{shared[0]}」，{_DIM_LABEL.get(left[0], left[0])}相反"
+
+
+_DIM_LABEL = {
+    "playing": "玩没玩",
+    "owning": "买没买",
+    "liking": "喜不喜欢",
+    "having": "有没有",
+}

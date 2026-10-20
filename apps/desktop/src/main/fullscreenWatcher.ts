@@ -483,6 +483,31 @@ export interface FullscreenWatcherOptions {
    * 全屏时的轮询间隔。比 idle 更短：退出全屏时希望宠物马上收回屏幕内。
    */
   fullscreenIntervalMs?: number;
+  /**
+   * 状态翻转要**连续几次**一致才认（去抖，2026-10-20 加）。
+   *
+   * ## 为什么需要（真机日志，06:47）
+   *
+   * 用户的 B 站标签页**本来就不是全屏**（`全屏检测：非全屏，前台=…bilibili…Edge`），
+   * 探测却连着报了两次「全屏」：
+   *
+   *     06:47:41.273  进入全屏模式（…bilibili…Edge），原状态 探头·贴右边
+   *     06:47:42.501  退出全屏，恢复位置 1390,568（…不自动恢复探头）
+   *     06:47:43.519  全屏检测：非全屏
+   *     06:47:44.527  进入全屏模式（…同一条），原状态 探头·贴右边
+   *     06:47:45.761  退出全屏，恢复位置 1389,568
+   *
+   * 4 秒里「进/退」闪了两下，每次「退出」都会把宠物**拉直**并收回常态尺寸 ——
+   * 用户看到的正是「退出全屏后探头旋转没了」。
+   *
+   * 探测判据是"窗口矩形铺满屏幕 + 没有标题栏"。浏览器静止时也可能有一瞬间
+   * 报告"无标题栏"（全屏切换的过渡帧、Win32 样式位更新时序），
+   * 单次读数**不可信**，所以要求连续 N 次一致才翻转。
+   *
+   * 代价：真实变化最多晚 `N × 轮询间隔` 被确认（默认 2 次，用户无感）。
+   * 设成 1 = 关掉去抖（行为与 10-20 之前一致，测试用）。
+   */
+  confirmSamples?: number;
   /** 状态变化回调（只在变化时触发） */
   onChange: (info: ForegroundInfo, fullscreen: boolean) => void;
   /**
@@ -505,6 +530,8 @@ export class FullscreenWatcher {
   private probing = false;
   private stopped = false;
   private probes = 0;
+  /** 连续几次"看起来要翻转"（去抖计数，见 `confirmSamples`） */
+  private pendingFlip = 0;
   private readonly probe: FullscreenProbeProcess;
 
   constructor(private readonly options: FullscreenWatcherOptions) {
@@ -556,18 +583,40 @@ export class FullscreenWatcher {
       );
       return info;
     }
-    if (info.fullscreen !== this.fullscreen) {
-      this.fullscreen = info.fullscreen;
-      this.options.onChange(info, this.fullscreen);
-    } else if (this.probes % 15 === 0) {
-      // 周期性汇报"它现在看到什么"。
-      // 只记状态变化是不够的：如果探测一直返回同一个值（比如因为前台窗口
-      // 始终是宠物自己），日志里就什么都没有，完全看不出"在跑但看错了"。
-      this.options.onDiagnostic?.(
-        `全屏检测进行中（第 ${this.probes} 次）：${info.fullscreen ? '全屏' : '非全屏'}，` +
-          `前台=${info.title || '(无标题)'}`,
-      );
+    /*
+     * 去抖（见 `confirmSamples`）：单次读数与当前状态不一致时**先不动**，
+     * 只有连续 N 次都一致才认这个翻转。
+     *
+     * ⚠️ 候选值一旦被推翻就清零，不能累加 —— 否则 4 次里出现 3 次真 1 次假
+     * 也会被凑够"连续 3 次"，去抖等于没做。
+     */
+    const need = Math.max(1, Math.floor(this.options.confirmSamples ?? 1));
+    const seen = info.fullscreen;
+    if (seen === this.fullscreen) {
+      this.pendingFlip = 0;
+      if (this.probes % 15 === 0) {
+        // 周期性汇报"它现在看到什么"。
+        // 只记状态变化是不够的：如果探测一直返回同一个值（比如因为前台窗口
+        // 始终是宠物自己），日志里就什么都没有，完全看不出"在跑但看错了"。
+        this.options.onDiagnostic?.(
+          `全屏检测进行中（第 ${this.probes} 次）：${info.fullscreen ? '全屏' : '非全屏'}，` +
+            `前台=${info.title || '(无标题)'}`,
+        );
+      }
+      return info;
     }
+    this.pendingFlip += 1;
+    if (this.pendingFlip < need) {
+      // 还没到阈值：记一笔（排查"抖动被吃掉"时要知道它曾经想过翻转）
+      this.options.onDiagnostic?.(
+        `全屏检测：疑似${seen ? '进入全屏' : '退出全屏'}（${this.pendingFlip}/${need}，未确认）` +
+          `，前台=${info.title || '(无标题)'}`,
+      );
+      return info;
+    }
+    this.pendingFlip = 0;
+    this.fullscreen = seen;
+    this.options.onChange(info, this.fullscreen);
     return info;
   }
 

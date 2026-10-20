@@ -1507,7 +1507,13 @@ async function main(): Promise<void> {
         log(line);
         startupNote(line);
       },
-      onChange: (info, fullscreen) => {
+      /*
+     * 去抖（2026-10-20）：探测单次读数会在全屏/非全屏之间闪一下
+     * （真机 06:47 那次 4 秒里闪了两轮，每次都把探头姿态拉直了）。
+     * 连续 2 次一致才认，见 FullscreenWatcherOptions.confirmSamples。
+     */
+    confirmSamples: 2,
+    onChange: (info, fullscreen) => {
         startupNote(
           fullscreen
             ? `检测到全屏应用，宠物进入紧凑模式：${info.title || '(无标题)'}`

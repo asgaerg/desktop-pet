@@ -34,6 +34,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
+from . import netutil
 from .vision import Frame
 
 log = logging.getLogger("pet.content")
@@ -354,7 +355,7 @@ class OpenAIVisionExtractor:
                 "User-Agent": "desktop-pet/0.1",
             },
         )
-        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+        with netutil.urlopen(request, timeout=self.timeout_s) as response:
             parsed = json.loads(response.read().decode("utf-8", errors="replace"))
         choices = parsed.get("choices") or []
         if not choices:

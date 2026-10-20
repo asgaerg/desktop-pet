@@ -45,7 +45,7 @@ class ConfigError(Exception):
 # --------------------------------------------------------------------------- #
 
 DEFAULT_PERSONA: dict[str, Any] = {
-    "name": "小灵",
+    "name": "阿拾",
     "user_title": "你",
     "system_prompt": (
         "你是住在用户电脑桌面上的小宠物，名字叫{name}。你不是助手，不列条款、不说"
@@ -349,7 +349,7 @@ class Config:
 
     @property
     def pet_name(self) -> str:
-        return str(self.persona.get("name") or "小灵")
+        return str(self.persona.get("name") or "阿拾")
 
     def brain_provider(self) -> str:
         return str(self.providers.get("brain", {}).get("provider", "mock")).lower()
