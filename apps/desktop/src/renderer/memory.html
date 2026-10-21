@@ -127,8 +127,15 @@
       <section id="tab-cherished" class="panel">
         <p class="lead">
           <strong>永久保留</strong>的片段，不受时间窗口影响。
-          它们可以「固定注入」—— 勾上的每次对话都会带上
-          （所以别太多，会很占提示词）。
+          <!--
+            🔴 2026-10-21 用户要求：「珍藏记忆本就和固定注入提示词是不一样的功能，
+            不要显示是否固定注入，固定注入要只在原文记忆里选择。」
+
+            所以这一页**不再有**「固定注入」列，新建表单里那个勾也去掉了。
+            珍藏 = "永久留着这段回忆"；固定注入 = "每次对话都带上这段话"。
+            两件事，不该混在同一个勾选框里。
+          -->
+          想让它每次对话都带上，请到「原文记忆」里找那句话点「固定」。
         </p>
 
         <div class="toolbar">
@@ -142,10 +149,10 @@
           <input id="cher-new-title" type="text" placeholder="标题（可留空）" />
           <textarea id="cher-new-text" rows="4" placeholder="要珍藏的内容…"></textarea>
           <div class="row">
-            <label class="inline-check">
-              <input id="cher-new-pinned" type="checkbox" checked />
-              固定注入
-            </label>
+            <!--
+              2026-10-21：去掉了「固定注入」勾选。
+              珍藏就是珍藏，不再兼任"注入开关"——那个职责归「原文记忆」页。
+            -->
             <button id="cher-new-save" class="btn primary">保存</button>
             <button id="cher-new-cancel" class="btn">取消</button>
             <span class="muted" id="cher-new-state"></span>
@@ -161,7 +168,6 @@
                 <th class="c-title">标题</th>
                 <th class="c-text">内容</th>
                 <th class="c-turns">轮数</th>
-                <th class="c-pin">固定注入</th>
                 <th class="c-act">操作</th>
               </tr>
             </thead>
@@ -210,6 +216,19 @@
             <input id="mem-show-merged" type="checkbox" />
             显示已压缩
           </label>
+          <!--
+            「显示已归档」（2026-10-20 加）。
+
+            为什么需要它：矛盾检测（§一百七十五）会把被推翻的旧条目降成
+            `archived`，但界面上**根本看不到它们** —— 于是"旧的不删、能恢复"
+            这个承诺是空的，用户只能改数据库才能救回来。
+
+            ⚠️ 默认**不勾**：归档条目是"已作废的说法"，不该挤占日常浏览。
+          -->
+          <label class="inline-check">
+            <input id="mem-show-archived" type="checkbox" />
+            显示已归档
+          </label>
         </div>
         <div class="toolbar wrap">
           <span class="muted">时间范围</span>
@@ -219,8 +238,16 @@
           <button id="mem-range-btn" class="btn">按时间查</button>
           <span class="muted">来源</span>
           <select id="mem-src">
+            <!--
+              2026-10-21：按**主语**筛选（用户要求「宠物和用户分开记录，写个标签，
+              省得搜索的时候有问题」）。
+
+              注意这里筛的是 `kind`，不是 `level` ——
+              「你的事」和「它的事」是同一层里按主语分的两类。
+            -->
             <option value="">全部</option>
-            <option value="fact">提炼</option>
+            <option value="fact">你的事</option>
+            <option value="self">它的事</option>
             <option value="phrase">常说的话</option>
             <option value="habit">习惯</option>
             <option value="persona">人设</option>
@@ -371,6 +398,11 @@
               <table class="grid">
                 <thead>
                   <tr>
+                    <!--
+                      2026-10-21 用户要求：「固定注入要和原文记忆一样，显示时间。」
+                      时间放最前，与「原文记忆」「检索层」「珍藏记忆」三页的顺序一致。
+                    -->
+                    <th class="c-time">时间</th>
                     <th class="c-text">内容</th>
                     <th class="c-act">操作</th>
                   </tr>

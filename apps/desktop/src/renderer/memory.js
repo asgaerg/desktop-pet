@@ -56,7 +56,9 @@ const ui = {
   cherNewForm: el('cher-new-form'),
   cherNewTitle: el('cher-new-title'),
   cherNewText: el('cher-new-text'),
-  cherNewPinned: el('cher-new-pinned'),
+  // 2026-10-21：`cher-new-pinned` 已从 HTML 删掉（珍藏页不再管固定注入）。
+  // 这里保留 `null` 而不是删除这行 —— 下面还有 `ui.cherNewPinned?.` 的
+  // 可选链调用点吗？没有。但留着键名能让后来人一眼看出"这里曾经有个勾"。
   cherNewSave: el('cher-new-save'),
   cherNewCancel: el('cher-new-cancel'),
   cherNewState: el('cher-new-state'),
@@ -80,6 +82,9 @@ const ui = {
   memResetBtn: el('mem-reset-btn'),
   memLevelFixed: el('mem-level-fixed'),
   memShowMerged: el('mem-show-merged'),
+  // 「显示已归档」（2026-10-20 加）：矛盾检测把旧说法降成 archived 之后，
+  // 必须有个入口能看见并恢复它们，否则"不删只归档"就只是个说法。
+  memShowArchived: el('mem-show-archived'),
   memSince: el('mem-since'),
   memUntil: el('mem-until'),
   memRangeBtn: el('mem-range-btn'),
@@ -607,9 +612,9 @@ async function loadCherished() {
  * 轮询自己先请求、算完指纹再决定要不要调这里。
  */
 function renderCherishedList(items) {
-  const pinnedN = items.filter((x) => x.pinned).length;
   if (ui.cherCount) {
-    ui.cherCount.textContent = `共 ${items.length} 段，其中 ${pinnedN} 段固定注入`;
+    // 2026-10-21：不再显示"其中 N 段固定注入"——珍藏页与固定注入解耦了。
+    ui.cherCount.textContent = `共 ${items.length} 段`;
   }
   /*
    * 如果**复现窗口开着的那条**在这次刷新里消失了（用户在别处删了它），
@@ -648,15 +653,14 @@ function renderCherishedList(items) {
     // 轮数：一眼看出"单独一句"还是"一整段对话"
     turnsTd.textContent = it.turn_count > 1 ? `${it.turn_count} 轮` : it.turn_count === 1 ? '1 句' : '—';
 
-    // 固定注入列：用一个可点的按钮而不是只读勾选框 —— 点它就是切换
-    const pinTd = document.createElement('td');
-    pinTd.append(
-      mkBtn(it.pinned ? '✓ 已固定' : '未固定', it.pinned ? 'on' : '', async () => {
-        const r2 = await call('update_cherished', { id: it.id, pinned: !it.pinned });
-        if (!r2.ok && ui.cherNewState) ui.cherNewState.textContent = r2.message || '';
-        await loadCherished();
-      }),
-    );
+    // 🔴 2026-10-21 用户要求：珍藏页**不再显示**「固定注入」列。
+    //
+    // 原话：「珍藏记忆本就和固定注入提示词是不一样的功能，不要显示是否固定注入，
+    // 固定注入要只在原文记忆里选择。」
+    //
+    // 所以这里整块删掉了（原来是一个可点的"✓ 已固定 / 未固定"按钮）。
+    // `cherished.pinned` 字段**保留在库里**：老数据不动，
+    // `pinned_cherished()` 仍会把历史固定项注入 —— 只是不再提供新的入口。
 
     const actTd = document.createElement('td');
     actTd.append(
@@ -670,7 +674,7 @@ function renderCherishedList(items) {
       }),
     );
 
-    tr.append(idTd, timeTd, titleTd, textCell(it.text, 'clamp', `cher:${it.id}`), turnsTd, pinTd, actTd);
+    tr.append(idTd, timeTd, titleTd, textCell(it.text, 'clamp', `cher:${it.id}`), turnsTd, actTd);
     frag.append(tr);
   }
   tbody.append(frag);
@@ -923,7 +927,8 @@ function openCherishEditor(entry) {
   ui.cherNewForm.classList.remove('hidden');
   ui.cherNewTitle.value = entry ? entry.title || '' : '';
   ui.cherNewText.value = entry ? entry.text || '' : '';
-  ui.cherNewPinned.checked = entry ? Boolean(entry.pinned) : true;
+  // 2026-10-21：表单里那个「固定注入」勾已经去掉（元素不存在了）。
+  // 保留 `pinned` 字段的**原值**不覆盖 —— 见下面 saveCherish 的说明。
   if (ui.cherNewSave) ui.cherNewSave.textContent = entry ? '保存修改' : '保存';
   if (ui.cherNewState) ui.cherNewState.textContent = '';
   ui.cherNewText.focus();
@@ -953,10 +958,11 @@ function renderFixedList(items) {
       ? '每次对话都会带上这些。太多会挤占提示词，建议控制在十几条以内。'
       : '还没有固定注入的内容。';
   }
-  lastFingerprint.fixed = fingerprint(items, ['id', 'summary']);
+  lastFingerprint.fixed = fingerprint(items, ['id', 'summary', 'created_at']);
 
   if (!items.length) {
-    emptyRow(ui.fixedBody, 2, '左边搜一搜，把反复出现的说法加进来。');
+    // 列数从 2 变 3（加了时间列），空行 colspan 也要跟着改
+    emptyRow(ui.fixedBody, 3, '左边搜一搜，把反复出现的说法加进来。');
     return;
   }
   const tbody = ui.fixedBody;
@@ -964,6 +970,18 @@ function renderFixedList(items) {
   const frag = document.createDocumentFragment();
   for (const it of items) {
     const tr = document.createElement('tr');
+
+    /*
+     * 时间列（2026-10-21 用户要求：「固定注入要和原文记忆一样，显示时间」）。
+     *
+     * 后端 `fixed_memories()` 一直返回 `created_at`，只是以前没渲染。
+     * 用 `shortTime()` 与其它三页统一格式（`MM-DD HH:mm`）。
+     */
+    const timeTd = document.createElement('td');
+    timeTd.className = 'col-time muted';
+    timeTd.textContent = shortTime(it.created_at);
+    timeTd.title = String(it.created_at || '');
+
     const actTd = document.createElement('td');
     actTd.append(
       mkBtn('移除', '', async () => {
@@ -973,7 +991,7 @@ function renderFixedList(items) {
         void loadStats();
       }),
     );
-    tr.append(textCell(it.summary, 'clamp clamp-2', `mem:${it.id}`), actTd);
+    tr.append(timeTd, textCell(it.summary, 'clamp clamp-2', `mem:${it.id}`), actTd);
     frag.append(tr);
   }
   tbody.append(frag);
@@ -1246,6 +1264,13 @@ const memState = {
   query: '',
   level: '',
   showMerged: false,
+  /**
+   * 是否显示「已归档」条目（2026-10-20 加，默认**不显示**）。
+   *
+   * 归档 = 被新说法推翻的旧记忆（`level='archived'`，见 §一百七十五 的矛盾检测）。
+   * 它们不在检索池里，所以平时看不到；但用户要能发现"它被误判归档了"并救回来。
+   */
+  showArchived: false,
   src: '',
   sinceMs: 0,
   untilMs: 0,
@@ -1264,6 +1289,18 @@ const memState = {
 /** `kind` / `level` 的中文名 —— 界面不显示原始英文枚举。 */
 const KIND_LABEL = {
   fact: '事实',
+  /**
+   * 玩伴**自己的**事实（2026-10-21 用户要求）。
+   *
+   * 原话：「检索层要能显示玩伴自己的事实，比如不顺着用户的话而是自己说出
+   * 要改名成阿拾一样，或者安慰人等等。」
+   *
+   * 和 `fact` 的区别：`fact` 记的是**用户**的事（"用户喜欢曲娘"）；
+   * `self` 记的是**它自己**的事（"它自己要求改名成阿拾""它那天安慰了用户"）。
+   * 后者对"它像不像一个有连续自我的存在"很关键 —— 但它自己的事不该
+   * 混进"用户是谁"里，否则检索时会把"它说过的"当成"用户的情况"。
+   */
+  self: '它自己',
   habit: '习惯',
   persona: '人设',
   phrase: '常说的话',
@@ -1271,6 +1308,22 @@ const KIND_LABEL = {
   note: '备注',
 };
 const LEVEL_LABEL = { fixed: '已固定', recent: '最近', archived: '已归档' };
+
+/**
+ * 主语标签（2026-10-21）—— 检索层"类型"列实际显示的东西。
+ *
+ * 用户原话：「检索成设计要改成宠物和用户分开记录，写个标签，
+ * 省得搜索的时候有问题，但是检索层的提炼设计用户和宠物理应是一起的。」
+ *
+ * ```
+ * fact -> 「你」   这条是你的（喜好/经历/状况）
+ * self -> 「它」   这条是它自己的（它说过/做过/决定过的）
+ * ```
+ *
+ * ⚠️ 其余 kind（habit/persona/phrase…）保持原样用 `KIND_LABEL` ——
+ * 那些是"这句话的用途"，不是主语。
+ */
+const SUBJECT_LABEL = { fact: '你', self: '它' };
 
 function kindLabel(k) {
   return KIND_LABEL[k] || k || '—';
@@ -1301,6 +1354,13 @@ function renderMemory() {
   }
   if (memState.src) items = items.filter((it) => it.kind === memState.src);
   if (memState.level) items = items.filter((it) => it.level === memState.level);
+  /*
+   * 「已归档」默认隐藏（2026-10-20）。
+   *
+   * ⚠️ 放在 `memState.level` 判断**之后**：勾了「只看已固定」时 level='fixed'，
+   * 这一行不会再过滤掉任何东西（已经只剩 fixed 了）——两者不冲突。
+   */
+  if (!memState.showArchived) items = items.filter((it) => it.level !== 'archived');
   if (memState.sinceMs) items = items.filter((it) => (it.ts || 0) * 1000 >= memState.sinceMs);
   if (memState.untilMs) items = items.filter((it) => (it.ts || 0) * 1000 <= memState.untilMs);
   if (!memState.showMerged) items = items.filter((it) => !memState.mergedIds.has(it.id));
@@ -1345,14 +1405,51 @@ function renderMemory() {
 
     const tdTime = document.createElement('td');
     tdTime.className = 'col-time';
-    tdTime.textContent = shortTime(it.ts);
+    /*
+     * 🔴 时间列曾经是**空的**（2026-10-21 用户报「检索层没有记录时间，也没显示时间」）。
+     *
+     * 根因：这里传的是 `it.ts` —— 一个 **Unix 秒数**（`1791464530.1`），
+     * 而 `shortTime()` 期待的是 `2026-10-08T21:02:10+0800` 这种 ISO 串。
+     * 正则匹配不上，于是 `shortTime` 走 `String(iso)` 把数字原样吐出来，
+     * 而那个数字在窄列里被 CSS 挤没了 —— 看起来就是"没有时间"。
+     *
+     * 后端**一直有** `created_at`（`list_active` 会返回），只是没用它。
+     * 现在与「原文记忆」「珍藏记忆」两页统一用 `created_at`，格式一致。
+     *
+     * ⚠️ 别改成 `new Date(it.ts * 1000)`：那样要靠浏览器时区猜，
+     * 而 `created_at` 是后端落库时按本地时区写好的，直接用最准。
+     */
+    tdTime.textContent = shortTime(it.created_at);
+    // 悬停显示完整时间（含秒与时区），排查"这条到底是哪天的"用得上
     tdTime.title = String(it.created_at || '');
 
     const tdKind = document.createElement('td');
     tdKind.className = 'col-kind';
+    /*
+     * 类型标签 = **主语标签**（2026-10-21 用户要求）。
+     *
+     * 原话：「检索成设计要改成宠物和用户分开记录，写个标签，省得搜索的时候有问题，
+     * 但是检索层的提炼设计用户和宠物理应是一起的。」
+     *
+     * 所以：
+     *   · **提炼**时用户和宠物一起抽（提示词里 A 类和 D 类并存）—— 不动；
+     *   · **存**的时候按主语打标签（`kind` = fact / self）—— 已经做了；
+     *   · **显示**时标签要一眼看懂"这条是谁的事"，而不是"事实/它自己"这种抽象词。
+     *
+     * 因此 `fact` 显示成「你」、`self` 显示成「它」——
+     * 用户扫列表时立刻能分清，也不会再问"这条怎么进来的"。
+     */
     const badge = document.createElement('span');
-    badge.className = `kind-badge kind-${it.kind || 'fact'}`;
-    badge.textContent = kindLabel(it.kind);
+    const kind = it.kind || 'fact';
+    badge.className = `kind-badge kind-${kind}`;
+    badge.textContent = SUBJECT_LABEL[kind] || kindLabel(kind);
+    // 悬停给出完整解释（"事实"这个词本身有歧义：谁的事实？）
+    badge.title =
+      kind === 'self'
+        ? '这条记的是它自己的事（它说过/做过/决定过的）'
+        : kind === 'fact'
+          ? '这条记的是你的事（你的喜好、经历、状况）'
+          : kindLabel(kind);
     tdKind.append(badge);
 
     const tdText = document.createElement('td');
@@ -1379,6 +1476,20 @@ function renderMemory() {
       b.className = 'btn tiny';
       b.textContent = '还原';
       b.addEventListener('click', () => void undoCompress([it.id]));
+      tdAct.append(b);
+    } else if (it.level === 'archived') {
+      /*
+       * 已归档（2026-10-20）：被新说法推翻的旧记忆。
+       *
+       * 和「固定」分开是有意的 —— 归档条目是**误判的受害者**，
+       * 用户想做的第一件事是"它没被推翻，放回去"，而不是"让它每次都注入"。
+       * 所以这里只给「恢复」；想固定的话恢复完再来点「固定」。
+       */
+      const b = document.createElement('button');
+      b.className = 'btn tiny primary';
+      b.textContent = '恢复';
+      b.title = '把这条放回「按需检索」（矛盾检测可能误判了）';
+      b.addEventListener('click', () => void restoreArchived(it.id, b));
       tdAct.append(b);
     } else if (it.level !== 'fixed') {
       // 用户要求的**主要职责**：「手动固定提炼过后的文本或图片加入固定注入提示词」
@@ -1606,6 +1717,29 @@ async function unpinFromFixed(id) {
   await call('remove_fixed', { id });
   await loadMemory();
   await loadFixed();
+  void loadStats();
+}
+
+/**
+ * 把「已归档」的条目放回「按需检索」（2026-10-20）。
+ *
+ * 为什么需要它：矛盾检测（§一百七十五）会把被推翻的旧说法降成 `archived`。
+ * 那个设计的原则是"误判的代价必须是能撤销" —— 但在此之前界面上**看不到**
+ * 归档条目，那句承诺是空的。这个按钮就是兑现它的地方。
+ *
+ * ⚠️ 先弹确认再改：用户点错一次就会让一条已被推翻的说法重新参与召回，
+ * 表现是"它又开始说旧的了"。让人有机会看清那句话再决定。
+ */
+async function restoreArchived(id, btn) {
+  const row = btn?.closest('tr');
+  const text = row ? String(row.children[3]?.textContent || '').slice(0, 60) : '';
+  if (!confirm(`把这一条放回「按需检索」？\n\n${text}`)) return;
+  const r = await call('set_memory_level', { id, level: 'recent' });
+  if (!r.ok) {
+    ui.memCount.textContent = r.message || '恢复失败';
+    return;
+  }
+  await loadMemory();
   void loadStats();
 }
 
@@ -2151,11 +2285,20 @@ ui.cherNewSave?.addEventListener('click', async () => {
     return;
   }
   const title = (ui.cherNewTitle?.value || '').trim();
-  const pinned = Boolean(ui.cherNewPinned?.checked);
+  /*
+   * 🔴 不再发送 `pinned`（2026-10-21）。
+   *
+   * 珍藏页与固定注入解耦了 —— 表单里没有那个勾了。
+   *
+   * ⚠️ **不能传 `pinned: false`**：那会把老数据里"已固定"的珍藏
+   * 在编辑一次标题后就悄悄取消固定，用户会以为"我只是改了个名字"。
+   * 所以干脆不传这个字段 —— 后端 `update_cherished` 只在
+   * 显式给了 `pinned` 时才改它（见 gateway 的实现）。
+   */
 
   const r = editingCherishedId
-    ? await call('update_cherished', { id: editingCherishedId, title, text, pinned })
-    : await call('cherish', { text, title, pinned });
+    ? await call('update_cherished', { id: editingCherishedId, title, text })
+    : await call('cherish', { text, title });
 
   if (ui.cherNewState) ui.cherNewState.textContent = r.message || (r.ok ? '已保存' : '保存失败');
   if (r.ok) {
@@ -2193,12 +2336,14 @@ ui.memResetBtn?.addEventListener('click', () => {
   if (ui.memSearch) ui.memSearch.value = '';
   if (ui.memLevelFixed) ui.memLevelFixed.checked = false;
   if (ui.memShowMerged) ui.memShowMerged.checked = false;
+  if (ui.memShowArchived) ui.memShowArchived.checked = false;
   if (ui.memSrc) ui.memSrc.value = '';
   if (ui.memSince) ui.memSince.value = '';
   if (ui.memUntil) ui.memUntil.value = '';
   memState.query = '';
   memState.level = '';
   memState.showMerged = false;
+  memState.showArchived = false;
   memState.src = '';
   memState.sinceMs = 0;
   memState.untilMs = 0;
@@ -2210,6 +2355,10 @@ ui.memLevelFixed?.addEventListener('change', () => {
 });
 ui.memShowMerged?.addEventListener('change', () => {
   memState.showMerged = !!ui.memShowMerged.checked;
+  renderMemory();
+});
+ui.memShowArchived?.addEventListener('change', () => {
+  memState.showArchived = !!ui.memShowArchived.checked;
   renderMemory();
 });
 ui.memSrc?.addEventListener('change', () => {

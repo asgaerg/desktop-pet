@@ -41,6 +41,7 @@ import {
   sideAtEdge,
   windowSizeFor,
   PEEK_ANGLE_DEG,
+  PEEK_RIGHT_EXTRA_RATIO,
   type PetForm,
 } from './petLayout.js';
 
@@ -302,6 +303,40 @@ export class PetWindow {
         ` | 推算立绘屏幕 ${art ? `${before.x + art.x},${before.y + art.y}` : '?'}`,
     );
 
+    /*
+     * ## 这里**不要动窗口**（2026-10-21 两次试错后的结论）
+     *
+     * 我先后试过两种"进探头前先归一几何"的写法，**都撤回**了：
+     *
+     * ① 先 `setBounds` 缩回常态尺寸、再撑成探头尺寸
+     *    -> 一次进探头**两次跳变**（日志：`345x345 -> 220x296 -> 341x343`），
+     *       76 次进探头闪 76 次。用户原话：「现在还多了靠边会闪现」。
+     *
+     * ② 不改尺寸，只把偏移按"画布在窗口里居中"换算回去
+     *    -> **前提就错了**：`.pet-wrap { inset: 0 }`、画布 `left: 0`，
+     *       画布**从不居中**，所以那个 `(窗口−画布)/2` 的 delta 是凭空造的。
+     *
+     * ## 为什么其实不需要动
+     *
+     * 吸附用的两个量**本来就取自静止态缓存**，不走会漂的实测值：
+     *
+     *     snapInset = artInsetForSnap()   -> restArtInsetX（只在 atRest 且常态尺寸时刷新）
+     *     snapArtW  = artVisibleWidth()   -> restArtWidth（同上）
+     *
+     * 所以"进探头时偏移是旋转后的脏值"这件事**影响不到吸附** ——
+     * 它只影响 `y` 的兜底（纵向光标吸附），那个不影响探头深度。
+     *
+     * 真正让左右不一致的是**缓存被探头尺寸污染**（23 vs 42），
+     * 已经由 `art-rect` 里的 `atNormalSize` 判据修掉了。
+     */
+    const normalSize = windowSizeFor(this.petScale, 'normal');
+    if (Math.abs(before.width - normalSize.width) > 4) {
+      this.diagnostic(
+        `进探头：当前窗口 ${before.width}x${before.height}（非常态 ${normalSize.width}）` +
+          `—— 吸附只用静止态缓存，不受影响`,
+      );
+    }
+
     this.edgePeek = true;
     this.edgePeekSide = side;
     /*
@@ -425,7 +460,26 @@ export class PetWindow {
      *
      * 纵向仍用 `currentArtMarginY()`：上下边没有吸附逻辑，还得靠它让开留白。
      */
-    const shiftX = userShift;
+    /*
+     * ## 横向 = 用户设定值 + **贴右时的轮廓补偿**（2026-10-21）
+     *
+     * 补偿只加在 `shiftX`（最终进 `--peek-shift-x`，即探头的平移动画）上，
+     * **不动窗口位置** —— 所以不会重现 2026-10-04 那次"窗口被推出屏幕、
+     * 立绘被切"的问题。标定过程与数据见 `PEEK_RIGHT_EXTRA_RATIO` 的说明。
+     *
+     * ⚠️ 分两层（用户原话：「补偿 = 设定值 × 0.176 是确立左右缩进距离差不多的**基础**，
+     * 而探头时的平移距离，理应是在这个基础上加减的」）：
+     *
+     *     基础补偿 = 用户设定值 × 0.176   （只管"左右一样多"）
+     *     最终外推 = 用户设定值 + 基础补偿 （滑杆在基础上加减远近）
+     *
+     * 两者职责分开，所以调滑杆不会破坏左右一致；
+     * 设定值本身随宠物大小走，宠物放大缩小时补偿自动跟随。
+     *
+     * 只补右边：左边是基准（"左边正常"），只动偏的那一侧，改动面最小、好回退。
+     */
+    const peekExtra = side === 'right' ? Math.round(userShift * PEEK_RIGHT_EXTRA_RATIO) : 0;
+    const shiftX = userShift + peekExtra;
     const shiftY = this.currentArtMarginY() + userShift;
 
     /*
@@ -481,6 +535,10 @@ export class PetWindow {
        * 让 `peekWindowBounds` 走"原点不动"分支 —— 宁可这次不吸附，
        * 也不要用错的留白（进探头那一刻现算的值实测差了 68px）。
        * 纵向偏移同理用静止态缓存（光标吸附要算立绘中心，见 restArtInsetY）。
+       *
+       * ⚠️ 也**不要**改成 `(petSizeFor − artSizeFor.height)/2` 推算 ——
+       * 与 `artVisibleWidth` 同一个理由：`ART_BOX_RATIO` 与当前素材脱节了
+       * （推算 153 vs 实测 105 那个宽度差 17px，高度同样不准）。
        */
       snapInset != null
         ? {
@@ -1035,10 +1093,66 @@ export class PetWindow {
   private restArtInsetY: number | null = null;
 
   private artInsetForSnap(): number | null {
+    /*
+     * 🔴 吸附用的"立绘左边到窗口左边"，改成**只认常态几何**（2026-10-21 修）。
+     *
+     * ## 用户报的现象
+     *
+     * 「鼠标拖拽宠物不同的地方，它缩进去的距离也不一样」——
+     * 同一个"拖到右边缘"的动作，探头深度每次不同。
+     *
+     * ## 实测数据（真实日志，连续四次进探头）
+     *
+     *     吸附(右)：… 左留白 42 立绘宽 105 | 目标 x=1389
+     *     吸附(右)：… 左留白 33 立绘宽 105 | 目标 x=1398   <- 差 9px
+     *     吸附(右)：… 左留白 40 立绘宽 105 | 目标 x=1391   <- 差 2px
+     *     吸附(右)：… 左留白 23 立绘宽 105 | 目标 x=1408   <- 差 17px
+     *
+     * `立绘宽` 恒定 105（那个缓存是稳的），但**左留白在 23~42 之间跳**。
+     * 吸附算式 `目标 x = 屏幕右 − 左留白 − 立绘宽` 里，左留白每差 1px，
+     * 探头深度就差 1px —— 17px 肉眼一眼能看出来。
+     *
+     * ## 根因：缓存被**探头态几何**污染了
+     *
+     * 反推那几个值：
+     *
+     *     23 = (151 − 105) / 2     <- 常态窗口（正确值）
+     *     42 = (240 − 156) / 2     <- **探头窗口**
+     *
+     * `atRest` 判据要求 `!edgePeek && !compact`，看似挡住了探头态。
+     * 但有一条**时间窗**：退出探头后 `edgePeek` 立刻置 false，而窗口尺寸
+     * 要等旋转动画结束才缩回去（`scheduleNormalResizeAfterPeekExit` 约 1 秒）。
+     * 那一刻 `rotDeg` 已经是 0、`peekShift` 也清了，于是 `atRest` 成立 ——
+     * 缓存被写成**探头尺寸下的居中值 42**。
+     *
+     * 下次进探头就按 42 吸附，于是"缩进去的深度"和上次不一样。
+     *
+     * ## 修法：只认常态窗口尺寸
+     *
+     * 加一条判据：**当前窗口宽必须接近常态宽度**才允许刷新缓存。
+     * 探头窗口 240 vs 常态 151，差 89px，一眼能分开。
+     */
     return this.restArtInsetX;
   }
 
-  /** 立绘可见宽度（吸附与拖拽极限共用；优先用静止态缓存） */
+  /**
+   * 立绘可见宽度（吸附与拖拽极限共用）。
+   *
+   * ⚠️ **用实测缓存，不要用 `artSizeFor()` 推算**（2026-10-21 试过，失败）。
+   *
+   * 我一度想用 `ART_BOX_RATIO` 算出常量，理由是"立绘在画布内居中，这是几何必然"。
+   * 但实测对不上：
+   *
+   *     推算（artSizeFor）: 立绘宽 122
+   *     实测（art-rect）  : 立绘宽 105
+   *
+   * 差 17px —— `ART_BOX_RATIO`（从截图量的 `195/240`）与**当前素材**脱节了。
+   * 那个常量是 2026-10-03 手工量的，之后素材换过。
+   *
+   * 所以还是用实测。真正要修的是"缓存被探头态污染"（见 `art-rect` 里
+   * `atRest` 新增的 `atNormalSize` 判据），不是把实测换成推算 ——
+   * **推算的前提本身就是错的**。
+   */
   private artVisibleWidth(): number {
     if (this.restArtWidth != null) return this.restArtWidth;
     if (this.measuredArt.width > 0) return this.measuredArt.width;
@@ -1836,24 +1950,36 @@ export class PetWindow {
         const rotDeg = Number(payload?.artRotationDeg);
         const peekShift = Number(payload?.artPeekShiftX);
         /*
-         * ⚠️ 判据必须**同时**满足：没在拖、没在探头、**旋转 0°**、**探头位移 0**。
+         * ⚠️ 判据必须**同时**满足：没在拖、没在探头、**旋转 0°**、**探头位移 0**、
+         * 以及 🔴 **窗口尺寸是常态尺寸**（2026-10-21 补的第五条）。
          *
-         * 只看前三个会漏掉一个状态：
+         * 只看前四个会漏掉一个**时间窗**：
          *
-         *     退出边缘探头（开始拖拽，先拉直）      <- 只拉直，edgePeek 仍为 true
-         *     0,320 386x388 ... -> left（当前探头=true）   <- 窗口还是探头尺寸
+         *     退出探头  -> edgePeek 立刻置 false
+         *              -> 但窗口尺寸要等旋转动画结束才缩回（约 1 秒后）
          *
-         * 那一刻旋转已是 0°，但窗口仍是探头尺寸、位移也还在 —— 会把"半探头"的几何
-         * 当常态缓存，吸附目标值于是漂移（实测缓存从 33 变成 38，
-         * 而 38 = (画布宽 − 立绘宽)/2 正是被污染的标志）。
+         * 那一刻 `rotDeg` 已是 0、`peekShift` 也清了、`edgePeek` 也是 false，
+         * 于是 `atRest` 成立 —— 缓存被写成**探头尺寸下的居中值**。
+         *
+         * 反推实测日志里那几个漂移值就一目了然：
+         *
+         *     23 = (151 − 105) / 2     <- 常态窗口（正确）
+         *     42 = (240 − 156) / 2     <- **探头窗口**（污染）
+         *
+         * 下次进探头按 42 吸附，于是"缩进去的深度"和上次不一样 ——
+         * 这正是用户报的「拖不同地方，缩进去的距离也不一样」。
          */
+        const normalW = windowSizeFor(this.petScale, 'normal').width;
+        const winW = this.window && !this.window.isDestroyed() ? this.window.getBounds().width : normalW;
+        const atNormalSize = Math.abs(winW - normalW) <= 8;
         const atRest =
           !this.dragging &&
           !this.edgePeek &&
           !this.compact &&
           rotDeg === 0 &&
           Math.abs(peekShift) < 0.5 &&
-          this.measuredArt.width > 0;
+          this.measuredArt.width > 0 &&
+          atNormalSize;
         if (atRest && Number.isFinite(ux)) {
           this.restArtInsetX = Math.round(ux);
           this.restArtWidth = this.measuredArt.width;
@@ -2035,16 +2161,59 @@ export class PetWindow {
           this.edgeSnapPx,
           artMarginX,
           artMarginY,
-          // ⚠️ 传实测的"立绘左边到窗口原点"与立绘尺寸 —— 贴边判据要用**立绘真实边缘**，
-          // 而不是"窗口 gap + margin"（后者在窗口越界时方向会反，左右不对称）。
-          this.artOffsetInWindow,
-          this.measuredArt.width > 0 ? this.measuredArt : null,
+          /*
+           * 🔴 用**静止态缓存**的偏移，不用 `artOffsetInWindow`（2026-10-21 修
+           * 「正常拖住两边距离就有不同」）。
+           *
+           * ## 实测数据（CDP 在真实渲染层量出来的，peekOffsetPx=68）
+           *
+           *     静止：偏移 x = 25
+           *     贴左：偏移 x = -43    <- 被 peek 位移带偏 -68
+           *     贴右：偏移 x = +90    <- 被带偏 +65
+           *
+           * `artOffsetInWindow` 是渲染层**当帧**上报的值，它包含
+           * `--peek-shift-x` 与旋转的影响 —— 也就是"探头姿态下立绘在窗口里的位置"。
+           *
+           * ## 后果（日志统计，实锤）
+           *
+           * 拿 `贴边判定` 的 `立绘 gap` 分组统计：
+           *
+           *     触发 left  时的左 gap：中位 **-1**   （立绘正好贴到边）
+           *     触发 right 时的右 gap：中位 **-92**  （已经越过屏幕边 92px 才触发）
+           *
+           * 也就是说**右边要拖得远得多才探头**，而左边一碰就探 —— 用户看到的
+           * "两边距离不同"就是这个。
+           *
+           * ## 为什么缓存是干净的
+           *
+           * `restArtInsetX` / `restArtInsetY` / `restArtWidth` 只在
+           * `atRest`（没拖、没探头、旋转 0°、位移 0、**且窗口是常态尺寸**）时刷新，
+           * 所以它们永远是"常态姿态"的几何，与当前是否在探头无关 ——
+           * 正是贴边判定该用的量（判定问的是"立绘本体在哪"，不是"它探出去多少"）。
+           */
+          this.artInsetForSnap() != null
+            ? { x: this.artInsetForSnap() as number, y: this.restArtInsetY ?? 0 }
+            : this.artOffsetInWindow,
+          this.measuredArt.width > 0
+            ? { width: this.artVisibleWidth(), height: this.measuredArt.height }
+            : null,
         );
+        /*
+         * 日志要打**判定实际使用的量** —— 旧写法打的是
+         * `leftGap + artMarginX`（"窗口 gap + 留白"），而 `sideAtEdge` 现在走的是
+         * "立绘真实边缘"。两者在窗口越界时**符号会相反**（右侧实测 -2 vs -92），
+         * 拿旧口径的日志去排查只会越查越偏 —— 所以这里按同一套算式复算一遍。
+         */
+        const logInsetX = this.artInsetForSnap();
+        const logArtW = this.artVisibleWidth();
+        const logArtLeft = logInsetX != null ? bounds.x + logInsetX : bounds.x + artMarginX;
+        const logArtRight = logInsetX != null ? wa.x + wa.width - (logArtLeft + logArtW) : rightGap + artMarginX;
+        const logArtLeftGap = logInsetX != null ? logArtLeft - wa.x : leftGap + artMarginX;
         this.diagnostic(
           `贴边判定：bounds ${bounds.x},${bounds.y} ${bounds.width}x${bounds.height}；` +
             `工作区 ${wa.x},${wa.y} ${wa.width}x${wa.height}；` +
-            `留白 横${artMarginX} 纵${artMarginY}；` +
-            `立绘 gap 左=${leftGap + artMarginX} 右=${rightGap + artMarginX} ` +
+            `留白 横${artMarginX} 纵${artMarginY} 立绘宽${Math.round(logArtW)}；` +
+            `立绘 gap 左=${logArtLeftGap} 右=${logArtRight} ` +
             `上=${topGap + artMarginY} 下=${bottomGap + artMarginY}，` +
             `阈值=${this.edgeSnapPx} -> ${side ?? '不贴边'}（当前探头=${this.edgePeek}）`,
         );

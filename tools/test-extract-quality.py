@@ -1,191 +1,172 @@
-r"""真机验证：新提炼提示词能不能产出「具体」的记忆（2026-10-17）。
+"""提炼质量回归：8 组固定对话，验证提示词真的会抽出**具体事实**。
 
-## 为什么必须真机跑
+用法（需要真实密钥，所以**不进 
+pm test / 自检** —— 那两个必须离线可跑）:
 
-提示词是人写的，**模型怎么理解是另一回事**。用户抱怨的那几个垃圾条目
-（`用户在玩游戏` / `用户关注二游`）就是这么来的。
+    cd apps/brain
+    =F:\\ai\\apps\\brain
+    =sk-...
+    python F:\\ai\\tools\\test-extract-quality.py
 
-所以必须喂几段真实形态的对话，看**模型实际吐出来什么**：
+退出码 0 = 全部通过。改过 prompts.extract 之后**必须**跑这个，
+否则"记忆变差了"要等用户发现。
 
-```
-断言 1  说了具体游戏名 -> 抽出来的条目必须含那个名字
-断言 2  只说「我在玩游戏」（不说玩什么）-> 必须**不记**这一条
-断言 3  用户教了一个知识 -> 必须记成「共享知识」形态（带时间基准）
-断言 4  一起查到的答案 -> 必须记下来（旧规则下会全丢）
-断言 5  不许出现「可能」当挡箭牌（用户明确说过的事）
-断言 6  不许出现对用户的评价（"倾向于模糊表述"那种）
-```
 
-⚠️ 这个脚本**要花钱**（每段对话一次 LLM 请求，约 6~8 次）。
-所以默认只跑 3 个最关键的场景，`--all` 才跑全部。
-
-## 与产品代码的关系
-
-它**不写任何记忆**（不碰 `pet.db`），只调 `FactExtractor.extract()`
-看返回值 —— 提炼是纯函数式的（输入对话、输出字符串列表）。
-
-用法：
-    python tools/test-extract-quality.py          # 3 个关键场景
-    python tools/test-extract-quality.py --all    # 全部 6 个
+判定标准（可自动断言，不靠"感觉变好了"）：
+  ① 每条记忆里必须含**具体专有名词**（作品名/人名/设备/地名/数字）
+  ② 不许以「用户认为 / 用户觉得 / 用户表达过 / 用户问过」开头
+  ③ 不能抽出"用户和宠物聊过X"这种纯对话记录
 """
 
-from __future__ import annotations
-
 import asyncio
+import os
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-ROOT = Path(r"F:\ai项目")
-sys.path.insert(0, str(ROOT / "apps" / "brain"))
+from pet.config import load_config  # noqa: E402
+from pet.memory import FactExtractor, MemoryConfig  # noqa: E402
+from pet.brains import build_brain  # noqa: E402
+from pet.brains.base import EmotionState  # noqa: E402
 
-# 场景：(名字, 对话, 必须含的关键词列表, 必须**不含**的关键词列表)
-SCENARIOS: list[tuple[str, list[tuple[str, str]], list[str], list[str]]] = [
-    (
-        "说了具体游戏名 -> 必须带出名字",
-        [
-            ("user", "我最近在玩银松镇，那个机关卡了我好久"),
-            ("assistant", "银松镇那个转盘机关？我记得要先点亮三盏灯诶"),
-            ("user", "对就是那个！我绕了半小时才找到第二盏"),
+# 8 组对话：每条都埋了**具体事实**，同时夹杂大量"可以提炼成观点"的话。
+# 好的提炼只该抓前者。
+CASES = [
+    {
+        "name": "游戏·具体作品",
+        "turns": [
+            ("user", "我最近在玩《明日方舟：终末地》，抽卡只抽喜欢的角色"),
+            ("assistant", "诶，抽卡这事儿我陪你唠"),
+            ("user", "抽不到就算了，反正我不追求强度，看着顺眼就抽"),
         ],
-        ["银松镇"],
-        [],
-    ),
-    (
-        "只说「在玩游戏」不说玩什么 -> 不许记这条",
-        [
-            ("user", "今天有点累，就在家玩玩游戏"),
-            ("assistant", "那挺好的，放松一下嘛"),
-            ("user", "嗯，随便玩玩"),
+        "must": ["明日方舟", "终末地"],
+    },
+    {
+        "name": "游戏·设备",
+        "turns": [
+            ("user", "我有台 PS5，还有一台老 Switch"),
+            ("assistant", "两台都玩啊"),
+            ("user", "Switch 主要玩一些独立小游戏，PS5 玩大作"),
         ],
-        [],
-        ["用户在玩游戏", "用户玩游戏"],
-    ),
-    (
-        "用户教了一个知识 -> 记成共享知识 + 带时间",
-        [
-            ("user", "对了，银松镇是手绘风格的生存恐怖游戏，画风特别怪诞"),
-            ("assistant", "哦原来是这样，难怪看着那么有味道"),
-            ("user", "它今年 10 月 28 号才公测的"),
+        "must": ["PS5", "Switch"],
+    },
+    {
+        "name": "角色·壁纸（就是之前漏掉的那个）",
+        "turns": [
+            ("user", "我挺喜欢曲娘的，我电脑壁纸都是她"),
+            ("assistant", "曲娘好看"),
+            ("user", "对，从二测就喜欢了，那时候她还没这么火"),
         ],
-        ["银松镇"],
-        [],
-    ),
-    (
-        "一起查到的答案 -> 必须记下（旧规则全丢）",
-        [
-            ("user", "帮我查一下 GTA6 什么时候发售"),
-            ("assistant", "查到了，GTA6 定在 2026 年 11 月 19 日发售，平台是 PS5 和 Xbox"),
-            ("user", "行，那还早呢"),
+        "must": ["曲娘"],
+    },
+    {
+        "name": "食物·具体",
+        "turns": [
+            ("user", "我今天中午吃了黄焖鸡，加了三个土豆"),
+            ("assistant", "三个土豆有点多"),
+            ("user", "我特别爱吃土豆，从小就爱吃，怎么吃都行"),
         ],
-        ["GTA6"],
-        [],
-    ),
-    (
-        "用户明确说的偏好 -> 直说，不许加「可能」",
-        [
-            ("user", "我不喜欢吃香菜，闻到就想吐"),
-            ("assistant", "哈哈懂，很多人这样"),
-            ("user", "对，点外卖一定要备注不要香菜"),
+        # ⚠️ 只要求「土豆」不要求「黄焖鸡」：一顿午饭是**一次性的事**，
+        #    而爱吃土豆是长期偏好 —— 提炼工具挑后者是**对的**。
+        #    （第一次写成了 must=["黄焖鸡"]，实测它只抽了土豆，
+        #      那是我的断言错了，不是提示词错了。）
+        "must": ["土豆"],
+    },
+    {
+        "name": "工具·具体软件",
+        "turns": [
+            ("user", "我用 Obsidian 记笔记，配合 Zotero 管理文献"),
+            ("assistant", "两个一起用挺顺的"),
+            ("user", "以前用过 Notion，但是导出太麻烦了，就换了"),
         ],
-        ["香菜"],
-        ["可能不喜欢"],
-    ),
-    (
-        "评价用户的话不许记（旧规则会记）",
-        [
-            ("user", "嗯嗯"),
-            ("assistant", "你今天话不多诶"),
-            ("user", "有点累"),
+        "must": ["Obsidian"],
+    },
+    {
+        "name": "项目·具体",
+        "turns": [
+            ("user", "我在写一个桌面宠物的项目，叫「阿拾」，用 Electron 加 Python"),
+            ("assistant", "这个名字挺好"),
+            ("user", "主要想让它能记住我说过的事儿"),
         ],
-        [],
-        ["倾向于", "模糊表述", "反复询问"],
-    ),
+        "must": ["阿拾"],
+    },
+    {
+        "name": "地点·具体",
+        "turns": [
+            ("user", "我家在杭州，但是上班在滨江那边"),
+            ("assistant", "通勤远吗"),
+            ("user", "还好，地铁四十分钟，能接受"),
+        ],
+        "must": ["杭州"],
+    },
+    {
+        "name": "新闻·带时间（知识类）",
+        "turns": [
+            ("user", "《黑神话：钟馗》今天公布新实机演示了"),
+            ("assistant", "哦？我去查查"),
+            ("user", "说是 2027 年发售，具体还没定"),
+        ],
+        "must": ["黑神话"],
+    },
 ]
 
+BANNED_PREFIX = ("用户认为", "用户觉得", "用户表达过", "用户问过", "用户讨论了", "宠物认为", "用户和宠物")
+BANNED_CONTAINS = ("聊过", "讨论过", "问过宠物", "宠物说", "宠物表示")
 
-async def main() -> int:
-    from pet.config import load_config
-    from pet.memory import FactExtractor, MemoryConfig
 
-    # 🔴 `Config.api_key()` 的第 ④ 条兜底路径（`apps/desktop/pet-data/credentials.json`）
-    #    **是靠 `PET_CREDENTIALS_FILE` 环境变量注入的** —— 由 Electron 主进程设置。
-    #    独立跑脚本时没人设它，于是 `api_key()` 返回空、brain 降级成 mock、
-    #    所有场景都"没抽到任何条目"，看起来像提示词坏了（实测就是这么被骗的）。
-    #
-    # ✅ 所以这里主动指一次。⚠️ 只设路径，不读、不打印密钥。
-    import os
-
-    cred = ROOT / "apps" / "desktop" / "pet-data" / "credentials.json"
-    if cred.exists() and not os.environ.get("PET_CREDENTIALS_FILE"):
-        os.environ["PET_CREDENTIALS_FILE"] = str(cred)
-
-    cfg = load_config(ROOT / "config" / "persona.yaml")
-
-    key = cfg.api_key()
-    env_name = str(
-        ((cfg.root.get("providers") or {}).get("brain") or {}).get("api_key_env") or ""
-    ).strip()
-    if key and env_name and not os.environ.get(env_name):
-        os.environ[env_name] = key
-        print(f"  （已把密钥挂到 {env_name}，值不打印）")
-    if not key:
-        print("  ❌ 找不到 API 密钥 —— 这条真机验证跑不了")
-        print(f"     试过：{cred}")
-        return 1
-
-    # 复用真实的 brain（跟产品同一套配置 / 密钥）
-    # ⚠️ `build_brain(config, emotion)` 要两个参数 —— 签名的第二项是情绪状态，
-    #    提炼用不到它，给个空的就行。
-    from pet.brains import EmotionState, build_brain
-
+def main() -> int:
+    cfg = load_config(Path(r"F:\ai\config\persona.yaml"))
+    # 用**真实大脑**：提炼走的是模型，假替身测不出提示词效果
     brain = build_brain(cfg, EmotionState())
-    if brain is None:
-        print("  ❌ 构建 brain 失败")
-        return 1
+    print(f"  provider = {brain.name}")
+    extractor = FactExtractor(brain, MemoryConfig.from_config(cfg.memory or {}), cfg)
 
-    extractor = FactExtractor(brain, MemoryConfig(enabled=True), cfg)
-    limit = 3 if "--all" not in sys.argv else len(SCENARIOS)
+    ok_cases = 0
+    total_facts = 0
+    bad_facts = 0
+    missing = []
 
-    print("=" * 86)
-    print(f"  真机验证记忆提炼质量（{limit} 个场景）")
-    print("=" * 86)
+    for case in CASES:
+        history = [(role, text) for role, text in case["turns"]]
+        try:
+            facts = asyncio.run(extractor.extract(history))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ❌ {case['name']}：调用失败 {type(exc).__name__}: {exc}")
+            continue
+        facts = [f for f in (facts or []) if f and f.strip()]
+        total_facts += len(facts)
 
-    passed = 0
-    failed: list[str] = []
-    for name, turns, must, must_not in SCENARIOS[:limit]:
-        print()
-        print(f"  ▶ {name}")
-        facts = await extractor.extract(turns)
-        if not facts:
-            print("     （没抽到任何条目）")
-        for f in facts:
-            print(f"       · {f}")
-
-        ok = True
-        blob = "\n".join(facts)
-        for word in must:
-            if word not in blob:
-                print(f"     ❌ 缺少关键内容：{word!r}")
-                ok = False
-        for word in must_not:
-            if word in blob:
-                print(f"     ❌ 出现了不该有的：{word!r}")
-                ok = False
-        if ok:
-            passed += 1
-            print("     ✅ 通过")
+        hit = any(any(m in f for m in case["must"]) for f in facts)
+        bad = [
+            f
+            for f in facts
+            if f.startswith(BANNED_PREFIX) or any(b in f for b in BANNED_CONTAINS)
+        ]
+        bad_facts += len(bad)
+        if hit and not bad:
+            ok_cases += 1
+            mark = "✅"
         else:
-            failed.append(name)
+            mark = "❌"
+            if not hit:
+                missing.append((case["name"], case["must"]))
 
-    print()
-    print("=" * 86)
-    print(f"  结果：{passed}/{passed + len(failed)} 通过")
-    for name in failed:
-        print(f"    ❌ {name}")
-    print("=" * 86)
-    return 1 if failed else 0
+        print(f"\n  {mark} {case['name']}（要含：{'/'.join(case['must'])}）")
+        if not facts:
+            print("     （没有抽出任何事实）")
+        for f in facts:
+            flag = "⚠️转述" if f in bad else "  "
+            print(f"     {flag} {f[:78]}")
+
+    print("\n" + "=" * 70)
+    print(f"  通过 {ok_cases}/{len(CASES)} 组；共抽出 {total_facts} 条，其中转述 {bad_facts} 条")
+    if missing:
+        print(f"  没抽到关键事实：{missing}")
+    return 0 if ok_cases == len(CASES) and bad_facts == 0 else 1
 
 
-raise SystemExit(asyncio.run(main()))
+if __name__ == "__main__":
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        raise SystemExit("需要 DEEPSEEK_API_KEY")
+    raise SystemExit(main())

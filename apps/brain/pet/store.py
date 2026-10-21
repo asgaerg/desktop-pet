@@ -1485,7 +1485,23 @@ class PetDatabase:
         return bool(cur.rowcount)
 
     def list_memory(self, limit: int = 200, level: Optional[str] = None) -> list[sqlite3.Row]:
-        """列出**检索记忆**（可只列某一层）。"""
+        """列出**检索记忆**（可只列某一层）。
+
+        ## ⚠️ 不传 `level` 时**排除 `fixed`**（2026-10-21 修）
+
+        用户报：「这个是怎么蹦到检索层来的」—— 他在「固定注入提示词」页
+        手动加的那句「诶，说实话小灵我挺喜欢…」出现在了「检索层」列表里。
+
+        根因：`level=None` 时 SQL 没有 WHERE，于是**所有层**都返回，
+        包括 `fixed`。
+
+        但这两层在界面上是**两件不同的事**：
+          · 「检索层」= 自动提炼出来、参与语义检索的条目；
+          · 「固定注入」= 用户手动挑的、每次对话无条件带上的条目。
+        混在一起会让人以为"这条是自动记下来的"，而其实是自己加的。
+
+        ⚠️ 显式传 `level="fixed"` 时照常返回 —— 「固定注入」页就是那么用的。
+        """
         sql = (
             "SELECT id, summary, kind, tags, level, importance, hits, created_at"
             " FROM memory"
@@ -1494,6 +1510,9 @@ class PetDatabase:
         if level:
             sql += " WHERE level = ?"
             args.append(level)
+        else:
+            # 不指定层 = "检索层"，它只该包含参与检索的两层
+            sql += " WHERE level IN ('recent', 'archived')"
         sql += " ORDER BY ts DESC LIMIT ?"
         args.append(max(1, min(2000, int(limit))))
         return list(self.conn.execute(sql, args))
@@ -2057,6 +2076,40 @@ class PetDatabase:
             )
         )
 
+    def self_memories(self, limit: int = 5) -> list[sqlite3.Row]:
+        """取「玩伴自己的事实」（`kind='self'`，2026-10-21）。
+
+        用途：用户问「你自己怎么想的」「你叫什么」时，把**它自己的经历**
+        拉进候选（见 `memory2._asks_about_self`）。
+
+        ⚠️ 与 `recent_memories` 一样排除 `archived` / `merged_into`，
+        并按 `importance DESC` 排 —— 它自己的事也分轻重
+        （"自己提出改名"比"回答了一个问题"重要得多）。
+
+        ⚠️ 这个查询**不看相似度**。语义上"你怎么想"和"宠物自己提出改名"
+        几乎不像，靠向量永远召不回 —— 所以按类型直接取。
+        """
+        try:
+            return list(
+                self.conn.execute(
+                    """
+                    SELECT id, summary, kind, level, ts, created_at
+                    FROM memory
+                    WHERE kind = 'self'
+                      AND merged_into IS NULL
+                      AND level != 'archived'
+                      AND summary IS NOT NULL
+                      AND summary != ''
+                    ORDER BY importance DESC, ts DESC
+                    LIMIT ?
+                    """,
+                    (max(1, min(50, int(limit))),),
+                )
+            )
+        except sqlite3.OperationalError as exc:
+            log.warning("取「它自己」的记忆失败（已忽略）：%s", exc)
+            return []
+
     def search_memory_like(self, term: str, limit: int = 20) -> list[sqlite3.Row]:
         """按**子串**找记忆（专有名词兜底用，2026-10-20 加）。
 
@@ -2138,6 +2191,73 @@ class PetDatabase:
             )
         except sqlite3.OperationalError as exc:
             log.warning("矛盾检测的候选查询失败（已忽略）：%s", exc)
+            return []
+
+    def recent_memories(self, limit: int = 5, kinds: tuple[str, ...] = ("fact",)) -> list[sqlite3.Row]:
+        """按"**还记得清**"取几条检索记忆（泛问句兜底用，2026-10-20）。
+
+        ## 为什么不是纯按时间
+
+        第一版是 `ORDER BY ts DESC`，实测很糟：最近几条是
+
+            用户曾不小心点到语音输入
+            用户记得海鸥说"活着是为了薯片"，觉得这个回答挺有感觉
+            用户把程序故障宕机比作AI突然出问题
+
+        —— 这些是**聊天里的一瞬**，不是"用户是谁"。而用户问「我在玩什么游戏」
+        想要的是「用户在玩《明日方舟：终末地》」，那条在库里但排不上前面。
+
+        所以排序改成 **importance DESC, ts DESC**：
+
+          · `importance` 由提炼时给（`remember_facts` 的默认 0.5，重要事实更高）；
+          · 再按时间 —— 同样重要的取新的。
+
+        这不是完美解（`importance` 主要是默认值），但比"纯按时间"强：
+        纯按时间必然被**最近一次闲聊**污染，而闲聊恰恰是最没信息量的。
+
+        ⚠️ 排除 `archived`（被推翻的旧说法）和 `merged_into`（已压缩），
+        理由与 `search_memory` 一致：它们不该出现在召回里。
+
+        ⚠️ **也要排除 `fixed`**（2026-10-20 实测）：固定注入层是"每次对话无条件
+        带上"的（人设、口头禅）。兜底再端一次等于**同一段话注入两遍**，
+        而且它们往往是长文（"诶，说实话小灵我挺喜欢……"），
+        一条就吃掉整个 top_k 名额。
+
+        ⚠️ 过长的条目也跳过：兜底是给"用户是谁"这种一句话事实用的，
+        300 字的长文塞进提示词只会挤掉真正有用的。
+
+        ## 🔴 `kinds` 默认只取 `fact`（2026-10-21 修）
+
+        泛问兜底回答的是"**用户**是谁"（「我在玩什么」「我喜欢什么」）。
+        把 `kind='self'`（它自己的事）也端上来就是**抢话题** ——
+        自检实测抓到：问「我喜欢什么」，召回里混进了
+        「宠物自己提出想改名叫阿拾」。
+
+        想让它自己的事被想起来，走 `self_memories()` + `_asks_about_self()`
+        那条**专门的**路（问「你自己怎么想」才触发）。
+        """
+        wanted = tuple(kinds) or ("fact",)
+        placeholders = ",".join("?" * len(wanted))
+        try:
+            return list(
+                self.conn.execute(
+                    f"""
+                    SELECT id, summary, kind, level, ts, created_at
+                    FROM memory
+                    WHERE merged_into IS NULL
+                      AND level NOT IN ('archived', 'fixed')
+                      AND kind IN ({placeholders})
+                      AND summary IS NOT NULL
+                      AND summary != ''
+                      AND length(summary) BETWEEN 8 AND 120
+                    ORDER BY importance DESC, ts DESC
+                    LIMIT ?
+                    """,
+                    (*wanted, max(1, min(50, int(limit)))),
+                )
+            )
+        except sqlite3.OperationalError as exc:
+            log.warning("取最近记忆中失败（已忽略）：%s", exc)
             return []
 
     def search_memory(self, query: str, limit: int = 5) -> list[sqlite3.Row]:

@@ -310,6 +310,15 @@ async function loadRenderer() {
         talk: { frames: [5, 6, 7, 6], fps: 13, loop: true },
         sleep: { frames: [8, 9], fps: 3, loop: true },
         curious: { frames: [10, 11], fps: 5, loop: true },
+        /*
+         * 情绪标签要用到的两个（2026-10-21）。
+         *
+         * ⚠️ 之前假清单里没有它们，于是 `play('angry')` 会**回退到 idle**，
+         * 而断言只看"有没有调用 play" —— 调用确实发生了，状态却是 idle，
+         * 测试绿着但实际什么都没演。加上这两个之后断言才能查 `dbg().state`。
+         */
+        happy: { frames: [10, 11], fps: 5, loop: false },
+        angry: { frames: [8, 9], fps: 5, loop: false },
       };
       if (manifestSwitches.omitBlink) delete base.blink;
       return {
@@ -583,6 +592,95 @@ check('精力极低时进入 sleep', dbg().state === 'sleep', `实际：${dbg().
 send('pet.emotion', { state: { energy: 0.9, mood: 0.5, intimacy: 0.5 } });
 stepFrame(16);
 check('精力恢复后回到 idle', dbg().state === 'idle', `实际：${dbg().state}`);
+
+/*
+ * 情绪标签 -> 一次性表情（2026-10-21「把情绪接完」）。
+ *
+ * 背景：后端 `EmotionState.dominant` 早就算好了离散标签（sleepy/excited/happy/
+ * annoyed/curious/neutral），但 `as_dict()` 没往外传，渲染层只能自己从 mood 反推 ——
+ * 于是 prompt 里写"你现在有点不爽"，立绘还在笑。
+ *
+ * 这里用**真实事件**驱动 `app.js`，并给 `sprite.play` 装监听来看它到底播了什么。
+ * 不测"源码里有没有那段代码"，测"消息进来之后播了哪个素材"。
+ */
+{
+  const sprite = window.__pet.sprite;
+  const originalPlay = sprite.play;
+  const played = [];
+  sprite.play = function (state, force) {
+    played.push(state);
+    return originalPlay.call(this, state, force);
+  };
+
+  send('pet.emotion', {
+    state: { energy: 0.9, mood: 0.9, intimacy: 0.5, dominant: 'happy' },
+  });
+  stepFrame(16);
+  check(
+    'dominant=happy 时播 happy 素材',
+    played.includes('happy') && dbg().state === 'happy',
+    `实际播放：${played.join(', ') || '无'}；状态 ${dbg().state}`,
+  );
+
+  /*
+   * ⚠️ 同一标签的**周期广播**不能重播。
+   *
+   * `pet.emotion` 是周期性发出来的（情绪随时间漂移），每次都 play 的话
+   * 一次性表情会被反复打断、永远播不完（表现像"抽搐"）。
+   */
+  const before = played.length;
+  send('pet.emotion', {
+    state: { energy: 0.9, mood: 0.92, intimacy: 0.5, dominant: 'happy' },
+  });
+  stepFrame(16);
+  check(
+    '同一标签重复广播不重播（一次性表情不会被反复打断）',
+    played.length === before,
+    `播放次数 ${before} -> ${played.length}（多播了 ${played.slice(before).join(', ')}）`,
+  );
+
+  // 标签变了就要跟着换：annoyed 在素材里叫 angry
+  send('pet.emotion', {
+    state: { energy: 0.9, mood: 0.1, intimacy: 0.5, dominant: 'annoyed' },
+  });
+  stepFrame(16);
+  check(
+    'dominant=annoyed 映射到 angry 素材',
+    played.includes('angry') && dbg().state === 'angry',
+    `实际播放：${played.join(', ')}；状态 ${dbg().state}`,
+  );
+
+  // excited 在素材里没有，映射到最接近的 happy
+  send('pet.emotion', {
+    state: { energy: 0.9, mood: 0.99, intimacy: 0.5, dominant: 'excited' },
+  });
+  stepFrame(16);
+  check(
+    'dominant=excited 映射到 happy 素材（素材里没有 excited）',
+    played[played.length - 1] === 'happy',
+    `最后一次播放：${played[played.length - 1] ?? '无'}`,
+  );
+
+  // sleepy / neutral 属于**持续态**，不该当一次性表情播
+  const beforeQuiet = played.length;
+  for (const label of ['neutral', 'sleepy']) {
+    send('pet.emotion', {
+      state: { energy: 0.9, mood: 0.5, intimacy: 0.5, dominant: label },
+    });
+    stepFrame(16);
+  }
+  check(
+    'neutral / sleepy 不触发一次性表情',
+    played.length === beforeQuiet,
+    `多播了：${played.slice(beforeQuiet).join(', ') || '无'}`,
+  );
+
+  // 还原，免得影响后续用例
+  sprite.play = originalPlay;
+  send('pet.emotion', { state: { energy: 0.9, mood: 0.5, intimacy: 0.5, dominant: 'neutral' } });
+  sprite.play('idle', true);
+  stepFrame(16);
+}
 
 console.log('\n8. 口型包络');
 send('pet.mouth', { id: 'm3', envelope: [0.2, 0.8, 0.4] });

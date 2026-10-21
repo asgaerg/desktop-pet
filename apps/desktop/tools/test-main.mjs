@@ -192,6 +192,8 @@ const {
 
   PEEK_ANGLE_DEG,
 
+  PEEK_RIGHT_EXTRA_RATIO,
+
   EDGE_SNAP_THRESHOLD,
 
   PEEK_EDGE_OVERLAP,
@@ -3605,6 +3607,120 @@ console.log('\n11. petLayout：窗口尺寸与右下角锚定');
 
   check('探头角度是 45°（照参考应用的说明）', PEEK_ANGLE_DEG === 45, `实际 ${PEEK_ANGLE_DEG}`);
 
+  /*
+   * 🔴 贴右探头时要有**轮廓补偿**（2026-10-21 实测标定）。
+   *
+   * 用户报「左右屏幕探头的时候缩进去的距离不一样」。
+   * 几何（吸附算式、旋转外接框、旋转中心）都验过是对称的，
+   * 差别来自**立绘自身不对称**：+45° 与 −45° 后被屏幕切掉的是形状不同的两块。
+   *
+   * CDP 抓真实渲染 + 逐像素统计（petScale 0.88、立绘宽 158.4）：
+   *
+   *     shift=68（标定档） left 可见宽 87.2 / right 98.4   <- 右边多露 11.2px
+   *     shift=80           left 可见宽 77.6 / right 86.4
+   *     right 用 80 时：left 87.2 / right 86.4，差 0.8px
+   *   => 补偿比例 12 / 68 ≈ 0.176
+   *
+   * ## 结构（用户定稿）
+   *
+   *   「补偿 = 设定值 × 0.176 是确立左右缩进距离差不多的**基础**，
+   *     而探头时的平移距离，理应是在这个基础上加减的。」
+   *
+   *     基础补偿 = 设定值 × 0.176
+   *     最终外推 = 设定值 + 基础补偿     （右侧）
+   *     最终外推 = 设定值                （左侧，基准）
+   *
+   * 这里守三件事：
+   *   ① 比例落在标定值附近；
+   *   ② 补偿**随设定值等比变化**（设定减半 -> 补偿减半），所以宠物放大缩小时自适应；
+   *   ③ 最终外推 = 设定值 + 补偿（滑杆在基础之上加减，负值也成立）。
+   */
+  check(
+    '贴右轮廓补偿比例在标定值附近（0.17~0.18）',
+    PEEK_RIGHT_EXTRA_RATIO > 0.17 && PEEK_RIGHT_EXTRA_RATIO < 0.18,
+    `实际 ${PEEK_RIGHT_EXTRA_RATIO}`,
+  );
+  {
+    const comp = (userShift) => Math.round(userShift * PEEK_RIGHT_EXTRA_RATIO);
+    // 标定档 68 -> 12
+    check(
+      '标定档（设定 68）右侧补偿约 12px',
+      Math.abs(comp(68) - 12) <= 1,
+      `实际 ${comp(68)}px（标定值 12px）`,
+    );
+    /*
+     * 补偿随设定值**等比**变化 —— 这是"宠物变大变小依旧自适应"的实现方式：
+     * 设定值本身会随宠物大小调整（宠物大 -> 要推更多才探出去同样多），
+     * 按它的比例取补偿就自动跟随。这里用"减半"来钉住等比性质。
+     */
+    check(
+      '设定值减半时补偿也减半（等比自适应）',
+      Math.abs(comp(34) - comp(68) / 2) <= 1,
+      `设定 34 -> ${comp(34)}px，设定 68 -> ${comp(68)}px`,
+    );
+    // 最终外推 = 设定值 + 补偿，左侧不加
+    const cases = [
+      { user: 68, expect: 80 },
+      { user: 30, expect: 35 },
+      { user: 10, expect: 12 },
+      { user: 0, expect: 0 },
+      { user: -20, expect: -24 },
+    ];
+    for (const { user, expect } of cases) {
+      const right = user + comp(user);
+      const left = user;
+      check(
+        `设定 ${user}：右 ${right} / 左 ${left}`,
+        right === expect,
+        `实际右 ${right}（期望 ${expect}）、左 ${left}`,
+      );
+    }
+  }
+
+  /*
+   * 🔴 设置项**不能"被注释吞掉"**（2026-10-21 真事故）。
+   *
+   * 用户报：「把这个改成可见可调节，我一关闭窗口，就没了」——
+   * 「探头时的平移距离」的输入框打开是空的、输入也不保存。
+   *
+   * 根因：代码里那个 `/*` 注释**没闭合**，把整段
+   * `bindNumberField(ui.peekOffset, ...)` 包进了注释。
+   * 语法上仍然是合法的注释块，所以 **`npm test`、类型检查、构建全都照样通过**，
+   * 只有运行时表现为"这个设置项是死的"。
+   *
+   * 这条测试的做法：**先剥掉注释**再找调用。
+   * 注释在的时候 `bindNumberField(\s*ui.peekOffset` 找不到 -> 红。
+   */
+  {
+    const settingsSrc = readFileSync(
+      fileURLToPath(new URL('../src/renderer/settings.js', import.meta.url)),
+      'utf8',
+    );
+    const codeOnly = settingsSrc
+      .replace(/\/\*[\s\S]*?\*\//g, '') // 块注释
+      .replace(/^[ \t]*\/\/.*$/gm, ''); // 整行行注释
+    check(
+      '设置页的「探头时的平移距离」真的绑定了（没被注释吞掉）',
+      /bindNumberField\(\s*ui\.peekOffset/.test(codeOnly),
+      '剥掉注释后找不到生效的 bindNumberField(ui.peekOffset, ...) 调用 —— ' +
+        '很可能是注释没闭合把绑定包进去了（构建不会报错，但设置项是死的）',
+    );
+    check(
+      '「探头时的平移距离」的读值走 peekOffset IPC',
+      /bindNumberField\(\s*ui\.peekOffset,\s*\(\)\s*=>\s*api\.peekOffset\(\)/.test(codeOnly),
+      '绑定存在但读值不是 api.peekOffset()',
+    );
+    /*
+     * 同源问题：`bindNumberField` 里空输入必须**不提交**。
+     * `Number('')` 是 0，直接提交会把"清空 -> 关窗口"变成"值变成 0"。
+     */
+    check(
+      '数字输入框清空时不会把值写成 0',
+      /if \(text === ''\)/.test(codeOnly),
+      '没找到"空输入不提交"的分支（Number(\'\') === 0 会被当成合法值存下去）',
+    );
+  }
+
 
 
   // **关键约束**：画布保持待机大小，窗口必须装得下**旋转后**的画布。
@@ -3842,6 +3958,80 @@ console.log('\n11. petLayout：窗口尺寸与右下角锚定');
     check('不传留白时按窗口判定（老行为不变）',
 
       sideAtEdge(nearEdge, workArea, EDGE_SNAP_THRESHOLD, 0, 0) === 'right');
+
+    /*
+     * 🔴 左右**触发距离必须相同**（2026-10-21 修「正常拖住两边距离就有不同」）。
+     *
+     * ## 实测根因
+     *
+     * 贴边判定一度传的是**实时偏移** `artOffsetInWindow`，而它在探头姿态下
+     * 被 `--peek-shift-x` 带偏（CDP 实测，peekOffsetPx=68）：
+     *
+     *     静止：偏移 x = 25
+     *     贴左：偏移 x = -43     <- 带偏 -68
+     *     贴右：偏移 x = +90     <- 带偏 +65
+     *
+     * 于是 `sideAtEdge` 以为立绘已经探出去 68px。日志统计的铁证：
+     *
+     *     触发 left  时的左 gap：中位 **-1**   （立绘正好贴到边）
+     *     触发 right 时的右 gap：中位 **-92**  （越过屏幕边 92px 才触发）
+     *
+     * ## 修法
+     *
+     * 改用静止态缓存（`restArtInsetX/Y` / `restArtWidth`）——
+     * 它们只在 `atRest`（且窗口为常态尺寸）时刷新，与"当前是否探头"无关。
+     *
+     * 这条测试守的是**纯函数的对称性承诺**：喂同一份偏移与尺寸，
+     * 左右同一个"离边距离"必须得到同一个判定。
+     */
+    {
+      const inset = 25;
+      const artW = 150;
+      const winW = 220;
+      const screenW = 1536;
+      const artH = 300;
+      const size = { width: artW, height: artH };
+      const offset = { x: inset, y: 0 };
+      for (const d of [0, 10, 30, 39, 41, 60]) {
+        // 立绘左边离屏幕左 d
+        const leftWin = { x: d - inset, y: 300, width: winW, height: artH };
+        // 立绘右边离屏幕右 d
+        const rightWin = { x: screenW - d - artW - inset, y: 300, width: winW, height: artH };
+        const l = sideAtEdge(leftWin, workArea, EDGE_SNAP_THRESHOLD, inset, 0, offset, size);
+        const r = sideAtEdge(rightWin, workArea, EDGE_SNAP_THRESHOLD, inset, 0, offset, size);
+        /*
+         * ⚠️ 比的是**是否触发**，不是判成了哪一边 ——
+         * 左边该判 'left'、右边该判 'right'，两者本来就不同。
+         * （第一版写成 `l === r`，于是每个该触发的用例都红。）
+         */
+        const expectTrigger = d <= EDGE_SNAP_THRESHOLD;
+        check(
+          `左右触发距离一致（立绘离边 ${d}px，阈值 ${EDGE_SNAP_THRESHOLD}）`,
+          l !== null === expectTrigger && r !== null === expectTrigger &&
+            (l === null || l === 'left') && (r === null || r === 'right'),
+          `左判 ${l}、右判 ${r}；离边 ${d}px、阈值 ${EDGE_SNAP_THRESHOLD} 时` +
+            `${expectTrigger ? '应触发' : '不该触发'}`,
+        );
+      }
+      /*
+       * 反向守护：**探头态被带偏的偏移**会让左右判得不一样。
+       *
+       * 这不是"要求功能出错"，而是把 bug 的机理钉在测试里 ——
+       * 将来若有人把传参改回 `artOffsetInWindow`，这条会红，
+       * 提示他先去看 `artInsetForSnap` 的说明。
+       */
+      const dirtyLeft = { x: -43, y: 14 };
+      const dirtyRight = { x: 90, y: 7 };
+      const dL = sideAtEdge({ x: -inset, y: 300, width: winW, height: artH }, workArea,
+        EDGE_SNAP_THRESHOLD, inset, 0, dirtyLeft, size);
+      const dR = sideAtEdge({ x: screenW - inset - artW, y: 300, width: winW, height: artH }, workArea,
+        EDGE_SNAP_THRESHOLD, inset, 0, dirtyRight, size);
+      check(
+        '被探头位移带偏的偏移会造成左右不一致（把 bug 机理钉住）',
+        dL !== dR || false,
+        `带偏后左判 ${dL}、右判 ${dR}`,
+      );
+    }
 
   }
 
@@ -5599,6 +5789,135 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
     Math.abs(snappedCenterX - 900) <= 1,
     `立绘中心 x=${snappedCenterX}，应为 900`,
   );
+
+  /*
+   * 🔴 贴左右边时，**探头深度必须与"立绘在窗口内的偏移"无关**（2026-10-21）。
+   *
+   * ## 用户报的现象
+   *
+   * 「鼠标拖拽宠物不同的地方，它缩进去的距离也不一样」
+   *
+   * ## 实测根因（真实日志）
+   *
+   * 吸附算式是 `目标 x = 屏幕右 − 左留白 − 立绘宽`，
+   * 而"左留白"来自 `restArtInsetX` 缓存 —— 那个缓存被**探头尺寸的几何污染**过：
+   *
+   *     23 = (151 − 105) / 2     <- 常态窗口（正确）
+   *     42 = (240 − 156) / 2     <- 探头窗口（污染）
+   *
+   * 于是连续四次进探头，日志里"左留白"是 42 / 33 / 40 / 23 ——
+   * 目标 x 跟着差 17px。
+   *
+   * 修法在 `petWindow` 的 `atRest` 里（加 `atNormalSize` 判据），
+   * 这里守的是**纯函数层面的承诺**：只要喂进去的左留白/立绘宽一致，
+   * 不管 `artInWindow.x` 怎么变（= 用户抓不同地方），目标 x 都必须一样。
+   */
+  {
+    const rightEdge = screen.x + screen.width;
+    const inset = Math.round((normal.width - artSize.width) / 2);
+    const artW = artSize.width;
+    /*
+     * ⚠️ 比的是**立绘的屏幕位置**，不是窗口 x（第一版写错了）。
+     *
+     * 窗口 x 本来就该随 `artInWindow.x` 反向变化 —— 立绘在窗口里偏右一点，
+     * 窗口就得多往左站一点，才能让立绘停在同一个屏幕位置。
+     * 那正是吸附在**做它该做的事**，不是 bug。
+     *
+     * 真正的不变量是：**立绘右边贴在屏幕右边界上**，与抓取点无关。
+     */
+    const artRightEdges = [];
+    for (const offsetX of [inset, inset + 6, inset - 6, inset + 18]) {
+      const b = peekWindowBounds(
+        current,
+        { x: offsetX, y: 0 },
+        peek,
+        'right',
+        screen,
+        43,
+        0,
+        artW,
+        undefined,
+        undefined,
+        null, // 不传 cursor：这条测的是**横向吸附**，与光标吸附无关
+        undefined,
+      );
+      // 立绘右边（屏幕坐标）= 窗口 x + 立绘在窗口内的左偏移 + 立绘宽
+      artRightEdges.push(b.x + offsetX + artW);
+    }
+    const spread = Math.max(...artRightEdges) - Math.min(...artRightEdges);
+    check(
+      '贴右边缘：立绘的屏幕位置与「抓取点」无关（横向）',
+      spread <= 2,
+      `不同抓取点得到 ${new Set(artRightEdges).size} 个不同的立绘右边：` +
+        `${artRightEdges.join(', ')}（散布 ${spread}px）——` +
+        `这正是用户报的「缩进去的距离不一样」`,
+    );
+    check(
+      '贴右边缘：立绘右边贴着屏幕右边界',
+      artRightEdges.every((edge) => Math.abs(edge - rightEdge) <= 2),
+      `立绘右边 ${artRightEdges.join(', ')}，屏幕右 ${rightEdge}`,
+    );
+  }
+
+  /*
+   * 🔴 **左右对称**：同一个"抓取点偏移"，贴左和贴右的**探头深度**必须一致。
+   *
+   * ## 用户报的现象
+   *
+   * 「左右屏幕探头的时候缩进去的距离不一样」
+   *
+   * ## 为什么纯函数层面能守
+   *
+   * 吸附算式是
+   *
+   *     贴右：窗口 x = 屏幕右 − 左留白 − 立绘宽
+   *     贴左：窗口 x = 屏幕左 − 左留白
+   *
+   * 两者都用**同一个** `artInWindow.x` 和 `artWidth`，所以"立绘可见边贴到屏幕边"
+   * 这件事天然是对称的。实测日志也证实了：
+   *
+   *     吸附(左)：左留白 34 立绘宽 153 -> 目标 x = -34
+   *     吸附(右)：左留白 34 立绘宽 153 -> 目标 x = 1349
+   *
+   * 真正的左右不一致来自**另一个地方**：`artInWindow.x` 在"从探头态直接进
+   * 下一次探头"时是**旋转后的脏值**（实测 `{"x":-36}`，常态 `{"x":30}`），
+   * 而旋转 45° 后立绘可见范围**不对称**，于是同一个脏值用在左右两边时
+   * 误差方向相反 —— 看起来就是"左右探得不一样深"。
+   *
+   * 修法在 `petWindow.enterEdgePeek`（进探头前先归一到常态尺寸）。
+   * 这条测试守的是**纯函数的对称性**：只要喂进去的输入一致，左右结果必须镜像。
+   */
+  {
+    const screenW = 1536;
+    const mid = 800;
+    for (const inset of [24, 30, 18, 42]) {
+      const artW = 203;
+      const left = peekWindowBounds(
+        { x: 100, y: 400, width: normal.width, height: normal.height },
+        { x: inset, y: 0 }, peek, 'left', screen, 43, 0, artW,
+        undefined, undefined, null, undefined,
+      );
+      const right = peekWindowBounds(
+        { x: 1200, y: 400, width: normal.width, height: normal.height },
+        { x: inset, y: 0 }, peek, 'right', screen, 43, 0, artW,
+        undefined, undefined, null, undefined,
+      );
+      // 贴左：立绘左边应贴屏幕左（x = 0）；贴右：立绘右边应贴屏幕右（x = 1536）
+      const leftArtEdge = left.x + inset;
+      const rightArtEdge = right.x + inset + artW;
+      check(
+        `左右对称（留白 ${inset}）：贴左立绘左边贴屏幕左`,
+        Math.abs(leftArtEdge - 0) <= 2,
+        `立绘左边 ${leftArtEdge}，应为 0`,
+      );
+      check(
+        `左右对称（留白 ${inset}）：贴右立绘右边贴屏幕右`,
+        Math.abs(rightArtEdge - screenW) <= 2,
+        `立绘右边 ${rightArtEdge}，应为 ${screenW}`,
+      );
+    }
+    void mid;
+  }
 
   // ⑤ 不传 cursor：保持旧行为（原点不动）—— 滑杆重排等路径不能跳
   const legacy = peekWindowBounds(current, artInWindow, peek, 'right', screen, 43);

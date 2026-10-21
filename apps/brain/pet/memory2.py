@@ -33,6 +33,44 @@ from .store import BackupResult, PetDatabase, default_db_path
 
 log = logging.getLogger("pet.memory2")
 
+# 泛问句的疑问/求列举词（`_looks_like_general_question` 用）。
+#
+# ⚠️ 只收"问有什么"这一类，**不收**「为什么」「怎么样」「什么时候」
+#    —— 那几种问句即使落空，正确回答也是"不知道"，不该端最近记忆上去。
+_GENERAL_QUESTION_WORDS: tuple[str, ...] = (
+    "什么",
+    "哪些",
+    "哪个",
+    "啥",
+    "干什么",
+    "干啥",
+    "玩什么",
+    "玩啥",
+    "喜欢什么",
+    "喜欢啥",
+)
+
+# 🔴 这些词一出现就**否决**泛问判定（2026-10-20 加的守卫）。
+#
+# 为什么必须有：「为什么天是蓝的」含"什么"，按上面那张表会被判成泛问，
+# 于是把最近 5 条记忆端上去 —— 而正确回答是"因为瑞利散射"，
+# 记忆帮不上任何忙。实测这条直接把自检打红了。
+#
+# 判据方向是"求列举 vs 求解释/求方法"：
+#   · 求列举（"我在玩什么""我喜欢啥"）-> 答案就在记忆里
+#   · 求解释（"为什么…"）、求方法（"怎么…""如何…"）、求时间（"什么时候…"）
+#     -> 答案是知识，不是记忆
+_GENERAL_QUESTION_VETO: tuple[str, ...] = (
+    "为什么",
+    "为何",
+    "怎么",
+    "如何",
+    "怎样",
+    "什么时候",
+    "多久",
+    "多少",
+)
+
 
 class MemoryService:
     """记忆的统一入口。大脑只跟它打交道，不直接碰 SQL。"""
@@ -603,7 +641,25 @@ class MemoryService:
                         when = self._when(item.get("ts"))
                         stamp = f"（{when}）" if when else ""
                         lines.append(f"- {item['text']}{stamp}")
-                    header = self._render("recall_header", "你想起以前聊到过的相关内容：")
+                    """
+                    ⚠️ 泛问句兜底的结果要**明说**它不是"被问到的"（2026-10-20）。
+
+                    负向检索（三条路全落空）之后按时间端上来的那几条，
+                    与用户此刻问的话题**未必相关**。如果沿用"你想起以前聊到过的
+                    相关内容"，模型会以为这就是答案 —— 用户问「我在玩什么游戏」，
+                    它可能开始念「用户喜欢曲娘」（那是壁纸的事）。
+
+                    标题换成"你最近记得的几条"，语义从"这些是相关的"
+                    变成"这些是它最近记下的，自己判断相不相关"。
+                    """
+                    if any(item.get("fallback") for item in hits):
+                        header = self._render(
+                            "recall_header_general",
+                            "（这几条是你最近记得的，未必与这句话相关，"
+                            "只在确实对得上时才提）",
+                        )
+                    else:
+                        header = self._render("recall_header", "你想起以前聊到过的相关内容：")
                     pieces.append(f"{header}\n" + "\n".join(lines))
             except Exception:  # noqa: BLE001
                 log.exception("记忆检索失败（已忽略）")
@@ -879,6 +935,30 @@ class MemoryService:
             except Exception:  # noqa: BLE001 —— 兜底失败绝不能影响主检索
                 log.debug("专有名词兜底检索跳过", exc_info=True)
 
+        """
+        ## 「你自己呢？」—— 优先召回 `self` 类（2026-10-21）
+
+        用户要求检索层能体现"玩伴自己的事实"。但光有数据不够：
+        用户问「你自己怎么想的」「你喜欢什么」时，三条正路都会优先返回
+        **用户**的事实（因为它们和"喜欢"这个词的语义更近）。
+
+        所以这里加一路：问句里出现**指向它自己**的词时，
+        把 `kind='self'` 的条目按重要度拉进候选。
+
+        ⚠️ 权重给 0.8：比关键词路（1.0）低、比专有名词兜底（0.5）高 ——
+        它只保证"它自己的事有机会被想起来"，不保证霸榜。
+
+        ⚠️ 只在问句**确实指向它**时才走。否则每一轮都会把它自己的事
+        塞进提示词，用户聊自己的事时会被它抢话题。
+        """
+        if self._asks_about_self(query):
+            try:
+                for rank, row in enumerate(self.db.self_memories(limit=max(3, top_k))):
+                    mid = int(row["id"])
+                    seen[mid] = seen.get(mid, 0.0) + 0.8 / (1.0 + rank)
+            except Exception:  # noqa: BLE001
+                log.debug("「它自己」检索跳过", exc_info=True)
+
         # 向量路
         try:
             vec = self._embed(query)
@@ -917,7 +997,58 @@ class MemoryService:
             log.debug("向量检索跳过", exc_info=True)
 
         if not seen:
-            return []
+            """
+            ## 🔴 泛问句兜底（2026-10-20）
+
+            用户问「我在玩什么游戏」「我喜欢什么」这类**泛问**时，
+            上面三条路全部命中 0 条：
+
+              · 关键词路：`我在玩什么游戏` 分词后全是虚词，FTS 匹配不到东西；
+              · 专有名词路：抽不出专有名词（"什么游戏"不是名词）；
+              · 向量路：它跟任何一条具体记忆的相似度都低于 `min_score`
+                （实测 0.4 门槛下全是 0.2x）——"我在玩什么"和"用户在玩《明日方舟》"
+                在句向量上**不像**，因为一个是疑问、一个是陈述。
+
+            结果就是：库里明明有"用户在玩《明日方舟：终末地》"，
+            它却回答"我不太清楚你在玩什么"。**这比记错更伤**。
+
+            ## 为什么这样兜底是安全的
+
+            只在**全部落空**时才走这条路 —— 任何一条正路命中，就完全不碰它。
+            而且返回的条目会在 `inject_hint` 里被标成"**按时间列的，可能与当前话题无关**"，
+            让模型知道"这不是被问到的，是它最近记得的"。
+
+            ## 为什么不按 kind 筛
+
+            用户问"我在玩什么"想要的是 fact，但 `kind` 只有 fact/phrase 两种粗分类
+            （见 `add_memory` 的 kind 参数），没有"游戏"这种语义桶。
+            按 kind 筛等于什么都没筛。所以**按时间取最近的一组**，
+            让模型自己从里面挑 —— 它的上下文理解比我们的分类准。
+            """
+            fallback = self._recent_fallback(query, top_k)
+            if not fallback:
+                return []
+            seen = {int(item["id"]): 1.0 - idx * 0.01 for idx, item in enumerate(fallback)}
+            fallback_ids = [int(item["id"]) for item in fallback]
+            # 直接取出来返回（下面的通用查询会再查一遍，白跑；这里走捷径）
+            out = [
+                {
+                    "id": int(item["id"]),
+                    "text": str(item["summary"] or "")[:snippet],
+                    "kind": str(item["kind"] or "fact"),
+                    "level": str(item["level"] or "recent"),
+                    "ts": float(item["ts"] or 0.0),
+                    "created_at": str(item["created_at"] or ""),
+                    # ⚠️ 标记来源：`inject_hint` 据此加一句"这是按时间列的"
+                    "fallback": True,
+                }
+                for item in fallback
+            ]
+            if fallback_ids:
+                self.db.bump_hits(fallback_ids)
+                self.last_hit_ids = fallback_ids
+            log.debug("检索全落空 -> 泛问句兜底返回最近 %d 条", len(out))
+            return out
 
         # 按合并分数排序，取前 K
         ordered = sorted(seen.items(), key=lambda kv: -kv[1])[:top_k]
@@ -967,6 +1098,84 @@ class MemoryService:
         else:
             self.last_hit_ids = []
         return out
+
+    def _recent_fallback(self, query: str, top_k: int) -> list[dict[str, Any]]:
+        """泛问句兜底：返回最近的一组记忆（见 `_retrieve_hits` 里那段说明）。
+
+        ## 🔴 触发条件比"检索落空"更严
+
+        只看"落空"是不够的 —— 用户问「那个 C_Thru 插件怎么配」（一个库里没有的名字）
+        也会落空，那时**不该**拿一堆无关记忆去糊弄他，正确回答是"我不知道"。
+
+        所以要**同时**满足：
+
+        ```
+        ① 检索真的全部落空（调用方保证）
+        ② 问句是**泛问**：含疑问词，且不含任何专有名词
+        ③ 库里确实有记忆
+        ```
+
+        ②的判据看 `_looks_like_general_question`。少这一条，兜底就会
+        在"用户问了个具体但没见过的东西"时乱答 —— 那比不回答更糟。
+
+        ## 为什么还要一个开关
+
+        `memory.general_fallback`（默认开）。关掉 = 回到 2026-10-20 之前的行为。
+        和 `lexical_fallback` 一样的理由：**留开关才能做对照实验**。
+        """
+        if not self._general_fallback_enabled():
+            return []
+        if not self._looks_like_general_question(query):
+            return []
+        assert self.db is not None
+        try:
+            rows = self.db.recent_memories(limit=max(1, min(20, top_k)))
+        except Exception:  # noqa: BLE001 —— 兜底失败就当没兜底
+            log.debug("泛问句兜底查询失败", exc_info=True)
+            return []
+        return [dict(row) for row in rows if str(row["summary"] or "").strip()]
+
+    def _looks_like_general_question(self, query: str) -> bool:
+        """这句话是不是"泛问"（问的是"有什么/是什么"，不是某个具体东西）。
+
+        ## 两个条件都要满足
+
+        ```
+        ① 含疑问/求列举的词：什么 / 哪些 / 哪个 / 干啥 / 玩啥 / 喜欢啥 …
+        ② **不含**专有名词（含了就是具体问题，不该兜底）
+        ```
+
+        ## ⚠️ 为什么必须排除"含专有名词"
+
+        反例：「那个 C_Thru 插件怎么配」——含"怎么"，但 `C_Thru` 是专有名词。
+        这种落空是**真的没有这条记忆**，正确回答是"我不知道"，
+        而不是把最近 5 条记忆端上去，让它开始胡说。
+
+        同理「银松镇那个机关怎么过」含"怎么"，但 `银松镇` 是专有名词 ->
+        走专有名词兜底路，不走这里。
+        """
+        raw = str(query or "").strip()
+        if not raw:
+            return False
+        # ① 先否决"求解释/求方法/求时间"的问句 —— 它们的答案不在记忆里
+        if any(word in raw for word in _GENERAL_QUESTION_VETO):
+            return False
+        # ② 必须是"求列举"的问法
+        if not any(word in raw for word in _GENERAL_QUESTION_WORDS):
+            return False
+        try:
+            from . import nouns
+
+            if nouns.extract_terms(raw):
+                return False
+        except Exception:  # noqa: BLE001 —— 抽词失败时宁可保守（不兜底）
+            return False
+        return True
+
+    def _general_fallback_enabled(self) -> bool:
+        """泛问句兜底开不开（`memory.general_fallback`，默认开）。"""
+        value = (self.config.memory or {}).get("general_fallback")
+        return True if value is None else bool(value)
 
     def _retrieve(self, query: str) -> list[str]:
         """**兼容旧接口**：只返回文本列表（测量脚本与老测试在用）。
@@ -1275,7 +1484,10 @@ class MemoryService:
                     vec = self._embed(text)
                     self.db.add_memory(
                         text,
-                        kind=kind,
+                        # 按**主语**自动分 fact / self（2026-10-21）。
+                        # 调用方传 kind="fact" 是"默认归类"，这里再按句首细分 ——
+                        # 这样 gateway / backfill 都不用改，一处生效。
+                        kind=self._kind_for(text, kind),
                         tags=tags,
                         level=level,
                         importance=importance,
@@ -1411,6 +1623,71 @@ class MemoryService:
         except Exception:  # noqa: BLE001 —— 矛盾检测是加分项，失败就当没矛盾
             log.debug("矛盾检测跳过（异常）", exc_info=True)
         return None
+
+    def _asks_about_self(self, query: str) -> bool:
+        """这句问话是不是在问**它自己**（2026-10-21）。
+
+        ## 为什么必须窄
+
+        这个判据决定"要不要把它自己的事拉进候选"。判宽了，用户聊自己的事
+        它也会把自己的经历塞进提示词 —— 那会变成**抢话题**，
+        比"想不起来自己的事"更让人烦。
+
+        所以只认明确的第二人称/指向它的说法：
+
+        ```
+        你 / 你自己 / 你怎么想 / 你叫什么 / 你有啥想法
+        ```
+
+        ⚠️ **不认**"你喜欢什么"这种 —— 那多半是在问"你喜欢什么（东西）"，
+        而用户真正想聊的是自己的喜好。实测这类歧义句里，用户的意图
+        几乎都是问自己。
+        """
+        raw = str(query or "").strip()
+        if not raw:
+            return False
+        # 明确的"你自己"
+        if "你自己" in raw or "你自个" in raw:
+            return True
+        # 直接问它的名字/身份/感受
+        for pattern in ("你叫什么", "你是谁", "你的名字", "你怎么想", "你觉得呢", "你有啥", "你有什么"):
+            if pattern in raw:
+                return True
+        return False
+
+    def _kind_for(self, text: str, default: str = "fact") -> str:
+        """按**主语**把提炼结果分到 `fact` / `self`（2026-10-21）。
+
+        ## 为什么要分
+
+        用户要求：「检索层要能显示玩伴自己的事实，比如不顺着用户的话而是
+        自己说出要改名成阿拾一样，或者安慰人等等。」
+
+        这些条目原本和"用户喜欢曲娘"混在同一个 `fact` 里。后果有两个：
+
+          · **检索时张冠李戴** —— 问"我喜欢什么"，可能召回"宠物喜欢安静"，
+            而那是它自己的偏好；
+          · **界面看不出区别** —— 用户翻列表时分不清哪条是谁的事。
+
+        ## 判据：句首主语
+
+        ```
+        宠物 / 它自己 / 阿拾 开头  -> self
+        其它（用户 / 他 / 她）      -> fact
+        ```
+
+        ⚠️ 只认**句首**，不认句中。"用户说宠物答错了"的主语是用户，
+        它记的是用户做了什么 —— 归 `fact` 才对，句中那个"宠物"不算。
+
+        ⚠️ 认不出来就归 `default`。**宁可错归 fact，也不要把用户的事
+        标成它自己的** —— 后者会让它把用户的信息当成自我认知。
+        """
+        raw = str(text or "").strip()
+        if not raw:
+            return default
+        if raw.startswith(("宠物", "它自己", "阿拾")):
+            return "self"
+        return default
 
     def _is_semantic_duplicate(self, text: str, level: str) -> bool:
         """这条是不是已经有一条**意思相同**的（正文不必相同）。

@@ -914,6 +914,7 @@ class _MiniYaml:
     def __init__(self, text: str, source: str) -> None:
         self.source = source
         self.lines: list[tuple[int, int, str]] = []  # (行号, 缩进, 内容)
+        self._raw_lines = text.splitlines()  # 块标量要读**原文**，见 `_parse_block_scalar`
         for lineno, raw in enumerate(text.splitlines(), start=1):
             if "\t" in raw[: len(raw) - len(raw.lstrip())]:
                 raise ConfigError(f"{source}:{lineno}: 缩进请用空格，不要用 Tab")
@@ -1020,19 +1021,69 @@ class _MiniYaml:
         """
         读取 `key: |` / `key: >` 块标量：把比父行更深缩进的行整体作为文本。
         这是人格提示词的关键能力 —— 长文本非得能写成多行，否则配置没法读也没法改。
+
+        ## 🔴 必须读**原文**，不能用预处理过的行（2026-10-20 修）
+
+        预处理（`__init__`）会把注释和空行预先丢掉，因为**映射/列表**里的
+        注释确实不该参与结构解析。但块标量里**每一行都是内容**：
+
+            extract: |
+                ## 🔴 第二重要：记物不记话
+
+                用户说"我喜欢曲娘" -> 该记：用户喜欢《明日方舟》的曲娘
+
+        上面这种写法在两版真实提示词里都存在（`##` 是小标题、空行是分段）。
+        旧实现从预处理结果里取行，于是：
+
+          · `## ...` 被 `_strip_comment` 当成整行注释**直接消失**；
+          · 空行被跳过 -> 段落之间没了空行，整段挤成一坨。
+
+        实测症状：`prompts.extract` 里「## 🔴 第二重要」整段读不出来，
+        而 yaml 文件本身看上去完全正常 —— 这种"文件对、读出来不对"
+        最难查。所以块标量改成按**行号**回原文取。
+
+        ⚠️ 代价：块标量里的行**不再支持行尾注释**。这是对的 ——
+        写在这种地方的内容一律原样保留，YAML 本身也是这个语义。
         """
         raw_lines: list[str] = []
-        block_indent: Optional[int] = None
-        while self.pos < len(self.lines):
-            lineno, line_indent, content = self.lines[self.pos]
-            if line_indent <= parent_indent:
+        start_pos = self.pos
+        if start_pos >= len(self.lines):
+            return ""
+        first_lineno = self.lines[start_pos][0]
+        # 父行的行号 = 上一行的行号（调用时 `self.pos` 指向块的第一行）
+        prev_lineno = self.lines[start_pos - 1][0] if start_pos > 0 else 0
+        indent_ref: Optional[int] = None
+
+        # 从父行的**下一行**开始扫原文，直到缩进回到父级
+        lineno_scan = prev_lineno  # 0 基索引 = 「父行行号」，因为行号从 1 开始
+        while lineno_scan < len(self._raw_lines):
+            raw = self._raw_lines[lineno_scan]
+            lineno_scan += 1
+            if not raw.strip():
+                # 空行属于块内容（保留段落分隔），但要看**后面**还有没有更深的行
+                raw_lines.append("")
+                continue
+            indent = len(raw) - len(raw.lstrip(" "))
+            if indent <= parent_indent:
                 break
-            if block_indent is None:
-                block_indent = line_indent
-            raw_lines.append(content)
+            if indent_ref is None:
+                indent_ref = indent
+            # ⚠️ **保留相对缩进**，只去掉"块公共缩进"那一层。
+            # 直接 `.strip()` 会把提示词里的缩进示例（"    用户在玩游戏）拍平，
+            # 而兜底常量里是带缩进的 —— 于是两者"看起来一样、逐字不同"。
+            raw_lines.append(raw[indent_ref:] if len(raw) >= indent_ref else raw.lstrip())
+
+        # 把解析游标推进到块结束处（`self.lines` 里第一条缩进 <= 父级的行）
+        while self.pos < len(self.lines) and self.lines[self.pos][1] > parent_indent:
             self.pos += 1
+
+        # 去掉尾部空行（YAML 的 `|` 默认 clip：末尾恰好一个换行）
+        while raw_lines and not raw_lines[-1]:
+            raw_lines.pop()
+        while raw_lines and not raw_lines[0]:
+            raw_lines.pop(0)
         if folded:
-            return " ".join(raw_lines).strip()
+            return " ".join(line for line in raw_lines if line).strip()
         return "\n".join(raw_lines)
 
     def _peek_indent(self) -> int:

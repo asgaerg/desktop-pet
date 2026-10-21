@@ -490,7 +490,26 @@ function bindNumberField(input, read, write) {
   if (!input) return;
 
   const commit = async () => {
-    const raw = Number(input.value);
+    const text = String(input.value ?? '').trim();
+    /*
+     * 🔴 空输入**不提交**，改成"把已存的值填回去"（2026-10-21）。
+     *
+     * 为什么不能直接往下走：`Number('')` 是 **0**（`Number.isFinite(0)` 为真），
+     * 于是"把框清空 -> 关窗口"会静默保存成 0 —— 用户看到的就是
+     * 「我一关闭窗口，就没了」（值被清成 0，而不是保持原值）。
+     *
+     * 现在空的时候回读一次真实生效值填回去，输入框**永远显示当前实际值**。
+     */
+    if (text === '') {
+      try {
+        const back = Number(await read());
+        if (Number.isFinite(back)) input.value = String(Math.round(back));
+      } catch {
+        /* 读不到就保持空白，不阻断其它设置 */
+      }
+      return;
+    }
+    const raw = Number(text);
     if (!Number.isFinite(raw)) return;
     // 夹进 min/max —— 用户可以直接敲超范围的数
     const lo = Number(input.min);
@@ -834,6 +853,24 @@ bindNumberField(
 
 /*
  * 探头时的平移距离（像素，**可以是负数**）。
+ *
+ * 🔴 2026-10-21 修：这里原来**注释没闭合**，把整个绑定吞进注释里了 ——
+ *
+ *     /*
+ *      * 探头时的平移距离（像素，**可以是负数**）。
+ *       () => api.peekOffset(),        <-- 这行起全在注释内
+ *       ...
+ *     );
+ *
+ * 于是输入框**从来没被绑定过**：既不读已存的值（打开设置是空的），
+ * 也不保存（关窗口就没了）。用户报「把这个改成可见可调节，我一关闭窗口，就没了」
+ * 就是这个 —— 他之前输入的 30、10 一个都没进 settings.json（仍停在 68）。
+ *
+ * 教训：块注释的结束符与 `bindNumberField(` 这种"配对"的东西，
+ * 删一行就可能让整段代码静默失效，而**构建照样通过**（语法上仍是合法注释）。
+ */
+bindNumberField(
+  ui.peekOffset,
   () => api.peekOffset(),
   async (value) => {
     const r = await api.setPeekOffset(value);

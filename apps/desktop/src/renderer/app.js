@@ -179,6 +179,15 @@ let screenBubbleShift = 0;
 /** 窗口内的让位位移（上方放不下气泡时往侧面让，见 updateBubbleSide） */
 let baseBubbleShift = 0;
 
+/**
+ * 上一次已播过的情绪标签（2026-10-21「把情绪接完」）。
+ *
+ * 🔴 为什么必须记住上一个标签：`pet.emotion` 是**周期性广播**的（情绪会随时间漂移），
+ * 如果每次都 `sprite.play(...)`，一次性表情会被反复打断、永远播不完 ——
+ * 表现出来就是"一直在眨眼/抽搐"。只在**标签变化**时播一次。
+ */
+let lastEmotionLabel = '';
+
 function setBubbleShift(px) {
   if (!els.bubble) return;
   const value = Number(px);
@@ -595,23 +604,42 @@ pet.on('pet:message', (message) => {
         sprite.setMouth(avg);
       }
       break;
-    case 'pet.emotion':
+    case 'pet.emotion': {
       // 情绪三维度 -> 立绘表情：心情映射到 -1~1，精力直接给
-      sprite.setEmotion((message.state.mood - 0.5) * 2, message.state.energy);
+      const state = message.state || {};
+      sprite.setEmotion((state.mood - 0.5) * 2, state.energy);
       /*
-       * 好奇表情（2026-10-17，截图对话）。
+       * 离散标签 -> 一次性表情（2026-10-21，"把情绪接完"）。
        *
-       * sidecar 在用户把屏幕推过来时会带一个 expression: 'curious'。
-       * 为什么要单独一档而不是靠 mood/energy 推：那两条是**连续量**，
-       * 表达不出这一刻它在盯着你的屏幕看这种瞬时状态。
+       * 以前只有"用户把屏幕推过来"那一条路会带 `expression`，
+       * 其余时候渲染层拿不到后端算好的标签（`dominant`），只能靠 mood 反推 ——
+       * 于是 prompt 里写着"你现在有点不爽"，立绘却还在笑。
        *
-       * ⚠️ play('curious') 是一次性反应（播完自动回 idle，见 sprite.js），
-       * 正是想要的：好奇是抬头看一眼，不是永久姿势。
+       * 现在两个来源合成一个（显式 `expression` 优先，用于瞬时提示）：
+       *
+       *     curious  -> curious   东张西望
+       *     excited  -> happy     （素材里没有 excited，映射到最接近的开心）
+       *     happy    -> happy
+       *     annoyed  -> angry     （素材里叫 angry，不是 annoyed）
+       *     sleepy / neutral -> 不播，交给 setEmotion 的持续态（idle/sleep）
+       *
+       * ⚠️ 只报"变化"：`pet.emotion` 是周期广播，每次都播会把一次性表情打断。
        */
-      if (message.expression === 'curious' || message.expression === 'excited') {
-        sprite.play(message.expression);
+      const label = message.expression || state.dominant || '';
+      if (label && label !== lastEmotionLabel) {
+        lastEmotionLabel = label;
+        const clip =
+          label === 'excited'
+            ? 'happy'
+            : label === 'annoyed'
+              ? 'angry'
+              : label === 'curious' || label === 'happy'
+                ? label
+                : '';
+        if (clip) sprite.play(clip);
       }
       break;
+    }
     case 'pet.observe':
       console.info('[pet] 屏幕观察（P4）', message);
       break;

@@ -138,6 +138,61 @@ empty_map: {}
         _assert(data["empty_map"] == {}, f"空映射解析错误：{data['empty_map']!r}")
         return "10 个断言通过"
 
+    @suite.check("YAML 块标量：`#` 开头的行与空行必须保留（2026-10-20 修的解析器 bug）")
+    def _() -> str:
+        """块标量 `|` 里**每一行都是内容**，预处理时不许当注释丢掉。
+
+        ## 真实事故
+
+        `prompts.extract` 里加了一段小标题：
+
+            extract: |
+                第一段
+
+                ## 🔴 第二重要：记物不记话
+
+                后面的内容
+
+        旧实现在 `__init__` 里就把 `#` 开头的行当注释删了（映射/列表里那是对的，
+        块标量里不是）。于是读出来是 `'第一段\\n后面的内容'` ——
+        **文件看着完全正常，读出来少了一整段**。
+
+        更隐蔽的是：这段提示词有**两份**（yaml + 内置兜底），
+        兜底那份是 Python 字符串写的所以没丢 —— 两边一比对才发现。
+        如果只写 yaml、不写兜底，这个 bug 会一直不报错，只是"模型不听新规则"。
+        """
+        text = (
+            "a: 1\n"
+            "prompts:\n"
+            "  extract: |\n"
+            "    第一段\n"
+            "\n"
+            "    ## 🔴 小标题：记**物**\n"
+            "\n"
+            "        缩进示例 <- 比块公共缩进多 4 格\n"
+            "  other: 2\n"
+            "b: 3\n"
+        )
+        data = parse_yaml(text, source="<block>")
+        got = data["prompts"]["extract"]
+
+        _assert("## 🔴 小标题" in got, f"`#` 开头的行被当成注释吃掉了：{got!r}")
+        _assert("第一段\n\n##" in got, f"空行被吞，段落没了分隔：{got!r}")
+        # 块的**公共缩进**（这里是 4 格）被去掉，**相对**多出来的 4 格保留。
+        # 这条正是"两处提示词逐字一致"的前提：兜底常量里的缩进是 4 格。
+        _assert(
+            "\n    缩进示例" in got,
+            f"相对缩进没保住（兜底常量是带缩进的，那样两边无法逐字相等）：{got!r}",
+        )
+        # 块结束之后的结构不能被误读
+        _assert(data["b"] == 3, f"块后面的顶层键没解析到：{data}")
+        _assert(data["prompts"]["other"] == 2, f"块后面的子键没解析到：{data['prompts']}")
+
+        # 行尾注释在**映射行**上仍然要去掉（这条不能因为修块标量而回退）
+        line = parse_yaml("k: v   # 这是注释\n", source="<c>")
+        _assert(line["k"] == "v", f"映射行的行尾注释没去掉：{line}")
+        return "`##` 行保留、空行保留、相对缩进保留、块后结构正常、行尾注释仍生效"
+
     @suite.check("配置校验：范围夹取 / 类型错误 / 点号路径补丁")
     def _() -> str:
         cfg = Config()
@@ -4116,9 +4171,60 @@ def test_memory(suite: SelfTest) -> None:
             _assert(kind in _EXTRACT_PROMPT_FALLBACK,
                     f"兜底提示词里缺分类「{kind}」")
 
+        # ── 「记物不记话」（2026-10-20）──
+        #
+        # 🔴 这条守的是**真实病灶**：抽查最近 40 条记忆，38 条是
+        # 「用户认为……」「宠物认为……」式的对话转述，而用户明确说过的
+        # 「喜欢曲娘、壁纸是她」一条都没进库。于是"检索不准"其实是
+        # "库里没有" —— 提示词里必须明确禁止这类转述。
+        _assert("记**物**，不记**话**" in _EXTRACT_PROMPT_FALLBACK,
+                "兜底提示词里缺「记物不记话」这一段")
+        for banned in ("用户认为", "用户觉得", "用户表达过", "用户问过"):
+            _assert(banned in _EXTRACT_PROMPT_FALLBACK,
+                    f"兜底提示词里没有点名禁止「{banned}」开头的转述")
+        _assert("一次最多 3 条" in _EXTRACT_PROMPT_FALLBACK,
+                "兜底提示词里缺「宁缺毋滥」的上限")
+        _assert("我把你屏幕上的" not in _EXTRACT_PROMPT_FALLBACK,
+                "兜底提示词串进了别的提示词内容")
+
+        # ── 🔴 两处必须**逐字一致** ──
+        #
+        # 真相源是 `config/persona.yaml` 的 `prompts.extract`，兜底是
+        # `memory._EXTRACT_PROMPT_FALLBACK`。这两份**同时存在**是历史原因
+        # （配置缺失/损坏时要有可用的一套），但它们漂移过一次：
+        # 上一版给 yaml 加了规则、忘了同步兜底，于是"配置文件坏掉"时
+        # 行为会**悄悄退回旧规则** —— 不报错、没日志，只是记忆质量变差。
+        from .config import Config
+
+        cfg_text = Config()
+        yaml_prompt = ""
+        try:
+            from pathlib import Path as _Path
+
+            cfg_path = _Path(__file__).resolve().parents[3] / "config" / "persona.yaml"
+            if cfg_path.exists():
+                from .config import load_config as _load
+
+                yaml_prompt = str(_load(cfg_path).root.get("prompts", {}).get("extract") or "")
+        except Exception:  # noqa: BLE001 —— 读不到配置就只查兜底
+            yaml_prompt = ""
+        if yaml_prompt.strip():
+            _assert(
+                "记**物**，不记**话**" in yaml_prompt,
+                "config/persona.yaml 的 prompts.extract 缺「记物不记话」—— 两处漂移了",
+            )
+            _assert(
+                yaml_prompt.strip() == _EXTRACT_PROMPT_FALLBACK.strip(),
+                "两处提炼提示词**不一致** —— 配置坏掉时会悄悄退回旧规则。"
+                f"（yaml {len(yaml_prompt)} 字 / 兜底 {len(_EXTRACT_PROMPT_FALLBACK)} 字）",
+            )
+        else:
+            raise AssertionError("读不到 config/persona.yaml 的 prompts.extract —— 测试前提不成立")
+
         return (
             "3 条正常解析；编号/项目符号/解释文字容错通过；敏感与超长被丢弃；"
-            f"容量 {EXTRACT_LIMIT} 条/{EXTRACT_MAX_CHARS} 字与三类提炼规则已断言"
+            f"容量 {EXTRACT_LIMIT} 条/{EXTRACT_MAX_CHARS} 字与三类提炼规则已断言；"
+            "记物不记话已断言；两处提示词逐字一致"
         )
 
     @suite.check("记忆注入：相关记忆与画像进入提示词，无关时不出现")
@@ -5386,6 +5492,408 @@ def test_subjectivity(suite: SelfTest) -> None:
         _assert(bare == [], f"没分词器时不该硬切中文：{bare}")
         return "强信号必提；模板动词挡住；共用词可识别；无分词器时不乱切"
 
+    @suite.check("检索层分「它自己」：按句首主语归类，问「你自己」才优先召回")
+    def _() -> str:
+        """2026-10-21 用户要求。
+
+        原话：「检索层要能显示玩伴自己的事实，比如不顺着用户的话而是自己说出
+        要改名成阿拾一样，或者安慰人等等。」
+
+        这条守两件事：
+          ① 归类判据（句首主语）不能把**用户**的事标成它自己的 ——
+             那会让它把用户的信息当成自我认知；
+          ② 「你自己怎么想」这类问句要能召回它自己的事，
+             而**普通问句不能**把它的事塞进来（否则它抢话题）。
+        """
+        import shutil
+        import tempfile
+
+        from .config import Config
+        from .memory2 import MemoryService
+
+        tmp = Path(tempfile.mkdtemp(prefix="pet-selftest-self-"))
+        services: list[MemoryService] = []
+
+        def build() -> MemoryService:
+            cfg = Config()
+            cfg.apply_patch(
+                {"memory": {"path": str(tmp / "s.db"), "enabled": True, "min_score": 0.99}}
+            )
+            svc = MemoryService(cfg)
+            services.append(svc)
+            return svc
+
+        try:
+            svc = build()
+
+            # ── ① 归类判据 ──
+            self_cases = [
+                "宠物自己提出想改名叫阿拾",
+                "它自己决定不再追问",
+                "阿拾第一次看到自己的立绘，有点不习惯",
+                "宠物承认不知道机关的正确顺序",
+            ]
+            fact_cases = [
+                "用户喜欢《明日方舟》的曲娘",
+                # ⚠️ 这句主语是**用户**，句中出现的"宠物"不算 —— 归 fact 才对
+                "用户说宠物答错了",
+                "用户希望宠物少附和",
+            ]
+            for text in self_cases:
+                _assert(svc._kind_for(text) == "self", f"该归 self 的没归：{text}")
+            for text in fact_cases:
+                _assert(
+                    svc._kind_for(text) == "fact",
+                    f"**误归 self**：{text} —— 用户的事被标成它自己的，会让它把用户信息当自我认知",
+                )
+
+            # ── ② 问句判据（必须窄，否则抢话题）──
+            for q in ("你自己怎么想的", "你叫什么名字", "你觉得呢", "你自己喜欢什么"):
+                _assert(svc._asks_about_self(q), f"{q!r} 应该算在问它自己")
+            for q in ("我喜欢什么", "今天天气怎么样", "用户喜欢曲娘吗", "帮我搜一下银松镇"):
+                _assert(not svc._asks_about_self(q), f"{q!r} 不该触发它自己召回")
+
+            # ── ③ 端到端：写进去 -> 分类正确 -> 能被召回 ──
+            svc.remember_facts(
+                [
+                    "宠物自己提出想改名叫阿拾",
+                    "用户喜欢《明日方舟》的曲娘",
+                ],
+                importance=0.8,
+            )
+            rows = {str(r["summary"]): str(r["kind"]) for r in svc.db.list_memory(limit=20)}
+            mine = [t for t in rows if t.startswith("宠物自己提出")]
+            _assert(mine, f"「宠物自己提出改名」没写进去：{list(rows)}")
+            _assert(rows[mine[0]] == "self", f"落库时没标成 self：{rows[mine[0]]}")
+
+            # 问「你自己」-> 它自己的事被拉进候选
+            hits = svc._retrieve_hits("你自己怎么想的")
+            _assert(
+                any("阿拾" in h["text"] for h in hits),
+                f"问你自己却没召回它自己的事：{[h['text'][:20] for h in hits]}",
+            )
+            # 问用户自己的事 -> 不该混进它自己的
+            hits2 = svc._retrieve_hits("我喜欢什么")
+            _assert(
+                not any("宠物自己提出" in h["text"] for h in hits2),
+                f"问用户的事却把它自己的事塞进来了（抢话题）：{[h['text'][:20] for h in hits2]}",
+            )
+
+            return (
+                f"{len(self_cases)} 条归 self / {len(fact_cases)} 条归 fact；"
+                "4 个问它自己的问句触发、4 个普通问句不触发；落库与召回都对"
+            )
+        finally:
+            for svc in services:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    @suite.check("清理判据：转述可归档，但**用户自述/具体对象/偏好**绝不能误删")
+    def _() -> str:
+        """2026-10-20：`tools/score-memory.py --archive-low` 的判据。
+
+        ## 为什么要这么细
+
+        "低分就归档"会误删。实测 177 条里 0.30 那一档混着三类东西：
+        真要清的、用户设定的角色、用户亲口说的感受。**分数分不开它们。**
+
+        所以判据按类型，而不是按分数。这条测试守的就是"别误删"——
+        宁可留一堆废话，也不能把"用户说过自己怎么看待活着"删掉。
+        """
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[3] / "tools" / "score-memory.py"
+        _assert(path.exists(), f"找不到打分器：{path}")
+        spec = importlib.util.spec_from_file_location("score_memory_clean", path)
+        _assert(spec and spec.loader, "打分器加载失败")
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        _sys.modules.setdefault("score_memory_clean", module)
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        judge = module.classify_transcript
+
+        # ── 必须归档的（纯聊天记录）──
+        drop_cases = [
+            "宠物认为这段文字讲的是落不完的想念需要找地方流出去",
+            "用户和宠物讨论过记忆与选择的关系，宠物认为记忆是筛选过的参照底子",
+            "用户和宠物的对话常隔十几小时甚至一两天才继续",
+            "用户认为每个人都有弱点，也都有自己的存在之根",
+            "用户问过宠物“生活是什么”，宠物答生活是靠新版本这类小盼头撑着的",
+        ]
+        for text in drop_cases:
+            verdict, why = judge(text)
+            _assert(
+                verdict == "drop",
+                f"该归档的没被判成 drop：{text[:40]}… -> {verdict}（{why}）",
+            )
+
+        # ── 绝不能归档的 ──
+        keep_cases = [
+            # 用户自述：宠物知不知道"用户怎么看活着"直接影响它怎么回话
+            "用户表达过“从没愿意来这世间走一遭”、觉得自己并非自愿来到世上",
+            "用户说过“我在这就是活着”，宠物对此不认同，觉得这话有点凉",
+            # 用户设定的角色
+            "用户认为明河是男性，祀是女性",
+            # 含具体对象的评价
+            "用户觉得《银松镇》像美国七八十年代彩色手绘风格，是横版生存恐怖游戏",
+            "用户认为《终末地》里回技力的角色太弱",
+            # 真实偏好（即使句子里有抽象词）
+            "用户希望阿拾学会先接住自己的感觉再回应，而不是把话答得漂亮",
+            "用户希望宠物少附和、多讨论，喜欢有主见、不盲从的交流方式",
+            # 标准事实
+            "用户喜欢吃番茄炒蛋",
+            "用户不喜欢宠物啰嗦",
+            "用户有 PS5",
+        ]
+        for text in keep_cases:
+            verdict, why = judge(text)
+            _assert(
+                verdict == "keep",
+                f"**误删**：{text[:44]}… -> {verdict}（{why}）",
+            )
+
+        return (
+            f"{len(drop_cases)} 条转述可归档；"
+            f"{len(keep_cases)} 条自述/设定/偏好/事实全部保留"
+        )
+
+    @suite.check("重要性打分器：具体事实高分、转述低分，且**可解释**（`tools/score-memory.py`）")
+    def _() -> str:
+        """2026-10-20：打分器是**独立工具**，这里只守它"能区分"。
+
+        ## 为什么要进自检
+
+        它决定了泛问句兜底的排序（`recent_memories` 按 importance 排）。
+        规则本身没测试的话，哪天有人改一个权重就可能把"转述"打成高分，
+        而那种退化**不会有任何报错** —— 只是兜底开始端废话上来。
+
+        ## 为什么只测"方向"，不测具体数值
+
+        权重是要用来调参的（用户原话："后续需要评估的时候能用来优化结构"）。
+        断言写死 0.90 这种数字，一调参就得改测试，最后没人敢调。
+
+        所以只断言**相对关系**：具体事实 > 转述；一次性事件被扣分。
+        """
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[3] / "tools" / "score-memory.py"
+        _assert(path.exists(), f"找不到打分器：{path}")
+
+        spec = importlib.util.spec_from_file_location("score_memory_selftest", path)
+        _assert(spec and spec.loader, "打分器加载失败（spec 为空）")
+        module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        # ⚠️ 必须先注册再 exec —— 打分器里有 `@dataclass`，
+        #    它编织类时会查 `sys.modules[cls.__module__]`，没注册就报
+        #    `AttributeError: 'NoneType' object has no attribute '__dict__'`
+        _sys.modules.setdefault("score_memory_selftest", module)
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+        score = module.score_text
+
+        concrete = score("用户喜欢《明日方舟》的曲娘，电脑壁纸是她")
+        transcript = score("宠物认为这段文字讲的是落不完的想念需要找地方流出去")
+        oneshot = score("用户曾不小心点到语音输入")
+
+        _assert(
+            concrete.score > transcript.score,
+            f"具体事实（{concrete.score}）没高过转述（{transcript.score}）—— "
+            "兜底排序会端废话上来",
+        )
+        _assert(
+            concrete.score > 0.7,
+            f"具体事实只有 {concrete.score}，太低 —— 兜底时排不到前面",
+        )
+        _assert(
+            transcript.score < 0.4,
+            f"转述有 {transcript.score}，太高 —— 它是最该被压下去的噪音",
+        )
+        _assert(
+            oneshot.score < concrete.score,
+            f"一次性事件（{oneshot.score}）没被压下去",
+        )
+
+        # 必须能解释（用户要"评估结构"，看不见理由就没法调）
+        _assert(
+            "转述" in transcript.explain(),
+            f"转述那条没在解释里点名原因：{transcript.explain()}",
+        )
+        _assert(
+            "+0.30" in concrete.explain() or "专名" in concrete.explain(),
+            f"具体事实没在解释里说明加分来源：{concrete.explain()}",
+        )
+
+        # 边界：空串不能抛、分数必须夹在 [0,1]
+        _assert(score("").score >= 0.0, "空串打分越界")
+        for text in ("", "嗯", "用户有 PS5", "a" * 300):
+            got = score(text).score
+            _assert(0.0 <= got <= 1.0, f"{text[:10]!r} 打分越界：{got}")
+
+        return (
+            f"具体 {concrete.score} > 转述 {transcript.score}；"
+            f"一次性 {oneshot.score} 被压；解释可读；边界不越界"
+        )
+
+    @suite.check("泛问句兜底：问「我在玩什么」能拿到最近记忆，问具体的不受污染")
+    def _() -> str:
+        """2026-10-20：条路上最后那个缺口。
+
+        ## 要守的其实是**边界**，不是"能召回"
+
+        "泛问能召回"很好做（落空就给最近几条）。真正难的是**不许乱给**：
+
+        ```
+        用户问「我在玩什么游戏」        -> 该兜底（库里有那条，只是检索不到）
+        用户问「那个 C_Thru 插件怎么配」 -> 不该兜底（真的没有，正确答案是"不知道"）
+        ```
+
+        第二类如果也兜底，它就会把最近 5 条记忆端上去、开始胡说 ——
+        那比"我不知道"糟得多。所以下面两个方向都要断言。
+        """
+        import shutil
+        import tempfile
+
+        from .config import Config
+        from .memory2 import MemoryService
+
+        tmp = Path(tempfile.mkdtemp(prefix="pet-selftest-general-"))
+        services: list[MemoryService] = []
+
+        def build(enabled: bool) -> MemoryService:
+            cfg = Config()
+            cfg.apply_patch(
+                {
+                    "memory": {
+                        "path": str(tmp / ("on.db" if enabled else "off.db")),
+                        "enabled": True,
+                        # 把另两条兜底路关掉，单独验这一条（否则专有名词路会先接住）
+                        "lexical_fallback": False,
+                        "general_fallback": enabled,
+                        "min_score": 0.99,  # 向量路几乎关死
+                    }
+                }
+            )
+            svc = MemoryService(cfg)
+            services.append(svc)
+            return svc
+
+        try:
+            facts = [
+                "用户在玩《明日方舟：终末地》，抽卡只抽喜欢的角色",
+                "用户喜欢《明日方舟》的曲娘，电脑壁纸是她",
+                "用户在杭州居住，上班在滨江",
+            ]
+
+            off = build(False)
+            off.remember_facts(facts)
+            on = build(True)
+            on.remember_facts(facts)
+
+            general_q = "我在玩什么游戏"
+
+            # ① 关掉兜底 -> 泛问召回不到（这就是修复前的真实症状）
+            off_hits = off._retrieve_hits(general_q)
+            _assert(
+                not off_hits,
+                f"关掉兜底时不该召回（说明别处漏了）—— 实际 {len(off_hits)} 条",
+            )
+
+            # ② 打开兜底 -> 泛问能拿到
+            on_hits = on._retrieve_hits(general_q)
+            _assert(on_hits, f"兜底没生效：{general_q!r} 仍召回 0 条")
+            _assert(
+                all(h.get("fallback") for h in on_hits),
+                "兜底返回的条目没打 `fallback` 标记 —— 提示词里就没法说明它们是按时间列的",
+            )
+            _assert(
+                len(on_hits) <= 5,
+                f"兜底返回太多（{len(on_hits)} 条）—— 会把提示词塞满",
+            )
+
+            # ③ 提示词里要明说"未必相关"
+            hint = on.inject_hint(general_q)
+            _assert("未必" in hint or "无关" in hint or "最近记得" in hint,
+                    f"兜底段的标题没说明来源，模型会当它是答案：{hint[:120]}")
+            _assert(
+                "你想起以前聊到过的相关内容" not in hint,
+                "兜底时仍然用了「你想起以前聊到过的相关内容」—— 模型会以为这是被问到的",
+            )
+
+            # ④ 🔴 关键边界：**具体**问题落空时不许兜底
+            for concrete in (
+                "那个 C_Thru 插件怎么配",
+                "银松镇那个机关怎么过",
+                "《不存在的东西》是什么",
+            ):
+                got = on._retrieve_hits(concrete)
+                _assert(
+                    not any(h.get("fallback") for h in got),
+                    f"{concrete!r} 是具体问题（含专有名词）——"
+                    " 落空时该说不知道，不能端最近记忆上去",
+                )
+
+            # ⑤ 非"求列举"的问句也不兜底
+            for other in ("为什么天是蓝的", "这个怎么办", "怎么样才能早睡"):
+                got = on._retrieve_hits(other)
+                _assert(
+                    not any(h.get("fallback") for h in got),
+                    f"{other!r} 不是求列举的问句 —— 不该兜底",
+                )
+
+            # ⑥ 判据本身单独验一遍（不经过检索，避免被别的路掩盖）
+            _assert(on._looks_like_general_question("我在玩什么游戏"), "泛问判据漏了")
+            _assert(on._looks_like_general_question("我喜欢啥"), "「啥」没被认出来")
+            _assert(not on._looks_like_general_question("那个 C_Thru 怎么配"),
+                    "含专有名词的仍被判成泛问")
+            _assert(not on._looks_like_general_question("你好"), "普通寒暄被判成泛问")
+            # 求解释/求方法/求时间的问句，答案不在记忆里 —— 必须否决
+            for explain in ("为什么天是蓝的", "怎么早睡", "什么时候放假", "如何学英语"):
+                _assert(
+                    not on._looks_like_general_question(explain),
+                    f"{explain!r} 是求解释/求方法，不该判成泛问"
+                    "（第一版漏了这条，「为什么天是蓝的」靠'什么'混了进去）",
+                )
+
+            # ⑦ 兜底的排序质量：不许把 fixed 层、长文、闲聊一瞬排前面
+            #
+            # 实测教训（2026-10-20）：第一版 `ORDER BY ts DESC`，排第一的是
+            # 「用户曾不小心点到语音输入」；改成 importance 之后又轮到
+            # fixed 层那条人设长文（它已经每次无条件注入了，再兜一次是重复）。
+            svc = on
+            svc.remember_facts(
+                [
+                    "用户喜欢听《梦的翅膀受了伤》，累的时候会听",
+                    "用户曾不小心点到语音输入",
+                ]
+            )
+            # 造一条 fixed（模拟"固定注入"的人设），它不该出现在兜底里
+            fixed_row = svc.db.find_memory_by_text("用户喜欢听《梦的翅膀受了伤》，累的时候会听", level="recent")
+            _assert(fixed_row is not None, "测试前置：刚写的那条没找到")
+            svc.db.set_memory_level(int(fixed_row["id"]), "fixed")
+            fallback_rows = svc._recent_fallback("我喜欢什么", 5)
+            _assert(
+                not any(r["level"] == "fixed" for r in fallback_rows),
+                "fixed 层进了兜底 —— 它已经无条件注入，再端一次等于同一段话注入两遍",
+            )
+            _assert(
+                all(len(str(r["summary"] or "")) <= 120 for r in fallback_rows),
+                f"兜底里混进了长文：{[len(str(r['summary'])) for r in fallback_rows]}",
+            )
+
+            return (
+                f"关掉 0 条 / 打开 {len(on_hits)} 条；兜底条目标了来源、"
+                "3 个具体问题与 4 个求解释问句都拒绝兜底；fixed 与长文被排除"
+            )
+        finally:
+            for svc in services:
+                try:
+                    svc.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            shutil.rmtree(tmp, ignore_errors=True)
+
     @suite.check("检索层：专有名词兜底能把「语义远但字面命中」的记忆捞回来")
     def _() -> str:
         """§114 改动 4（2026-10-20 接入）。
@@ -6244,6 +6752,39 @@ def test_subjectivity(suite: SelfTest) -> None:
             "",
         )
         return "注意力 0.95 -> 0.06、档位 user、表情 curious、硬门关闭"
+
+    @suite.check("情绪快照带离散标签 dominant（渲染层不再自己猜表情）")
+    def _() -> str:
+        # 2026-10-21「把情绪接完」。
+        #
+        # 以前 `as_dict()` 只给 energy/mood/intimacy 三个**连续量**，渲染层要选表情
+        # 就得自己按阈值反推一遍 —— 而后端 prompt 里的语气用的是 `dominant` 那一套阈值。
+        # 两份阈值一旦不一致，就会出现「prompt 说她不爽、立绘却在笑」。
+        from .brains.base import EmotionState
+
+        # ① 标签必须跟快照一起下发，且与属性一致
+        snap = EmotionState(energy=0.75, mood=0.9, intimacy=0.6).as_dict()
+        _assert("dominant" in snap, f"快照里没有 dominant：{sorted(snap)}")
+        _assert(
+            isinstance(snap["dominant"], str),
+            f"dominant 应是字符串，实际 {type(snap['dominant']).__name__}",
+        )
+
+        # ② 四档边界各自落在预期标签上（顺序在 `dominant` 里有优先级）
+        cases = [
+            (EmotionState(energy=0.20, mood=0.90), "sleepy", "精力低优先于心情好"),
+            (EmotionState(energy=0.80, mood=0.95), "excited", "心情高 + 精力足"),
+            (EmotionState(energy=0.70, mood=0.70), "happy", "心情偏高"),
+            (EmotionState(energy=0.70, mood=0.10), "annoyed", "心情低"),
+        ]
+        for state, expect, why in cases:
+            got = state.as_dict()["dominant"]
+            _assert(got == expect, f"{why}：应为 {expect}，实际 {got}")
+
+        # ③ 数值字段没有被漏掉（加标签不能挤掉原来那三个）
+        for key in ("energy", "mood", "intimacy"):
+            _assert(key in snap, f"快照里少了 {key}")
+        return "dominant 随快照下发；sleepy/excited/happy/annoyed 四档边界正确"
 
     @suite.check("截图对话：看图配置默认关思考（否则正文是空的）")
     def _() -> str:

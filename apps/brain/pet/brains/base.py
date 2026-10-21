@@ -311,11 +311,23 @@ class EmotionState:
             return "curious"
         return "neutral"
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, object]:
+        """
+        情绪快照。
+
+        ⚠️ `dominant` 是**字符串**（不是 0~1 的数值），所以返回类型是
+        `dict[str, object]` 而不是 `dict[str, float]`。
+
+        为什么要带上它（2026-10-21，「把情绪接完」）：
+        离散表情的阈值只在**后端**这一处算（见 `dominant`），渲染层以前拿不到它，
+        只能自己从 mood 反推，于是"prompt 里说她有点不爽、立绘却在笑"。
+        现在标签跟着快照一起走，两边用的是同一个判断。
+        """
         return {
             "energy": round(self.energy, 3),
             "mood": round(self.mood, 3),
             "intimacy": round(self.intimacy, 3),
+            "dominant": self.dominant,
         }
 
     def describe(self) -> str:

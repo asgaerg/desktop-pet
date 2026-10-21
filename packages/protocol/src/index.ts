@@ -25,11 +25,28 @@ export type Priority = 'low' | 'normal' | 'high';
 
 export type ErrorLevel = 'info' | 'warn' | 'error';
 
+/**
+ * 情绪标签 —— 由三维度映射出来的**离散表情**。
+ *
+ * 为什么既要连续量又要标签：`mood`/`energy` 适合做渐变（呼吸快慢、困倦程度），
+ * 但"这一刻它是开心还是不爽"是**离散**的，用阈值在渲染层再推一遍必然和
+ * 后端（prompt 里的语气描述）对不上。所以由 `EmotionState.dominant` 统一给，
+ * 渲染层只管照着播。
+ */
+export type EmotionLabel = 'sleepy' | 'excited' | 'happy' | 'annoyed' | 'curious' | 'neutral';
+
 /** 情绪三维度，取值 0~1。驱动立绘表情与自主行为倾向 */
 export interface EmotionState {
   energy: number;
   mood: number;
   intimacy: number;
+  /**
+   * 离散表情标签（2026-10-21 加，"把情绪接完"）。
+   *
+   * 后端 `EmotionState.dominant` 已经按 energy/mood/intimacy 算好了，
+   * 以前没往外传，渲染层只能自己从 mood 猜，两边口径会漂。
+   */
+  dominant?: EmotionLabel;
 }
 
 /** 活泼度参数组。overall 是 UI 总滑杆，其余为可由它联动的分项 */

@@ -54,6 +54,50 @@ from pet.config import load_config  # noqa: E402
 from pet.memory import FactExtractor  # noqa: E402
 from pet.memory2 import MemoryService  # noqa: E402
 
+
+def score_importance(text: str) -> float:
+    """用 `tools/score-memory.py` 的规则给一条事实打分。
+
+    ## 为什么复用那个工具而不是在这里再写一份
+
+    那份规则是**要拿来评估和调参**的（用户明确要求"后续需要评估的时候
+    能用来优化结构"）。如果回填这里另写一套，那评估出来的分布和实际入库的
+    分数就是两回事 —— "两份实现迟早漂移"是这个项目反复踩的坑。
+
+    工具文件名带连字符，不能直接 `import`，所以用 importlib 按路径加载。
+
+    ⚠️ 加载失败时退回 0.5（= 旧行为），**不能让回填因为打分器出错而中断**。
+    """
+    global _scorer
+    if _scorer is None:
+        try:
+            import importlib.util
+
+            path = ROOT / "tools" / "score-memory.py"
+            spec = importlib.util.spec_from_file_location("score_memory", path)
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+            # ⚠️ **必须先注册进 `sys.modules` 再 exec**（2026-10-20 踩到）。
+            #
+            # 打分器里用了 `@dataclass`，而 dataclass 在编织类的时候会做
+            # `sys.modules.get(cls.__module__).__dict__` —— 模块还没注册
+            # 就会拿到 None，报 `AttributeError: 'NoneType' object has no
+            # attribute '__dict__'`，而且报错点在 dataclasses 内部，看不出根因。
+            #
+            # 这是 `module_from_spec` + dataclass 的固定组合坑。
+            sys.modules.setdefault("score_memory", module)
+            spec.loader.exec_module(module)  # type: ignore[union-attr]
+            _scorer = module
+        except Exception as exc:  # noqa: BLE001
+            print(f"    ⚠️ 打分器加载失败（退回 0.5）：{type(exc).__name__}: {exc}")
+            _scorer = False
+    if _scorer is False:
+        return 0.5
+    return float(_scorer.score_text(text).score)
+
+
+_scorer: Any = None
+
 # 与之前实测一致的中文口径
 TOKENS_PER_CHAR = 1.25
 # DeepSeek 价格（USD / 1M token，空闲时段；官方 2026-10-05 核实）
@@ -211,17 +255,32 @@ async def run_extract(chunks: list[dict[str, Any]], limit: int | None, dry: bool
         if not facts and extractor.failures:
             total_fail += 1
         if facts:
-            written = mem.remember_facts(
-                facts,
-                kind="fact",
-                level="recent",
-                importance=0.5,
-                src_table="raw_log",
-                # ⚠️ **必须传时间**：这些事实来自几天前的对话，不传就全变成"今天"，
-                #    而提示词的每一段都要带时间 -> "用户在做桌面宠物项目（今天）"
-                #    就在说谎，AI 会把旧事当成刚发生的事说。
-                ts=c["ts0"] or None,
-            )
+            """
+            ## ⚠️ 逐条写入，每条**自己打分**（2026-10-20 改）
+
+            原来是整批传 `importance=0.5` —— 但那是个假分数：
+            `recent_memories`（泛问句兜底）**靠 importance 排序**，
+            全是 0.5 就等于按时间排，兜底必然端上"最近一次闲聊"（实测过）。
+
+            所以逐条调 `tools/score-memory.py` 的规则打分器
+            （纯规则、不花钱、可解释、可复现）。
+
+            ⚠️ 逐条写 = 多几次 SQL 往返，但回填本来就是离线批量跑，
+            这点开销远小于"排序没区分力"的代价。
+            """
+            written = 0
+            for fact in facts:
+                written += mem.remember_facts(
+                    [fact],
+                    kind="fact",
+                    level="recent",
+                    importance=score_importance(fact),
+                    src_table="raw_log",
+                    # ⚠️ **必须传时间**：这些事实来自几天前的对话，不传就全变成"今天"，
+                    #    而提示词的每一段都要带时间 -> "用户在做桌面宠物项目（今天）"
+                    #    就在说谎，AI 会把旧事当成刚发生的事说。
+                    ts=c["ts0"] or None,
+                )
             total_facts += written
             print(
                 f"    [{c['idx']:>2}] {fmt_time(c['ts0'])} {c['chars']:>5} 字 -> "

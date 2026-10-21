@@ -1033,6 +1033,17 @@ input[type='date']:focus {
   color: var(--ok);
 }
 
+/*
+ * 「它自己」—— 玩伴自己做的事（2026-10-21）。
+ *
+ * 用紫色与「事实（蓝）/ 常说的话（橙）/ 人设（绿）」区分开：
+ * 扫列表时一眼能看出"这条记的是它自己的事，不是用户的"。
+ */
+.kind-self {
+  border-color: rgba(160, 110, 240, 0.45);
+  color: #b48cf0;
+}
+
 /* 窄列：时间 / 类型 / 命中次数 / 状态 / 操作 —— 内容列吃掉剩余宽度 */
 .grid .col-time { width: 96px; }
 .grid .col-kind { width: 78px; }
