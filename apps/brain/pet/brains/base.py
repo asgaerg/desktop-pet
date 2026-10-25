@@ -236,28 +236,75 @@ class Brain:
 
 class EmotionState:
     """
-    情绪三维度：精力 / 情绪 / 亲近度，取值 0~1。
+    情绪三维度：精力 / 心情 / 亲近度，取值 0~1。
+
+    ## 2026-10-23 重做动力学（用户第七轮定稿）
+
+    三件套不再是"装饰性的三个数"，它们现在**直接驱动状态机**（见 `pet/state.py`）：
+
+        精力 < 0.4          -> 转「安静」（且粘滞）
+        心情 > 0.78 / < 0.2 -> 立绘兴奋 / 不爽
+        亲近度              -> 抬高或压低语言层的「温度」
+
+    具体数值见各常量，这里只强调三条**定稿的口径**：
+
+    1. **心情回归 3%/分钟**（原来是 8%）。原值 10 分钟就抹平一次开心对话，
+       用户要求慢下来 —— 现在大约半小时才明显回落。
+    2. **亲近度按自身比例衰减 3%/分钟**（原来只增不减）。
+       指数衰减意味着"越高掉得越多"，所以它会稳定在一个被聊天频率支撑的水平，
+       比线性衰减更像记忆的自然淡化。
+    3. **被打扰会掉心情**（`on_user_message` 的 `attention` 参数）。
+       用户原话：「就像是宠物被打扰了一样，不过多聊几句就好了」。
 
     作用不是装饰，而是让宠物"不是复读机"：
-      · 影响台词口吻（这里传给 mock 与 system prompt 的活泼度描述）；
+      · 影响台词口吻（system prompt 的情绪描述）；
       · 影响立绘表情（通过 pet.emotion 事件）；
-      · 将来影响自主发言意愿（P5 的 Autonomy 会读它）。
-
-    动力学很简单，但必须"缓慢变化 + 自然回落"：一轮对话不改人格。
+      · 驱动自主调度（状态机读精力）。
     """
 
     EMOTIONS = EMOTIONS
 
-    def __init__(self, energy: float = 0.7, mood: float = 0.55, intimacy: float = 0.2) -> None:
+    # ── 定稿常量（2026-10-23）──────────────────────────────────────────────
+    # 心情初值 0.55 -> 0.3（用户第七轮：「心情0.3 起」）。
+    # 起点偏低是有意的：这样"被打扰""被夸"这些事件才看得出方向。
+    MOOD_INIT = 0.3
+    # 心情回归速率（每分钟，向 0.5 靠拢的比例）。8% -> 3%。
+    MOOD_REGRESS_PER_MIN = 0.03
+    # 心情的不爽线（<0.2 才"不爽"，原来是 0.3）。
+    MOOD_ANNOYED = 0.2
+    # 心情的兴奋线。
+    MOOD_EXCITED = 0.78
+    # 亲近度按自身比例衰减（每分钟）。
+    INTIMACY_DECAY_PER_MIN = 0.03
+    # 被打扰时心情的最大降幅（attention=1.0 时）。
+    MOOD_INTERRUPT_MAX = 0.2
+
+    def __init__(
+        self,
+        energy: float = 0.7,
+        mood: float = MOOD_INIT,
+        intimacy: float = 0.2,
+    ) -> None:
         self.energy = clamp01(energy, 0.7)
-        self.mood = clamp01(mood, 0.55)
+        self.mood = clamp01(mood, self.MOOD_INIT)
         self.intimacy = clamp01(intimacy, 0.2)
         self._last_update = time.time()
         # 好奇心到期时间（截图对话戳"好奇"表情用，见 on_curious）
         self._curious_until = 0.0
+        # 「被打扰」连续计数：连续几轮用户说话而注意力还在自己这边。
+        #
+        # ⚠️ 用**计数**而不是时间：用户连发三条短消息和一条长消息应当等价
+        #    （用户原话「多聊几句就好了」——"几句"是句数，不是时长）。
+        self._interrupt_streak = 0
 
     def tick(self) -> None:
-        """时间流逝：精力缓慢衰减，情绪回归中性。挂机久了会犯困。"""
+        """
+        时间流逝：精力衰减、心情回归中性、亲近度自然淡化。
+
+        ⚠️ 心情用 `(0.5 - mood) × 速率` 而不是 `mood × 速率`：
+        前者是"回归中性"，后者是"向 0 衰减"。心情低于 0.5 时前者会**回升**，
+        这正是想要的 —— 不爽过一阵子会自己缓过来，不用谁来哄。
+        """
         now = time.time()
         elapsed = min(now - self._last_update, 600.0)
         self._last_update = now
@@ -267,15 +314,66 @@ class EmotionState:
         minutes = elapsed / 60.0
         self.energy = clamp01(self.energy - 0.012 * minutes, self.energy)
         self.mood = clamp01(
-            self.mood + (0.5 - self.mood) * min(0.08 * minutes, 0.5), self.mood
+            self.mood + (0.5 - self.mood) * min(self.MOOD_REGRESS_PER_MIN * minutes, 0.5),
+            self.mood,
         )
+        # 亲近度：指数衰减。只增不减会让"疏远"永远不可能发生。
+        decay = 1.0 - self.INTIMACY_DECAY_PER_MIN * minutes
+        self.intimacy = clamp01(self.intimacy * max(0.0, decay), self.intimacy)
 
-    def on_user_message(self, text: str) -> None:
-        """被打招呼就精神一振；长消息稍微更费神。"""
+    def on_user_message(self, text: str, attention: float = 0.0) -> None:
+        """
+        用户说话。
+
+        ## 「被打扰」机制（2026-10-23，用户第七轮定稿）
+
+        用户原话：
+
+        > 「注意力在宠物时，宠物注意力在自己越高越专注，心情降的越多，最高降0.2。」
+
+        所以：注意力在**宠物自己**那边（attention 越大越专注）时，
+        用户说话会让心情**下降** —— 像被打扰了。
+
+        ```
+        心情 -= attention × 0.2
+        ```
+
+        attention 最大 1.0，所以降幅**天然封顶 0.2**，不需要额外 min()。
+
+        ⚠️ 为什么用 attention 而不是固定值：专注程度不同，被打扰的烦躁也不同。
+        心不在焉（0.3）时被叫一声几乎不烦；完全沉浸（0.95）时被叫会很烦。
+
+        ⚠️ 「多聊几句就好了」：注意力被拉到用户那边（attention 变小）之后，
+        这个惩罚自然消失，心情恢复正常 +0.04。不需要额外的"恢复计时器"。
+        """
         self.tick()
         self.energy = clamp01(self.energy + 0.10, self.energy)
+        # 被打扰的判定放在 +0.04 之前：先扣再给，两者可以抵消一部分，
+        # 效果是"被打扰时涨幅被吃掉，甚至为负"，而不用写两套分支。
+        #
+        # ⚠️ 只在**注意力真的在宠物自己那边**时才惩罚（attention > 0.5）。
+        #    原来写的是"penalty > 0.01"，那等于 attention > 0.05 就开始扣 ——
+        #    实测 attention=0.2（注意力在用户那边）也会被扣 0.04，
+        #    正好抵消掉 +0.04，表现为"用户说话心情纹丝不动"。
+        #    用户的原话是"注意力在宠物自身时"，所以分界就该是 0.5。
+        attention_now = max(0.0, min(1.0, attention))
+        if attention_now > 0.5:
+            # 超过 0.5 之后按"专注程度"线性加罚：0.5 时为 0，1.0 时满额 0.2。
+            # 这样刚过中线只是轻微不爽，完全沉浸才是明显被打扰。
+            penalty = (attention_now - 0.5) * 2.0 * self.MOOD_INTERRUPT_MAX
+            self.mood = clamp01(self.mood - penalty, self.mood)
+            self._interrupt_streak += 1
+        else:
+            self._interrupt_streak = 0
         self.mood = clamp01(self.mood + 0.04, self.mood)
-        self.intimacy = clamp01(self.intimacy + min(0.02 + len(text) / 4000.0, 0.05), self.intimacy)
+        self.intimacy = clamp01(
+            self.intimacy + min(0.02 + len(text) / 4000.0, 0.05), self.intimacy
+        )
+
+    @property
+    def interrupt_streak(self) -> int:
+        """连续被打扰了几轮（诊断 / 日志用）。"""
+        return self._interrupt_streak
 
     def on_curious(self, seconds: float = 90.0) -> None:
         """
@@ -294,14 +392,18 @@ class EmotionState:
 
     @property
     def dominant(self) -> str:
-        """映射到立绘表情用的情绪标签。"""
+        """映射到立绘表情用的情绪标签。
+
+        ⚠️ 阈值来自类常量（`MOOD_EXCITED` / `MOOD_ANNOYED`），不要在这里写死数字 ——
+        2026-10-23 改过一次（不爽线 0.3 -> 0.2），散落的字面量必然漏改。
+        """
         if self.energy < 0.28:
             return "sleepy"
-        if self.mood > 0.78 and self.energy > 0.6:
+        if self.mood > self.MOOD_EXCITED and self.energy > 0.6:
             return "excited"
         if self.mood > 0.62:
             return "happy"
-        if self.mood < 0.3:
+        if self.mood < self.MOOD_ANNOYED:
             return "annoyed"
         # 被触发的好奇心优先于随机好奇（截图对话会调 on_curious）。
         # ⚠️ 它是**有时限**的：不能因为看过一次截图就永远一脸好奇。
@@ -331,11 +433,15 @@ class EmotionState:
         }
 
     def describe(self) -> str:
-        """给 system prompt 用的一句状态描述。"""
+        """给 system prompt 用的一句状态描述。
+
+        ⚠️ 阈值同样走类常量（与 `dominant` 同一套），避免两处漂移 ——
+        表现是"提示词说她开心、立绘却在生气"。
+        """
         if self.energy < 0.3:
             return "你现在很困，反应慢，说话懒洋洋的。"
         if self.mood > 0.75:
             return "你现在心情特别好，话里带笑。"
-        if self.mood < 0.3:
+        if self.mood < self.MOOD_ANNOYED:
             return "你现在有点不爽，说话冲一点但别刻薄。"
         return "你状态平稳。"

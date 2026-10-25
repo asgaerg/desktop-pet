@@ -55,12 +55,15 @@ needs 缺任何一个 -> 注册着、显示着、但**永不触发**（dormant=T
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 from .protocol import clamp01
+
+log = logging.getLogger(__name__)
 
 # ── 能力表：True = 现在就能做 ──
 #
@@ -107,6 +110,12 @@ class EventSpec:
     todo: str = ""
     # 可选：真正的执行器。`ctx` 里给 rng / interests / recent_events 等
     handler: Optional[Callable[[dict[str, Any]], Awaitable[Optional[str]]]] = None
+    # 这次事件最多占槽多久（秒）。None = 瞬时事件，不占槽。
+    #
+    # ⚠️ 只有"进行中"的事件才占槽（好奇搜索、看小说这类）。
+    #    唱歌、想一起打游戏是**瞬时**的 —— 说完就完了，占槽会让它
+    #    在接下来几分钟里什么都不能做。
+    duration_s: Optional[float] = None
 
     @property
     def dormant(self) -> bool:
@@ -176,6 +185,30 @@ def _specs() -> list[EventSpec]:
             impression="它心里存着点自己的事，不全是你",
             detail="它翻出自己在意的东西，发了会儿呆",
         ),
+        # ── 好奇的自主搜索（2026-10-25 从独立流程并进来）──
+        #
+        # 用户原话：「把好奇搜索也拿出来加入事件模块，主要是后面如果触发了
+        # 其他事件，难不成每次都要写防止冲突方法，所以单独立成模块，
+        # 要就调用，**同一时间不存在两个事件就可以了**。」
+        #
+        # ⚠️ `duration_s` 是这次并入的关键：搜索/催促是**进行中**的事件，
+        #    要占槽。占着槽的时候别的随机事件抽不到、精力判定也不会打断它。
+        #
+        # ⚠️ 给 15 分钟：催 10 次最长要 400 秒（纯文本）+ 每次生成台词的时间，
+        #    再加搜索那 5 轮（每轮可能 10~20 秒）。给短了会被超时兜底提前掐断。
+        EventSpec(
+            kind="curious_search",
+            label="自己去查个明白",
+            needs=("web_search",),
+            weight=1.4,          # 比其它事件权重高：用户把它当重点功能
+            cooldown_s=1800.0,
+            mood_delta=0.08,
+            energy_delta=-0.05,
+            attention_delta=0.20,
+            impression="它有自己的好奇心，会为了搞明白一件事去查",
+            detail="它自己上网查了点东西",
+            duration_s=15 * 60.0,
+        ),
     ]
 
 
@@ -219,9 +252,73 @@ class EventOutcome:
     attention_delta: float = 0.0
 
 
+@dataclass
+class EventRun:
+    """一次"进行中的事件"（占用槽位的那一个）。
+
+    ## 为什么需要这个类型而不是只存一个字符串
+
+    因为它要能**自动超时**。事件执行中抛异常/卡住时，如果只存了 kind，
+    槽会永久被占 —— 表现是"它再也不做任何事了"（所有事件都判定"有事在做"）。
+    带上 `ends_at` 才能兜底。
+    """
+
+    kind: str
+    label: str
+    started_at: float
+    #: 预计结束时刻（超过它视为卡死，自动释放）
+    ends_at: float
+    detail: str = ""
+
+    def expired(self, now: float) -> bool:
+        return now >= self.ends_at
+
+    def __str__(self) -> str:
+        return f"{self.label}（{self.kind}）"
+
+
+@dataclass
+class Rule:
+    """一条**条件事件**：条件满足就执行（不是概率抽签）。
+
+    ## 为什么条件事件和随机事件要分开
+
+    用户原话：「达到什么条件就触发什么事件」。
+
+    但两者的调度方式**根本不同**：
+
+    | | 条件事件（本类） | 随机事件（`EventSpec`） |
+    |---|---|---|
+    | 触发 | 条件满足**就**触发 | 概率抽签 |
+    | 频率 | 每次 tick 都判定 | 有全局间隔 + 日上限 |
+    | 重复 | 条件不成立才停 | 有 cooldown |
+
+    如果混成一个列表，条件事件会被"全局间隔"和"概率"卡住 ——
+    表现是**"精力都 0.1 了还不安静"**。所以同一个模块、两套调度。
+
+    ## `priority` 替代了原来的 if 链行序
+
+    以前状态切换的规则顺序只存在于 `state.py::tick()` 的代码行序里，
+    没有任何声明。现在变成数据字段：可读、可测、可调。
+    """
+
+    kind: str
+    label: str
+    #: 条件。返回 True 表示"该触发了"。
+    when: Callable[[dict[str, Any]], bool]
+    #: 动作。返回一段说明（记日志用）；返回 None 表示"其实不用做"。
+    then: Callable[[dict[str, Any]], Awaitable[Optional[str]]]
+    #: 排序依据（小的先判）。同值按注册顺序。
+    priority: int = 100
+    #: 说明（设置页 / 诊断用）
+    detail: str = ""
+    #: 是否启用（用户可关掉某条规则）
+    enabled: bool = True
+
+
 class EventEngine:
     """
-    决定"现在做不做一件事""做哪件"。
+    决定"现在做不做一件事""做哪件"，并保证**同一时间只有一个事件**。
 
     ## 什么时候不该触发
 
@@ -231,7 +328,22 @@ class EventEngine:
     这个事件冷却中              -> 不触发
     安静时段（quiet_hours）     -> 不触发
     触发概率没抽中              -> 不触发
+    **槽位被占**                -> 不触发（2026-10-25 加）
     ```
+
+    ## 🔴 单占位槽：为什么不用"每个事件自己判断别人在不在"
+
+    用户原话：
+
+    > 「后面如果触发了其他事件，难不成每次都要写防止冲突方法，
+    > 所以单独立成模块，要就调用，**同一时间不存在两个事件就可以了**。」
+
+    如果每个事件都写 `if not busy_with_B and not busy_with_C: ...`，
+    加第 N 个事件要改 N-1 处 —— N² 的复杂度，而且必然漏。
+    漏了的表现是"它一边搜着东西一边开始自言自语"。
+
+    用一个槽位表达之后：每个事件只问"槽空不空"，加新事件**零改动**。
+    冲突不再是"规则问题"，而是**结构上不可能**。
 
     ## 为什么是"概率"而不是"定时"
 
@@ -254,6 +366,7 @@ class EventEngine:
         quiet_hours: Optional[list[Any]] = None,
         max_per_day: int = 12,
         rng: Optional[random.Random] = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.base_chance = clamp01(base_chance)
         self.min_gap_s = float(min_gap_s)
@@ -261,9 +374,85 @@ class EventEngine:
         self.quiet_hours = list(quiet_hours or [])
         self.max_per_day = int(max_per_day)
         self.rng = rng or random.Random()
+        self._clock = clock
         # 运行时统计（诊断用）
         self.fired = 0
         self.skipped: dict[str, int] = {}
+        # 🔴 单占位槽（2026-10-25）：同一时间只允许一个事件。
+        self.current: Optional[EventRun] = None
+        #: 超时被强制释放的次数（诊断"duration_s 给短了"的关键指标）
+        self.timeouts = 0
+        #: 条件事件表（2026-10-25）。按 priority 排序。
+        self.rules: list[Rule] = []
+
+    # ------------------------------------------------------- 单占位槽（互斥）
+
+    @property
+    def busy(self) -> bool:
+        """有没有事件正在进行。
+
+        ⚠️ 读的时候**顺便检查超时**：如果只在 tick 里检查，那么
+        "事件卡死 -> 谁都不做事"会一直持续到下一次 tick（最长 30 秒）。
+        放在 property 里，任何一处读 `busy` 都会触发清理。
+        """
+        self._expire_if_needed()
+        return self.current is not None
+
+    @property
+    def current_kind(self) -> str:
+        self._expire_if_needed()
+        return self.current.kind if self.current else ""
+
+    def _expire_if_needed(self) -> None:
+        run = self.current
+        if run is None:
+            return
+        now = self._clock()
+        if run.expired(now):
+            self.timeouts += 1
+            self.current = None
+            # ⚠️ 必须记日志：否则"事件为什么提前结束"永远查不到。
+            #    超时率还是诊断"duration_s 给短了"的关键指标。
+            log.warning(
+                "事件「%s」超时被强制释放（占槽 %.0f 秒）—— 检查 duration_s 是否给短了",
+                run.label,
+                now - run.started_at,
+            )
+
+    def acquire(self, kind: str, label: str, duration_s: Optional[float]) -> bool:
+        """抢槽。槽空则成功；**槽被占直接返回 False（不排队）**。
+
+        ## 为什么不排队
+
+        排队解决不了排队。上一个事件还在搜，排队的第三个事件等到槽空时
+        情境早就变了 —— 直接丢弃更符合"它没顾上"。
+
+        `duration_s=None` 表示瞬时事件，**不占槽**（唱歌、想打游戏这类
+        说完就完了，占槽会让它接下来几分钟什么都不能做）。
+        """
+        self._expire_if_needed()
+        if duration_s is None:
+            return True
+        if self.current is not None:
+            return False
+        now = self._clock()
+        self.current = EventRun(
+            kind=kind,
+            label=label,
+            started_at=now,
+            ends_at=now + max(1.0, float(duration_s)),
+        )
+        return True
+
+    def release(self, kind: str) -> None:
+        """放槽。
+
+        ⚠️ **必须校验 kind**：事件 A 超时被释放、B 抢到了槽，这时 A 结束
+        去 release()，如果不校验就会把 B 的槽清掉 ——
+        表现是"B 做到一半突然不算在做了"。
+        """
+        if self.current is not None and self.current.kind == kind:
+            self.current = None
 
     # ---------------------------------------------------------------- 判定
 
@@ -318,6 +507,11 @@ class EventEngine:
             return False, f"dormant:缺{'+'.join(spec.missing())}"
         if in_conversation:
             return False, "in_conversation"
+        # 🔴 槽位被占 -> 不触发（2026-10-25 单占位槽）。
+        #    这一条就是"同一时间不存在两个事件"的全部实现 ——
+        #    不需要每个事件自己去判断别人在不在。
+        if self.busy:
+            return False, "busy"
         if self.in_quiet_hours(now):
             return False, "quiet_hours"
         if now - last_interaction_at < self.idle_before_s:
@@ -346,6 +540,10 @@ class EventEngine:
         `last_by_kind` 用来判单个事件的冷却；`recent_kinds` 用来避免连续重复。
         """
         # ① 概率闸（不定时的来源）
+        # ⚠️ 槽位被占时**连抽都不抽** —— 先判这个比先抽更省（也更准：
+        #    日志里"busy"比"chance"更能解释"它为什么没做事"）。
+        if self.busy:
+            return None, "busy"
         chance = clamp01(self.base_chance * (0.5 + clamp01(vitality)))
         if self.rng.random() > chance:
             return None, "chance"
@@ -402,28 +600,98 @@ class EventEngine:
 
         ⚠️ 没做成要**什么都不留下**：否则会出现"它说我搜了哲学句子"
         但其实搜索失败了 —— 那是编造，用户会当场发现。
+
+        ## 占槽（2026-10-25）
+
+        带 `duration_s` 的事件（好奇搜索这类"进行中"的）在**执行期间**占槽：
+
+            抢到槽 -> 执行 handler -> 释放槽
+
+        抢不到（槽已被别的占用）就直接放弃 —— 不排队。
+        `duration_s=None` 的瞬时事件不占槽（唱歌、想打游戏说完就完了）。
+
+        ⚠️ `finally` 里释放：handler 抛异常也必须把槽还回去，
+        否则这个事件永久占着，之后所有事件都判定"有事在做"。
         """
-        detail = spec.detail
-        if spec.handler is not None:
+        owns_slot = spec.duration_s is not None
+        if owns_slot:
+            if not self.acquire(spec.kind, spec.label, spec.duration_s):
+                log.debug("事件「%s」抢槽失败（已有事件在进行）", spec.label)
+                return None
+        try:
+            detail = spec.detail
+            if spec.handler is not None:
+                try:
+                    produced = await spec.handler(ctx)
+                except Exception:  # noqa: BLE001 —— 事件失败绝不能影响对话
+                    log.exception("事件「%s」执行失败（已忽略）", spec.label)
+                    return None
+                if produced is None:
+                    return None
+                detail = produced
+            if not detail:
+                return None
+            self.fired += 1
+            return EventOutcome(
+                spec=spec,
+                detail=detail,
+                impression=spec.impression,
+                mood_delta=spec.mood_delta,
+                energy_delta=spec.energy_delta,
+                intimacy_delta=spec.intimacy_delta,
+                attention_delta=spec.attention_delta,
+            )
+        finally:
+            if owns_slot:
+                self.release(spec.kind)
+
+    # --------------------------------------------------- 条件事件（2026-10-25）
+
+    def add_rule(self, rule: Rule) -> None:
+        """注册一条条件事件。"""
+        self.rules.append(rule)
+        self.rules.sort(key=lambda r: r.priority)
+
+    def check_rules(self, ctx: dict[str, Any]) -> list[Rule]:
+        """返回**所有条件成立**的规则（按 priority 排序）。
+
+        ## 为什么返回列表而不是只返回第一条
+
+        条件事件之间通常互斥（精力低 -> 安静，30 分钟没聊天 -> 无聊），
+        但**不保证**。调用方拿到列表后按顺序执行、执行完重判，
+        这样"两条都成立"时不会丢信息。
+
+        ## ⚠️ 槽位被占时一条都不触发
+
+        用户原话：「就算精力下降至0.4以下，仍然不变化状态至安静，
+        必须等事件结束或功能退出，才能进行精力等判定转换状态。」
+
+        所以"有事在做"是**所有**条件规则的共同前置，不是某几条的。
+        放在这里统一判，避免每条规则各写一遍（那正是用户要消灭的东西）。
+        """
+        if self.busy:
+            return []
+        out: list[Rule] = []
+        for rule in self.rules:
+            if not rule.enabled:
+                continue
             try:
-                produced = await spec.handler(ctx)
-            except Exception:  # noqa: BLE001 —— 事件失败绝不能影响对话
-                return None
-            if produced is None:
-                return None
-            detail = produced
-        if not detail:
+                if rule.when(ctx):
+                    out.append(rule)
+            except Exception:  # noqa: BLE001 —— 一条规则写错不能拖垮其它规则
+                log.exception("条件事件「%s」的 when 抛异常（已跳过）", rule.kind)
+        return out
+
+    async def fire_rule(self, rule: Rule, ctx: dict[str, Any]) -> Optional[str]:
+        """执行一条条件事件，返回说明（None = 其实不用做）。"""
+        try:
+            detail = await rule.then(ctx)
+        except Exception:  # noqa: BLE001 —— 规则失败不能影响对话
+            log.exception("条件事件「%s」的 then 抛异常（已忽略）", rule.kind)
             return None
-        self.fired += 1
-        return EventOutcome(
-            spec=spec,
-            detail=detail,
-            impression=spec.impression,
-            mood_delta=spec.mood_delta,
-            energy_delta=spec.energy_delta,
-            intimacy_delta=spec.intimacy_delta,
-            attention_delta=spec.attention_delta,
-        )
+        if detail:
+            self.fired += 1
+        return detail
 
     def snapshot(self) -> dict[str, Any]:
         return {

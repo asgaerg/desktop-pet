@@ -2542,7 +2542,7 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
         'toggleChatMode',
         // 语音播报（2026-10-14）：菜单开关，真源是 persona.yaml 的 providers.tts.enabled
         'toggleTtsSpeech',
-      'toggleEdgePeek', 'peekSettings', 'setActivity', 'setPetScale', 'openLogs', 'settings',
+      'toggleEdgePeek', 'peekSettings', 'setPetState', 'setPetScale', 'openLogs', 'settings',
       'memory', 'quit', 'quitAll',
       // 截图对话（2026-10-17 用户要求）：菜单项 + 快捷键共用一个动作
       'snapshotChat',
@@ -2581,10 +2581,10 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
       '找不到：' + unresolved.join(', ') + '（对不上就会被置灰成「未实现」）',
     );
     check('scale: 映射到 setPetScale', resolveHandlerKey('scale:1') === 'setPetScale');
-    check('activity: 映射到 setActivity', resolveHandlerKey('activity:0.5') === 'setActivity');
+    check('state: 映射到 setPetState', resolveHandlerKey('state:quiet') === 'setPetState');
 
     /*
-     * 活泼度四档的文案（2026-10-17 用户要求改名 + 加后缀）。
+     * 四个状态的文案（2026-10-23：由「活泼度」改名而来，用户要求「将活泼度替换成状态」）。
      *
      * ## 为什么要写死在这
      *
@@ -2593,40 +2593,71 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
      *   会自主截图        这一档会自己抓屏（前提：用户开了「允许偶尔截图」）
      *   注意力在谁身上     0 = 全在用户，1 = 全在它自己
      *
-     * 名字来自 §115 拍板（安静/普通/好奇/自言自语）。老文案是
+     * 名字来自 §115 拍板（安静/无聊/好奇/自言自语）。老文案是
      * 「活泼（0.8）」「话痨（1.0）」—— 那两个名字**没拍板过**，是占位写法。
      *
      * 断言两件事：四档齐全且顺序对；**只有后两档**带「会自主截图」。
-     * 后者是关键 —— 要是哪天有人给「普通」也加上，用户会以为
+     * 后者是关键 —— 要是哪天有人给「无聊」也加上，用户会以为
      * 它随时在偷看屏幕（而那是隐私开关才能决定的事）。
      */
-    const activityNode = menuItems.find((i) => i.label === '活泼度');
-    const activityLabels = (activityNode?.submenu ?? []).map((i) => i.label);
-    const EXPECTED_ACTIVITY = [
+    const stateNode = menuItems.find((i) => i.label === '状态');
+    const stateLabels = (stateNode?.submenu ?? []).map((i) => i.label);
+    const EXPECTED_STATE = [
       '安静 · 注意力在你身上，不截图',
       '无聊 · 自己找事做，偶尔发呆',
       '好奇 · 会自主截图，偶尔搭话',
       '自言自语 · 注意力在自己，会自主截图，20 分钟后安静',
     ];
     check(
-      '活泼度：四档文案与顺序对',
-      JSON.stringify(activityLabels) === JSON.stringify(EXPECTED_ACTIVITY),
-      `实际：${JSON.stringify(activityLabels)}`,
+      '状态：四档文案与顺序对',
+      JSON.stringify(stateLabels) === JSON.stringify(EXPECTED_STATE),
+      `实际：${JSON.stringify(stateLabels)}`,
     );
-    const autoShot = activityLabels.filter((s) => (s ?? '').includes('会自主截图'));
+    const autoShot = stateLabels.filter((s) => (s ?? '').includes('会自主截图'));
     check(
-      '活泼度：只有「好奇」「自言自语」两档标了会自主截图',
+      '状态：只有「好奇」「自言自语」两档标了会自主截图',
       autoShot.length === 2 &&
         autoShot[0].startsWith('好奇') &&
         autoShot[1].startsWith('自言自语'),
       `实际 ${autoShot.length} 档：${JSON.stringify(autoShot)}`,
     );
     /*
-     * 父行右侧显示**最近的档位名**（2026-10-17 用户要求）。
+     * 父行右侧显示**当前状态名**。
      *
-     * 四个档位是 0.1 / 0.5 / 0.8 / 1.0，滑杆可以停在 0.6 这种中间值 ——
-     * 那时候一个档都不勾（`near` 容差 0.01），父行还显示 `0.60` 的话
-     * 用户会以为"当前没选中任何档"。所以按距离取最近的档名。
+     * ## 2026-10-23 改成优先读 `petState`
+     *
+     * 以前是"按 activity 数值取最近的档名"。现在状态**会自己变**
+     * （精力低转安静、30 分钟没聊天转无聊、随机事件触发好奇），
+     * 数值只是"多久开口一次"的量化参数，与状态不再一一对应 ——
+     * 按数值猜会出现"菜单显示无聊、其实它在安静"。
+     *
+     * 所以有 `petState` 就用它；没有（刚启动、后端还没回报）才退回按数值猜。
+     */
+    for (const [petState, want] of [
+      ['quiet', '安静'],
+      ['bored', '无聊'],
+      ['curious', '好奇'],
+      ['monologue', '自言自语'],
+    ]) {
+      const node = buildPetMenuTemplate({
+        visible: true, paused: false, visionWatching: false,
+        thinking: true, activity: 0.5, petState, petScale: 1, edgePeek: true,
+        chatVisible: true, bubbleVisible: true, statusVisible: true,
+        webSearchMode: 'off', ttsSpeechEnabled: true, immersiveMode: false,
+        micDevices: [], micDeviceId: '',
+      });
+      const shown = node.find((i) => i.label === '状态')?.value;
+      check(
+        `状态：petState=${petState} 显示「${want}」`,
+        shown === want,
+        `实际显示了 ${JSON.stringify(shown)}`,
+      );
+    }
+    /*
+     * 退回逻辑：没有 petState 时按 activity 数值猜最近的档名。
+     *
+     * 为什么保留这条：刚启动那一刻后端还没回报状态，`petState` 是空串。
+     * 此时菜单不能显示空白 —— 用户会以为"状态丢了"。
      */
     for (const [raw, want] of [
       [0.1, '安静'],
@@ -2637,22 +2668,22 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
     ]) {
       const node = buildPetMenuTemplate({
         visible: true, paused: false, visionWatching: false,
-        thinking: true, activity: raw, petScale: 1, edgePeek: true,
+        thinking: true, activity: raw, petState: '', petScale: 1, edgePeek: true,
         chatVisible: true, bubbleVisible: true, statusVisible: true,
         webSearchMode: 'off', ttsSpeechEnabled: true, immersiveMode: false,
         micDevices: [], micDeviceId: '',
       });
-      const shown = node.find((i) => i.label === '活泼度')?.value;
+      const shown = node.find((i) => i.label === '状态')?.value;
       check(
-        `活泼度：${raw} 显示最近的档位名「${want}」`,
+        `状态：无 petState 时 ${raw} 退回按数值猜「${want}」`,
         shown === want,
         `实际显示了 ${JSON.stringify(shown)}`,
       );
     }
 
-    const attentionTiers = activityLabels.filter((s) => (s ?? '').includes('注意力'));
+    const attentionTiers = stateLabels.filter((s) => (s ?? '').includes('注意力'));
     check(
-      '活泼度：只有两端标了注意力在谁身上',
+      '状态：只有两端标了注意力在谁身上',
       attentionTiers.length === 2 &&
         attentionTiers[0].startsWith('安静') &&
         attentionTiers[1].startsWith('自言自语'),
@@ -2744,7 +2775,10 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
     //    设置窗口，用户要求换成「聊天模式」开关，已删除
     'toggle-chat', 'toggle-bubble', 'toggle-immersive', 'toggle-vision', 'toggle-visible', 'toggle-pause',
 
-    'activity', 'scale', 'open-logs', 'settings', 'memory', 'quit', 'quit-all',
+    // 2026-10-23：`activity` 改名为 `state`（用户要求「将活泼度替换成状态」）。
+    // 保留 `activity` 是因为菜单里可能还有旧入口（设置页那种），
+    // 但主路径已经是 `state`。
+    'activity', 'state', 'scale', 'open-logs', 'settings', 'memory', 'quit', 'quit-all',
     // 截图对话（2026-10-17 用户要求）：菜单项 + Ctrl+Alt+S 共用同一个动作
     'snapshot-chat',
 
@@ -4807,6 +4841,73 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
   }
 
   /*
+   * ---- 最高条例的列表读写（2026-10-25）----
+   *
+   * 这是新增的一对函数（`readList` / `writeList`），第一版就要测住三件事：
+   *
+   *   ① **读写往返一致**（写 4 条读回 4 条）；
+   *   ② **段前注释保留**（那段"这不是普通设置"的说明不能被抹掉）；
+   *   ③ **清空写成 `charter: []`**，不是删掉整段 ——
+   *      删段会让下次读取退回默认值，而用户的本意是"清空"。
+   *
+   * ⚠️ 第 ③ 条尤其容易写错：`writeScalar` 那套遇到空值会删行，
+   *    而这里必须留一个显式的 `[]` 才能表达"空"与"没有这个键"的区别。
+   */
+  {
+    const tmpRoot2 = fsx.mkdtempSync(path.join(os.tmpdir(), 'charter-'));
+    const yamlPath2 = path.join(tmpRoot2, 'config', 'persona.yaml');
+    fsx.mkdirSync(path.dirname(yamlPath2), { recursive: true });
+    fsx.writeFileSync(
+      yamlPath2,
+      [
+        '# 顶部注释',
+        'persona:',
+        '  name: 小灵',
+        '',
+        '# 最高条例段前的说明（**必须保留**）',
+        'charter:',
+        '  # 第一条的注释',
+        '  - 根据主观层调节自身状态。',
+        '  - 对没有明显记忆的知识拥有新鲜感。',
+        '',
+        'activity:',
+        '  overall: 0.6',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const r0 = personaStore.readList(tmpRoot2, 'charter');
+    check('条例：能读到（跳过注释和空行）', r0.length === 2, `实际 ${r0.length} 条：${JSON.stringify(r0)}`);
+    check('条例：内容正确', r0[0] === '根据主观层调节自身状态。', `实际 ${JSON.stringify(r0[0])}`);
+
+    const w0 = personaStore.writeList(tmpRoot2, 'charter', ['a。', 'b。', 'c。']);
+    check('条例：能写入 3 条', w0.ok, w0.message);
+    const r1 = personaStore.readList(tmpRoot2, 'charter');
+    check('条例：读写往返一致', JSON.stringify(r1) === JSON.stringify(['a。', 'b。', 'c。']), `读回 ${JSON.stringify(r1)}`);
+
+    const raw0 = fsx.readFileSync(yamlPath2, 'utf8');
+    check('条例：段前注释保留', raw0.includes('# 最高条例段前的说明'), '注释被抹掉了');
+    check('条例：别的段没被改动', raw0.includes('overall: 0.6'), 'activity 段丢了');
+    check('条例：persona 段没被改动', raw0.includes('name: 小灵'), 'persona 段丢了');
+
+    // 清空 -> 必须写成 `charter: []`，且读回空数组
+    const w1 = personaStore.writeList(tmpRoot2, 'charter', []);
+    check('条例：能清空', w1.ok, w1.message);
+    const raw1 = fsx.readFileSync(yamlPath2, 'utf8');
+    check('条例：清空写成 `charter: []`（不是删段）', raw1.includes('charter: []'), `实际文件：${raw1.slice(0, 200)}`);
+    check('条例：清空后读回空数组', personaStore.readList(tmpRoot2, 'charter').length === 0);
+    check('条例：清空后注释仍在', raw1.includes('# 最高条例段前的说明'), '注释被抹掉了');
+
+    // 空条目要被过滤（用户在设置页可能多按了几个回车）
+    personaStore.writeList(tmpRoot2, 'charter', ['a。', '   ', '', 'b。']);
+    const r2 = personaStore.readList(tmpRoot2, 'charter');
+    check('条例：空条目被过滤', JSON.stringify(r2) === JSON.stringify(['a。', 'b。']), `实际 ${JSON.stringify(r2)}`);
+
+    fsx.rmSync(tmpRoot2, { recursive: true, force: true });
+  }
+
+  /*
    * ---- 块标量（`key: |`）的通用读写 ----
    *
    * ## 为什么必须单独测这一块（2026-10-05 实测 bug）
@@ -6090,7 +6191,10 @@ const { buildTrayMenuTemplate } = requireCjs(target('trayTemplate'));
   const allLabels = JSON.stringify(item({ visible: true, petScale: 1 }));
   for (const gone of [
     '状态：', '隐藏气泡', '显示气泡', '聊天模式', '隐藏状态条', '显示状态条',
-    '免打扰', '语音播报', '允许偶尔截图', '麦克风', '思考模式', '联网搜索', '活泼度',
+    '免打扰', '语音播报', '允许偶尔截图', '麦克风', '思考模式', '联网搜索',
+    // 2026-10-23：宠物菜单里「活泼度」已改名为「状态」。
+    // 托盘本来就没有这两项，这里断言的是"托盘别跟着加回来"。
+    '活泼度', '状态：',
     '重新读取配置文件', '打开日志',
   ]) {
     check(

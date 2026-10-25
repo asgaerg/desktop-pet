@@ -61,6 +61,49 @@ DEFAULT_PERSONA: dict[str, Any] = {
     "idle_topics": ["用户屏幕上的内容", "当前时间与作息", "自己刚看到/想到的小事"],
 }
 
+# 最高条例默认值（2026-10-25）。
+#
+# ## 🔴 这不是普通配置
+#
+# 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+# 不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+#
+# 所以：
+#   · 它**可编辑**（用户随时能改），但设置页必须带常驻警告；
+#   · 它**不分优先级**（用户明确说过）—— 一旦排序，模型只会执行第一条；
+#   · **清空是合法的**（等于取消约束），但设置页要拦一下确认。
+#
+# ⚠️ 与 `DEFAULT_PERSONA` 分开：那个是"她是谁"（人设底子），
+#    这个是"她怎么想事情"。混在一起会让"关掉人格"连带关掉思考约束。
+DEFAULT_CHARTER: list[str] = [
+    "根据主观层调节自身状态。",
+    "对没有明显记忆的知识拥有新鲜感。",
+    "对信息不保持一味的肯定，要随时保留其他可能的概率。",
+]
+
+# 语言表达层默认值（2026-10-22）。
+#
+# ⚠️ 这一层只管**怎么把话说出来**（修辞 / 用典 / 用词 / 温度），
+#    不管"她怎么认识世界"—— 后者归主观层（情绪 / 注意力 / 状态）。
+#
+# ⚠️ 默认全是 **0.5（中性）**：中性档在 `expression.describe()` 里是空串，
+#    所以**默认配置不会给提示词增加任何内容** —— 与"这一层关掉就等于没有"一致。
+#    这一点很重要：不能因为加了语言层，就让所有人的宠物突然变了个说话风格。
+DEFAULT_EXPRESSION: dict[str, Any] = {
+    # 比喻 / 拟人 / 通感的密度
+    "rhetoric": 0.5,
+    # 古诗、成语、谚语
+    "culture": 0.5,
+    # 用词丰富度（0 = 大白话）
+    "vocabulary": 0.5,
+    # 温度·关心（2026-10-22 由「说话温度」+「关心程度」合并）
+    #
+    # ⚠️ 这是**用户设定值**。运行时会被亲近度抬高/压低（亲近度越高越暖），
+    #    但那个偏移只发生在生成提示词时，**不写回这个值** ——
+    #    否则用户会看到自己设的 0.5 莫名变成 0.8 且找不回来。
+    "warmth": 0.5,
+}
+
 DEFAULT_ACTIVITY: dict[str, Any] = {
     "overall": 0.5,
     # 「自言自语」待多久回落到「安静」（秒，2026-10-17 用户要求）。
@@ -300,6 +343,9 @@ class Config:
     root: dict[str, Any] = field(
         default_factory=lambda: {
             "persona": copy.deepcopy(DEFAULT_PERSONA),
+            # 最高条例（2026-10-25）：她"怎么想事情"，与人设底子分开。
+            "charter": copy.deepcopy(DEFAULT_CHARTER),
+            "expression": copy.deepcopy(DEFAULT_EXPRESSION),
             "activity": copy.deepcopy(DEFAULT_ACTIVITY),
             "autonomy": copy.deepcopy(DEFAULT_AUTONOMY),
             "events": copy.deepcopy(DEFAULT_EVENTS),
@@ -314,6 +360,20 @@ class Config:
     @property
     def persona(self) -> dict[str, Any]:
         return self.root["persona"]
+
+    @property
+    def charter(self) -> list[str]:
+        """最高条例（2026-10-25）。
+
+        ⚠️ **可以是空列表**（用户清空 = 取消思考约束）。调用方要能处理空。
+        """
+        value = self.root.get("charter")
+        return value if isinstance(value, list) else []
+
+    @property
+    def expression(self) -> dict[str, Any]:
+        """语言层旋钮（0~1）。只管"怎么说"，与主观层**并列**。"""
+        return self.root["expression"]
 
     @property
     def activity(self) -> dict[str, Any]:
@@ -730,6 +790,9 @@ def _validate(root: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(persona.get("idle_topics"), list):
         persona["idle_topics"] = list(DEFAULT_PERSONA["idle_topics"])
 
+    out = _validate_expression(out)
+    out = _validate_charter(out)
+
     providers = out.setdefault("providers", {})
     if not isinstance(providers, dict):
         raise ConfigError("providers 必须是映射")
@@ -745,6 +808,72 @@ def _validate(root: dict[str, Any]) -> dict[str, Any]:
     out = _validate_memory(out)
 
     return out
+
+
+def _validate_expression(root: dict[str, Any]) -> dict[str, Any]:
+    """校验语言层（2026-10-22）。
+
+    ## 宽容策略：**不抛异常，一律夹取**
+
+    这一层是用户可编辑的（设置页滑杆 + 直接改 yaml），所以：
+      · 缺字段 -> 用默认 0.5（中性）；
+      · 写成 `abc` / `null` -> 也按中性，不报错；
+      · 超出 0~1 -> 夹进范围。
+
+    为什么不报错：与 `persona.system_prompt` 的花括号事故同一条教训 ——
+    **用户手滑不该让宠物一句话都说不出来**。一个旋钮写错，
+    最坏的结果应该是"没生效"，而不是"整个 sidecar 起不来"。
+
+    ⚠️ 2026-10-22：原来的 `personality`（感性·理性）段**已废弃**（用户决定不做）。
+    旧配置里如果还留着那一段，这里**不管它** —— 未知段会被原样保留，
+    不会报错，也不会生效。
+    """
+    section = root.get("expression")
+    if not isinstance(section, dict):
+        root["expression"] = copy.deepcopy(DEFAULT_EXPRESSION)
+        return root
+    for key, default in DEFAULT_EXPRESSION.items():
+        raw = section.get(key, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float(default)
+        if value != value:  # NaN
+            value = float(default)
+        section[key] = round(max(0.0, min(1.0, value)), 3)
+    # 未知键保留（用户可能写了注释性的键，不该被吞掉）
+    root["expression"] = section
+    return root
+
+
+def _validate_charter(root: dict[str, Any]) -> dict[str, Any]:
+    """校验最高条例（2026-10-25）。
+
+    ## 三条规则
+
+    1. **必须是字符串列表**。写成单个字符串（用户手改 yaml 时常犯）时，
+       包成一项列表而不是报错 —— 那明显是笔误，不是"想清空"。
+    2. **空列表合法**。用户清空 = 取消思考约束，这是明确允许的
+       （设置页会拦一下确认，但后端不拦）。
+    3. **逐条去空白、丢掉空条目**。空条目会让提示词里出现一个孤零零的序号。
+
+    ⚠️ 为什么**不**设"至少一条"的下限：用户说了"可自由更改"。
+       加下限等于替他做决定，而且他不会知道为什么改不动。
+    """
+    value = root.get("charter")
+    if value is None:
+        root["charter"] = copy.deepcopy(DEFAULT_CHARTER)
+        return root
+    if isinstance(value, str):
+        # 手改 yaml 写成单行字符串：当成一项
+        value = [value]
+    if not isinstance(value, list):
+        # 类型完全不对（数字/映射）：退回默认，不报错
+        root["charter"] = copy.deepcopy(DEFAULT_CHARTER)
+        return root
+    cleaned = [str(item).strip() for item in value]
+    root["charter"] = [item for item in cleaned if item]
+    return root
 
 
 def _validate_memory(root: dict[str, Any]) -> dict[str, Any]:

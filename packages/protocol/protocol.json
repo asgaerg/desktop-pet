@@ -899,6 +899,38 @@
           }
         }
       }
+    },
+    "pet.set_state": {
+      "direction": "toBrain",
+      "comment": "用户从菜单切状态（2026-10-23，「将活泼度替换成状态」）。四个状态 quiet/bored/curious/monologue。刻意不复用 config.update：状态是运行时状态（会自己变），不是配置；塞进 config.update 会让 apply_patch 把未知键原样保留进 config.root 并跟着快照广播。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "state"
+        ],
+        "properties": {
+          "type": {
+            "const": "pet.set_state"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "quiet",
+              "bored",
+              "curious",
+              "monologue"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          }
+        }
+      }
     }
   }
 }

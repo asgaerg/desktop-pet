@@ -95,10 +95,12 @@ import { listModels, testConnection } from './settingsApi.js';
 import {
   readNestedScalar,
   readDeepScalar,
+  readList,
   readPersonaPrompt,
   readScalar,
   writeNestedScalar,
   writeDeepScalar,
+  writeList,
   writePersonaEnabled,
   writePersonaPrompt,
   writeScalar,
@@ -771,6 +773,15 @@ const quitCoordinator = new QuitCoordinator(() => void quit(), log);
 let paused = false;
 let pauseTimer: NodeJS.Timeout | null = null;
 let activity = 0.5;
+/**
+ * 当前状态键（quiet / bored / curious / monologue），2026-10-23 加。
+ *
+ * ⚠️ 真源在 Python 的状态机（`pet/state.py`），这里只是**镜像**，
+ * 由 sidecar 的 `pet.emotion` / `pet.state` 事件更新。
+ * 菜单显示它，而不是拿 `activity` 数值去猜 —— 因为状态会自己变
+ * （精力低、30 分钟没聊天、随机事件），数值猜出来可能是过期的。
+ */
+let petState = '';
 let statusText = '启动中…';
 
 // --------------------------------------------------------------------------- //
@@ -2560,6 +2571,23 @@ function connectSocket(port: number, brain: string): void {
       return;
     }
 
+    /*
+     * 状态镜像（2026-10-23）。
+     *
+     * ⚠️ 必须在**转发给渲染层之前**更新：菜单下次打开时读的就是 `petState`。
+     *    如果只在渲染层处理，主进程这边永远是空串，菜单会退回按 activity 猜 ——
+     *    而状态现在会自己变（精力低、30 分钟没聊天），猜出来的可能是过期的。
+     */
+    if (message.type === 'pet.emotion') {
+      const snapshot = (message as { pet_state?: { state?: unknown } }).pet_state;
+      const next = typeof snapshot?.state === 'string' ? snapshot.state : '';
+      if (next && next !== petState) {
+        const before = petState;
+        petState = next;
+        log(`状态：${before || '（未知）'} -> ${next}`);
+      }
+    }
+
     // 说话类消息**改发到独立的气泡窗口**（宠物窗口里那份气泡已删除）。
     //
     // 为什么独立成窗口：用户要求「可以加高宠物窗口」来给气泡腾空间，
@@ -3150,6 +3178,31 @@ function registerRendererIpc(): void {
     };
   });
 
+  // ---- 语言层 / 性格层旋钮（2026-10-22）----
+  //
+  // 用户要求：「改为设置语言的表达意思，和情绪等主观层并列」。
+  //
+  // ## 两段分开走，但用同一套读写
+  //
+  //   expression   语言层  修辞 / 文化 / 词汇 / 温度·关心
+  //   personality  性格    感性·理性（**属于主观层**，用户明确纠正过）
+  //
+  // 所以键名前缀决定写到 `persona.yaml` 的哪一段 —— 不做合并，
+  // 免得以后有人以为"感性/理性是表达技巧"。
+  //
+  // ## 为什么用"读全量 + 写单个"而不是一个大 patch
+  //
+  // 滑杆是**边拖边存**的（和活泼度同一条规矩：改完立刻生效、重启也记住）。
+  // 每次只写一个键，`writeScalar` 会就地改那一行，注释全都保留 ——
+  // 而"读全量"让设置页一次拿到所有值回显，不用发 5 个 IPC。
+  ipcMain.handle('settings:expression', () => readStyleKnobs());
+  ipcMain.handle(
+    'settings:set-expression',
+    (_event, payload: { section?: unknown; key?: unknown; value?: unknown }) => {
+      return writeStyleKnob(payload?.section, payload?.key, payload?.value);
+    },
+  );
+
   // ---- 文字弹窗存在时间（默认 10 秒）----
   //
   // 与 peek-offset 同一套模式：**改一下立刻生效 + 落盘**，
@@ -3368,6 +3421,8 @@ function registerRendererIpc(): void {
 
   ipcMain.handle('pet:get-state', () => ({
     activity,
+    /** 当前状态键（2026-10-23）。空串 = 后端还没回报过 */
+    petState,
     paused,
     status: statusText,
     clickThrough: petWindow?.clickThroughEnabled ?? true,
@@ -3578,7 +3633,7 @@ async function openPetMenu(): Promise<void> {
     togglePause: () => togglePause(),
     toggleEdgePeek: (enabled) => petWindow?.setEdgePeekEnabled(enabled),
     peekSettings: () => void openSettings(),
-    setActivity: (value) => setActivity(value),
+    setPetState: (state) => setPetState(state),
     setPetScale: (scale) => setPetScale(scale),
     openLogs: () => void shell.openPath(currentLogFile()),
     settings: () => void openSettings(),
@@ -3598,6 +3653,8 @@ async function openPetMenu(): Promise<void> {
     paused,
     visionWatching: visionEnabled,
     activity,
+    // 当前状态键（2026-10-23）。空串 = 后端还没回报过，菜单会退回按 activity 猜。
+    petState,
     petScale: petWindow?.currentPetScale ?? 1,
     // 菜单文字（"隐藏对话框"/"显示对话框"）由它决定
     chatVisible,
@@ -3668,6 +3725,116 @@ function setActivity(value: number, options: { persist?: boolean } = {}): void {
 
 function togglePause(): void {
   setPausedInternal(!paused, paused ? 0 : 30);
+}
+
+/*
+ * ## 状态切换（2026-10-23，替换"活泼度"菜单）
+ *
+ * 用户要求「将活泼度替换成状态」，四个状态：安静 / 无聊 / 好奇 / 自言自语。
+ *
+ * ## 为什么状态要同时写 `activity.overall`
+ *
+ * 自主调度器还在读 `activity.overall` 算"多久开口一次"的概率
+ * （见 `autonomy.Scheduler`）。状态是"我现在想干什么"，
+ * overall 是"我多常开口"—— 两者**语义不同但不能脱节**：
+ * 切到"自言自语"却还按"安静"的频率调度，就会变成"它想说话却一直不开口"。
+ *
+ * 所以这里把状态映射到一个代表性数值一起写下去。这不是"退回活泼度"，
+ * 而是让量化参数跟随状态走（单向：状态 -> 数值）。
+ */
+const STATE_TO_ACTIVITY: Record<string, number> = {
+  quiet: 0.1,
+  bored: 0.5,
+  curious: 0.8,
+  monologue: 1.0,
+};
+
+function setPetState(stateKey: string): void {
+  const key = String(stateKey ?? '');
+  const overall = STATE_TO_ACTIVITY[key];
+  if (overall === undefined) {
+    log(`状态：未知状态「${key}」，已忽略`);
+    return;
+  }
+  // ① 让 sidecar 的状态机切（它才是状态的真源）
+  send({ type: 'pet.set_state', state: key, reason: 'user' });
+  // ② 量化参数跟着走（自主调度读它）
+  setActivity(overall);
+  log(`状态：用户切换 -> ${key}（overall ${overall}）`);
+}
+
+/*
+ * ## 语言层旋钮（2026-10-22）
+ *
+ * 用户对结构的划分：
+ *
+ *     语言层（expression）    修辞 / 文化 / 词汇 / 温度·关心   —— 怎么把话说出来
+ *     主观层                  精力 / 心情 / 亲近度 / 注意力 / 状态 —— 怎么认识世界
+ *
+ * ⚠️ 原来的 `personality`（感性·理性）**已废弃**（2026-10-22 用户决定不做）。
+ *    旧配置里若还留着那一段，会被 Python 侧原样忽略，不会报错。
+ *
+ * ## 真源在 `persona.yaml`，不是 settings.json
+ *
+ * 这几个旋钮影响的是**提示词**，和人格提示词、活泼度同源，
+ * 所以落盘到 `config/persona.yaml`（`writeScalar` 就地改那一行、保留注释）。
+ * 放 settings.json 会让"同一个东西两处存"，迟早不一致。
+ */
+const STYLE_KNOBS: Record<string, { section: string; keys: readonly string[] }> = {
+  // 语言层：她怎么说
+  expression: { section: 'expression', keys: ['rhetoric', 'culture', 'vocabulary', 'warmth'] },
+};
+
+/** 读全部旋钮（给设置页回显）。缺失的键按 0.5（中性）。 */
+function readStyleKnobs(): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const [group, spec] of Object.entries(STYLE_KNOBS)) {
+    const bucket: Record<string, number> = {};
+    for (const key of spec.keys) {
+      const raw = readScalar(CONFIG_ROOT, spec.section, key);
+      const value = Number(raw);
+      bucket[key] = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0.5;
+    }
+    out[group] = bucket;
+  }
+  return out;
+}
+
+/**
+ * 写一个旋钮：**落盘 + 热更新**。
+ *
+ * 与活泼度同一条规矩（改完立刻生效、重启也记住）：
+ *   ① `writeScalar` 改 `persona.yaml` —— 重启后还在；
+ *   ② 发 `config.update` —— sidecar 的 `apply_patch` 只改内存不写盘，
+ *      所以必须两步都做（漏了①重启就丢，漏了②要重启才生效）。
+ *
+ * ⚠️ 夹取在**两边都做**：这里夹一次（立刻回给滑杆一个合法值），
+ *    Python 的 `_validate_expression` 再夹一次（防止手改 yaml 写越界）。
+ *    单一来源做不到，因为两条写入路径（界面 / 直接改文件）必须都安全。
+ */
+function writeStyleKnob(
+  section: unknown,
+  key: unknown,
+  rawValue: unknown,
+): { value: number; saved: boolean; error?: string } {
+  const name = String(section ?? '');
+  const spec = STYLE_KNOBS[name];
+  if (!spec) return { value: 0.5, saved: false, error: `未知的分组：${name}` };
+  const field = String(key ?? '');
+  if (!spec.keys.includes(field)) {
+    return { value: 0.5, saved: false, error: `${name} 里没有 ${field}` };
+  }
+  const num = Number(rawValue);
+  if (!Number.isFinite(num)) {
+    return { value: 0.5, saved: false, error: '值不是数字' };
+  }
+  const clamped = Math.max(0, Math.min(1, num));
+  // ② 热更新
+  send({ type: 'config.update', patch: { [spec.section]: { [field]: clamped } } });
+  // ① 落盘
+  const saved = writeScalar(CONFIG_ROOT, spec.section, field, clamped);
+  if (!saved.ok) log(`${name}.${field}：写盘失败（${saved.message}），本次仅内存生效`);
+  return { value: clamped, saved: saved.ok, error: saved.ok ? undefined : saved.message };
 }
 
 /**
@@ -6870,8 +7037,46 @@ ipcMain.handle('settings:memory-action', async (_event, payload: unknown) => {
     return result;
   });
 
-  ipcMain.on('settings:quit', () => void quit());
+  /**
+   * 最高条例：读 / 写（2026-10-25）。
+   *
+   * ## 🔴 为什么单独一对 IPC，而不是塞进 settings:save
+   *
+   * 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+   * 不亚于为宠物定义作为人的感受与思维方式。」
+   *
+   * 它是**提示词**，和人格底子同源（落 `persona.yaml`），
+   * 但**不受 `system_prompt_enabled` 影响** —— 关掉人格不等于关掉思考方式。
+   * 所以独立一对接口，语义清楚。
+   *
+   * ## 和 `settings:set-prompt` 一样两步
+   *
+   * ① 落盘（`writeList`）—— 重启后还在；
+   * ② 发 `config.update` —— 热更新，不用重启。
+   *
+   * ⚠️ 空列表**是合法的**（用户清空 = 取消约束）。
+   *    设置页会拦一下确认，但主进程不拦 —— 用户已经确认过了。
+   */
+  ipcMain.handle('settings:get-charter', () => readList(CONFIG_ROOT, 'charter'));
 
+  ipcMain.handle('settings:set-charter', (_event, payload: { rules?: unknown }) => {
+    const raw = payload?.rules;
+    const rules = Array.isArray(raw) ? raw.map((item) => String(item ?? '').trim()).filter(Boolean) : [];
+    const result = writeList(CONFIG_ROOT, 'charter', rules);
+    log(
+      `设置：保存最高条例 ${result.ok ? '成功' : `失败 —— ${result.message}`}` +
+        `（${rules.length} 条，${result.path}）`,
+    );
+    if (result.ok) {
+      // 读回权威值再下发，避免两端不一致（和人格提示词同一套做法）
+      const fresh = readList(CONFIG_ROOT, 'charter');
+      send({ type: 'config.update', patch: { charter: fresh } });
+      return { ...result, rules: fresh };
+    }
+    return { ...result, rules };
+  });
+
+  ipcMain.on('settings:quit', () => void quit());
   ipcMain.on('settings:quit-all', () => void quitAll());
 }
 

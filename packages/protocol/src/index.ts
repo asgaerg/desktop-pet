@@ -229,6 +229,7 @@ export type ToBrainMsg =
   | MemoryQueryMsg
   | ModulesQueryMsg
   | ModulesSetMsg
+  | PetSetStateMsg
   | ConfigUpdateMsg
   /*
    * ⚠️ `tts.result` 也在这边（Electron -> Python）—— 别看名字叫 result
@@ -474,6 +475,45 @@ export interface ModulesSetMsg {
   enabled: boolean;
   requestId?: string;
   ts?: number;
+}
+
+/**
+ * 用户切状态（上行，2026-10-23）。
+ *
+ * ## 为什么不复用 `config.update`
+ *
+ * 状态是**运行时状态**，不是配置：它会自己变（精力 <0.4 转安静且粘滞、
+ * 30 分钟没聊天转无聊、随机事件触发好奇）。
+ *
+ * 塞进 `config.update` 有两个问题：
+ *   ① `apply_patch` 会把未知键当"插件配置"原样保留进 `config.root`，
+ *      并跟着快照广播出去；
+ *   ② `activity.overall` 与状态**不等价**，广播会让桌面端以为配置变了。
+ */
+export interface PetSetStateMsg {
+  type: 'pet.set_state';
+  /** 状态键：quiet / bored / curious / monologue */
+  state: string;
+  /** 切换原因（日志用）：user / event */
+  reason?: string;
+  ts?: number;
+}
+
+/** 状态快照（下行，随 `pet.emotion` 一起发）。 */
+export interface PetStateSnapshot {
+  state: string;
+  /** 中文名（安静/无聊/好奇/自言自语），省得前端再维护一份映射 */
+  name: string;
+  /** 是否"有事在做"（此时精力再低也不转安静） */
+  busy: boolean;
+  /** 正在进行的事件描述，空串 = 没有 */
+  current_event: string;
+  /** 距离上次聊天多少秒（30 分钟进无聊的计时） */
+  idle_since_chat_s: number;
+  /** 最近一次切换的原因 */
+  last_reason: string;
+  /** 累计切换次数 */
+  changes: number;
 }
 
 /** 模块状态回执（下行）。 */
@@ -798,6 +838,14 @@ export interface PetEmotionMsg {
    * 带上这个字段时前端会 sprite.play(expression)（一次性反应，播完回 idle）。
    */
   expression?: 'curious' | 'excited';
+  /**
+   * 状态快照（2026-10-23，「将活泼度替换成状态」）。
+   *
+   * 为什么随情绪事件一起发：状态**会自己变**（精力低 / 30 分钟没聊天 /
+   * 随机事件），桌面端菜单必须显示真实状态。而 `activity.overall` 是
+   * "多久开口一次"的量化参数，与状态不再一一对应 —— 拿它猜会显示错。
+   */
+  pet_state?: PetStateSnapshot;
 }
 
 export interface PetObserveMsg {
@@ -984,6 +1032,25 @@ export interface MemoryConfig {
 
 export interface AppConfig {
   persona: PersonaConfig;
+  /**
+   * 最高条例（config/persona.yaml 的 `charter:` 段，2026-10-25）。
+   *
+   * 🔴 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+   * 不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+   *
+   * ## 为什么是字符串数组而不是一段文本
+   *
+   * 条例是"几条"，用换行拼成字符串会在"条目本身含换行"时解析错。
+   * 而且设置页要按条数提示（"已保存 3 条"），数组更直接。
+   *
+   * ## 空数组是合法的
+   *
+   * 清空 = 取消这几条思考约束。后端不拦（用户已经在前端确认过）。
+   *
+   * ⚠️ 不受 `persona.system_prompt_enabled` 影响：关掉人格底子不等于
+   * 关掉思考方式，两者是不同维度。
+   */
+  charter?: string[];
   activity: ActivityConfig;
   autonomy: AutonomyConfig;
   providers: ProvidersConfig;

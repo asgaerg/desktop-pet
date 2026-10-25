@@ -246,19 +246,31 @@ class SubjectiveState:
         self.idle_ticks += 1
         return self.attention - before
 
-    def on_user_message(self, text: str = "") -> None:
+    def on_user_message(self, text: str = "", attention: Optional[float] = None) -> None:
         """
         用户说话：注意力拉向用户（attention 变小）。
 
         ⚠️ 先减再**硬钳制**到 `ATTENTION_AFTER_USER_CAP` —— 理由见那个常量的注释：
         挂机久了注意力会贴到 1.0，光减 0.25 只到 0.75，仍在"想自己"档，
         表现为"用户开口了它还在走神"。钳制保证不管原来多高，一律回到关注用户。
+
+        ## `attention` 参数（2026-10-23「被打扰」）
+
+        传进来的是**改动前**的注意力。为什么需要它：心情惩罚的幅度取决于
+        "它当时有多专注" —— 心不在焉时被叫一声几乎不烦，完全沉浸时被叫会很烦。
+
+        ⚠️ 调用方必须在**本方法之前**读注意力。如果传 `self.attention` 那也行
+        （Python 先求值实参），但**绝不能**让本方法自己去读 —— 那时注意力
+        已经被拉向用户了，惩罚永远接近 0（顺序写反的经典 bug）。
+
+        不传时按 0 处理（= 不惩罚），保持向后兼容（旧调用点、测试）。
         """
+        before = self.attention if attention is None else float(attention)
         self.attention = min(
             clamp01(self.attention + ATTENTION_ON_USER_MESSAGE),
             ATTENTION_AFTER_USER_CAP,
         )
-        self.emotion.on_user_message(text)
+        self.emotion.on_user_message(text, attention=before)
         # 一旦用户开口，"自己的事"就不再是当前焦点
         self.focus.clear()
 

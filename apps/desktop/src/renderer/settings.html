@@ -460,6 +460,118 @@
             <button id="reload-prompt" class="btn">重新载入</button>
             <button id="save-prompt" class="btn primary">保存提示词</button>
           </div>
+
+          <!-- ======================= 最高条例 ======================= -->
+          <!--
+            🔴 这一块的警告是**需求**，不是装饰（2026-10-25）。
+
+            用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+            不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+
+            所以：
+              · 警告必须**常驻**（不是 tooltip、不是问号图标）；
+              · 必须有「恢复默认」（改坏了能救回来）；
+              · 清空要**拦一下**并说明后果（清空 = 取消思考约束）。
+          -->
+          <h2>最高条例</h2>
+
+          <div class="charter-warn">
+            <strong>⚠️ 这不是普通设置。</strong>
+            下面几条决定她<strong>怎么想事情</strong> —— 重要性不亚于为她定义
+            作为人的感受与思维方式。改坏了，她的判断会变得很怪，
+            而且你多半不会记得是这里改的。
+            <br />
+            它们<strong>没有优先级</strong>：遇到具体情境由她自己权衡。
+          </div>
+
+          <div class="field field-block">
+            <textarea id="charter-rules" rows="8" spellcheck="false"
+                      placeholder="每行一条。清空 = 取消这几条思考约束。"></textarea>
+            <p class="hint" id="charter-state"></p>
+          </div>
+          <div class="row buttons">
+            <button id="charter-reload" class="btn">重新载入</button>
+            <button id="charter-reset" class="btn">恢复默认</button>
+            <button id="charter-save" class="btn primary">保存条例</button>
+          </div>
+
+          <!-- ======================= 语言表达层 ======================= -->
+          <!--
+            🔴 与"情绪"（主观层）**并列**的一组旋钮（2026-10-22）。
+
+            主观层决定"她此刻怎么样"，这一层决定"她怎么说出来"。
+            不写死人格文本，是因为硬写一段人设等于用静态文本对抗模型自身的表现力
+            —— 真正缺的是可调的旋钮。详见 docs/进度交接.md §一百八十四。
+
+            ⚠️ 每一项都必须能拖到 0 而宠物仍然正常说话：这一层是调味，不是地基。
+          -->
+          <h2>语言表达方式</h2>
+          <p class="hint">
+            这几项决定她<strong>怎么说话</strong>，和"情绪"是两回事 ——
+            情绪管她此刻开心还是犯困，这里管她把话说成什么样。
+            <strong>0.5 是中性</strong>（不额外干预），越往右越明显。
+            改完立刻生效，重启也会记住。
+          </p>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">修辞倾向</span>
+              <span class="setting-desc">
+                比喻、拟人、通感的密度。0 = 有话直说，1 = 满口比方
+                （"这代码像一团打结的毛线"）。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="expr-rhetoric" class="slider" type="range" min="0" max="1" step="0.05" />
+              <output id="expr-rhetoric-out" class="num-out">0.5</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">文化表达</span>
+              <span class="setting-desc">
+                古诗、成语、谚语的使用。不是掉书袋，而是<strong>用熟的典故承载意思</strong>
+                —— 把"差不多就行"说成"过犹不及"，比解释更省字。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="expr-culture" class="slider" type="range" min="0" max="1" step="0.05" />
+              <output id="expr-culture-out" class="num-out">0.5</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">词汇能力</span>
+              <span class="setting-desc">
+                用词的丰富与准确度。0 = 大白话，怎么顺口怎么说；
+                1 = 能用一个精确的词就别说三个含糊的。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="expr-vocabulary" class="slider" type="range" min="0" max="1" step="0.05" />
+              <output id="expr-vocabulary-out" class="num-out">0.5</output>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">温度·关心</span>
+              <span class="setting-desc">
+                冷淡 ↔ 温热，以及会不会主动留意你的处境。0 = 就事论事；
+                1 = 会顺口问一句"你昨晚没睡好吧"。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="expr-warmth" class="slider" type="range" min="0" max="1" step="0.05" />
+              <output id="expr-warmth-out" class="num-out">0.5</output>
+            </div>
+          </div>
+
+          <div class="row buttons">
+            <button id="expr-reset" class="btn">全部恢复中性（0.5）</button>
+          </div>
         </section>
 
         <!-- ============================ 提示词 ============================ -->

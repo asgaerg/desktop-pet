@@ -145,7 +145,13 @@ export interface PetMenuHandlers {
   toggleEdgePeek: (enabled: boolean) => void;
   /** 打开设置窗口去调探头参数 */
   peekSettings: () => void;
-  setActivity: (value: number) => void;
+  /**
+   * 切换状态（2026-10-23，替换 `setActivity`）。
+   *
+   * 参数是**状态名**（quiet/bored/curious/monologue），不是 0~1 的数值 ——
+   * 状态是离散的，用数值表达会丢掉"安静 vs 无聊"的语义差别。
+   */
+  setPetState: (state: string) => void;
   setPetScale: (scale: number) => void;
   /**
    * 「截图对话」（2026-10-17 用户要求）：
@@ -238,7 +244,19 @@ export const HANDLERS_TAKING_CHECKED_STATE: ReadonlySet<string> = new Set([
  */
 export const ACTIONS_WITH_VALUE: Record<string, string> = {
   scale: 'setPetScale',
-  activity: 'setActivity',  /**
+  /*
+   * `state:quiet` / `state:curious` 这类 -> `setPetState`（2026-10-23）。
+   *
+   * 原来这里是 `activity:0.5` -> `setActivity`（活泼度数值）。
+   * 用户要求「将活泼度替换成状态」，所以菜单改成按**状态名**切换：
+   *
+   *   state:quiet / state:bored / state:curious / state:monologue
+   *
+   * ⚠️ 为什么不复用 `activity:0.5` 那套数值：数值只是"多久开口一次"的
+   *    量化参数，而状态是"我现在想干什么"。用数值表达状态会让
+   *    "安静"和"无聊"的差别变成一个 0.1 vs 0.5 的数字，语义就丢了。
+   */
+  state: 'setPetState',  /**
    * `mic:<deviceId>` -> `setMicDevice`
    *
    * ⚠️ 必须登记在这张别名表里：`mic` 这个类别名与处理器名 `setMicDevice`

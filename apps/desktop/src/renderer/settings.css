@@ -854,8 +854,34 @@ input[type='radio'] {
   white-space: pre-line;
 }
 
-.hint code {
-  background: var(--bg-soft);
+/*
+ * 最高条例的常驻警告（2026-10-25）。
+ *
+ * 🔴 这不是装饰，是**需求**。用户原话：
+ *   「要提醒用户条例的重要性，不亚于为宠物定义作为人的感受与思维方式。」
+ *
+ * 所以：
+ *   · 用**常驻色块**，不是 tooltip、不是问号图标 —— 那些用户根本不会点；
+ *   · 用暖色（琥珀）而不是红色：红色会被当成"出错了"，
+ *     而这里要传达的是"请谨慎"，不是"有故障"；
+ *   · 左边一条粗竖线：视觉上像"引用/须知"，比纯色块更醒目。
+ */
+.charter-warn {
+  margin: 10px 0 14px;
+  padding: 12px 14px;
+  border-left: 4px solid #d99a2b;
+  border-radius: 6px;
+  background: rgba(217, 154, 43, 0.10);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.charter-warn strong {
+  color: #d99a2b;
+}
+
+.hint code {  background: var(--bg-soft);
   padding: 1px 4px;
   border-radius: 3px;
   font-size: 11px;

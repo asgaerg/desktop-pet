@@ -38,6 +38,12 @@ const ui = {
   promptState: el('prompt-state'),
   reloadPrompt: el('reload-prompt'),
   savePrompt: el('save-prompt'),
+  /* 最高条例（2026-10-25）：她"怎么想事情"，与人格底子分开 */
+  charterRules: el('charter-rules'),
+  charterState: el('charter-state'),
+  charterReload: el('charter-reload'),
+  charterReset: el('charter-reset'),
+  charterSave: el('charter-save'),
   /** 提示词模板（动态渲染的字段容器） */
   promptFields: el('prompt-fields'),
   promptTplState: el('prompt-tpl-state'),
@@ -162,6 +168,19 @@ const ui = {
   // （原 `petScaleValue` 已删：宠物大小从滑杆改成了**下拉框**，没有那个 output 了）
   edgePeek: el('edge-peek'),
   peekOffset: el('peek-offset'),
+  /*
+   * 语言层旋钮（2026-10-22）：她"怎么说出来"。
+   * 每一项都是一对 `input[type=range]` + `<output>`。
+   */
+  exprRhetoric: el('expr-rhetoric'),
+  exprRhetoricOut: el('expr-rhetoric-out'),
+  exprCulture: el('expr-culture'),
+  exprCultureOut: el('expr-culture-out'),
+  exprVocabulary: el('expr-vocabulary'),
+  exprVocabularyOut: el('expr-vocabulary-out'),
+  exprWarmth: el('expr-warmth'),
+  exprWarmthOut: el('expr-warmth-out'),
+  exprReset: el('expr-reset'),
   bubbleLinger: el('bubble-linger'),
   /** 「自言自语」持续多久（分钟，2026-10-17 用户要求；0 = 不回落） */
   monologueDecay: el('monologue-decay'),
@@ -313,7 +332,38 @@ function applyState(state) {
       ? `来自 ${state.persona.path}${state.persona.name ? ` · 宠物名「${state.persona.name}」` : ''}`
       : `⚠️ ${state.persona.path}`;
   }
+
+  /*
+   * 最高条例（2026-10-25）：首次打开时载入。
+   *
+   * ⚠️ 只在**没改过**的时候填（`charterDirty`）—— 否则用户正在编辑时
+   * 一次后台推送就会把他写的内容冲掉。
+   *
+   * ⚠️ 用**异步**读取而不是从 `state` 拿：条例不在 `settings:load` 的
+   * 快照里（它是 `persona.yaml` 的顶层段，和人格提示词同一类东西）。
+   */
+  if (ui.charterRules && !charterDirty && !charterLoaded) {
+    charterLoaded = true;
+    void (async () => {
+      try {
+        const result = await api.getCharter();
+        const rules = Array.isArray(result) ? result : [];
+        if (charterDirty) return; // 等待期间用户开始编辑了，别覆盖
+        ui.charterRules.value = rules.join('\n');
+        setCharterState(
+          rules.length === 0
+            ? '⚠️ 当前是空的 —— 她没有思考约束'
+            : `${rules.length} 条（来自 config/persona.yaml）`,
+        );
+      } catch (error) {
+        setCharterState(`⚠️ 载入出错：${error.message}`);
+      }
+    })();
+  }
 }
+
+/** 条例是否已经载入过（只载一次，避免后台推送反复覆盖用户编辑） */
+let charterLoaded = false;
 
 /** 用户动过勾选框之后，`load()` 不再覆盖它 */
 let promptToggleTouched = false;
@@ -884,8 +934,105 @@ bindNumberField(
 );
 
 /*
- * ⚠️ 「探头旋转补偿」滑杆已**删除**（2026-10-04，用户要求「把这个删除了吧，现在不用这个了」）。
+ * ───────────────────────────────────────────────────────────────────────────
+ * 语言层 / 性格层旋钮（2026-10-22）
+ * ───────────────────────────────────────────────────────────────────────────
  *
+ * 用户要求：「改为设置语言的表达意思，和情绪等主观层并列」，
+ * 随后又纠正了分层：「感性与理性偏向性格，放入主观层的大模块中；
+ * 情绪层属于主观层，**语言层不属于主观层**。」
+ *
+ * 所以这里分**两组**，不是一组：
+ *
+ *   语言层（expression）   修辞 / 文化 / 词汇 / 温度·关心   —— 怎么把话说出来
+ *   性格（personality）    感性·理性                        —— 怎么认识世界
+ *
+ * ## 为什么不用 bindLiveRange 读全量
+ *
+ * `bindLiveRange` 的 read 是"读一个值"，而这批旋钮一次 IPC 拿全量更省。
+ * 但为了复用节流、夹取回写、落盘提示那一整套逻辑，还是走 `bindLiveRange`，
+ * 只把 `read` 包成"从全量里取自己那一个" —— 每个滑杆各读一次全量，
+ * 5 次 IPC 在打开设置页时只发生一次，代价可以忽略。
+ *
+ * ⚠️ 绝不能因此写一个"全局缓存"，那会引入和探头缓存同一类 bug：
+ *    缓存陈旧 -> 滑杆显示的不是真实值。
+ */
+{
+  const KNOBS = [
+    // [分组, 键, input, output, 显示名]
+    ['expression', 'rhetoric', ui.exprRhetoric, ui.exprRhetoricOut, '修辞倾向'],
+    ['expression', 'culture', ui.exprCulture, ui.exprCultureOut, '文化表达'],
+    ['expression', 'vocabulary', ui.exprVocabulary, ui.exprVocabularyOut, '词汇能力'],
+    ['expression', 'warmth', ui.exprWarmth, ui.exprWarmthOut, '温度·关心'],
+  ];
+
+  // 一次读全量，供所有滑杆的初值使用。
+  let snapshot = null;
+  const readAll = async () => {
+    if (!snapshot) {
+      try {
+        snapshot = await api.expression();
+      } catch {
+        snapshot = {};
+      }
+    }
+    return snapshot || {};
+  };
+
+  for (const [section, key, input, output, label] of KNOBS) {
+    bindLiveRange(
+      input,
+      output,
+      async () => {
+        const all = await readAll();
+        const group = all && all[section];
+        const value = group ? Number(group[key]) : NaN;
+        return Number.isFinite(value) ? value : 0.5;
+      },
+      async (value) => {
+        const r = await api.setExpression(section, key, Number(value));
+        const applied = r && Number(r.value);
+        // 生效值可能被夹取，回写让界面和真实状态一致
+        snapshot = null; // 下次读重新取，避免显示旧值
+        return {
+          applied: Number.isFinite(applied) ? applied : Number(value),
+          saved: r && r.saved,
+          error: r && r.error,
+          path: r && r.path,
+          label,
+        };
+      },
+      (value) => Number(value).toFixed(2),
+    );
+  }
+
+  /** 一键恢复中性：把一组旋钮全部写成 0.5。 */
+  const resetGroup = async (section, label) => {
+    const keys = KNOBS.filter(([s]) => s === section).map(([, k]) => k);
+    let failed = 0;
+    for (const key of keys) {
+      try {
+        const r = await api.setExpression(section, key, 0.5);
+        if (r && r.saved === false) failed += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    snapshot = null;
+    // 重新载入一次，让滑杆显示真实值（而不是假定写成功）
+    await load();
+    ui.status.textContent = failed
+      ? `${label}：${failed} 项未能保存到磁盘（只在本次运行内生效）`
+      : `${label}已恢复中性（0.5）`;
+  };
+
+  if (ui.exprReset) {
+    ui.exprReset.addEventListener('click', () => void resetGroup('expression', '语言表达方式'));
+  }
+}
+
+/*
+ * ⚠️ 「探头旋转补偿」滑杆已**删除**（2026-10-04，用户要求「把这个删除了吧，现在不用这个了」）。
  * 它当初是为"探头时立绘往右下甩"加的标定入口。后来查明真正的根因是两处几何错误
  * （见 `petLayout.ts` 的 `rawY` 与 `styles.css` 的 `transform-origin`），
  * 根因修掉之后补偿**恒为 0** —— 留着只会误导（用户看到滑杆会以为还需要调）。
@@ -1199,6 +1346,135 @@ ui.promptEnabled.addEventListener('change', async () => {
     ui.promptState.textContent = `⚠️ 出错：${error.message}`;
   }
 });
+
+/* --------------------------------------------------------------- 最高条例 */
+
+/*
+ * 🔴 这一块的交互是**需求**，不是装饰（2026-10-25）。
+ *
+ * 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+ * 不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+ *
+ * 所以做了三件事：
+ *   ① 警告常驻（在 HTML 里，不是 tooltip）；
+ *   ② 「恢复默认」一键救回；
+ *   ③ 清空要**确认**并说明后果。
+ *
+ * ## 为什么用「每行一条」而不是 JSON
+ *
+ * 用户改的是**文字**，不是数据结构。JSON 会让他为了加一条而操心引号逗号，
+ * 一错就是"保存失败"，而他只想写一句话。
+ */
+
+/** 默认条例（与 `config.py` 的 `DEFAULT_CHARTER` 保持一致）。
+ *
+ * ⚠️ 这里是**前端副本**，用于「恢复默认」按钮。
+ *    两边不一致时以后端为准（保存后会读回权威值），
+ *    但为了不让用户点了恢复默认却得到旧文案，改后端时要同步这里。
+ *    `selftest` 里有断言盯着这两处一致。
+ */
+const DEFAULT_CHARTER = [
+  '根据主观层调节自身状态。',
+  '对没有明显记忆的知识拥有新鲜感。',
+  '对信息不保持一味的肯定，要随时保留其他可能的概率。',
+];
+
+let charterDirty = false;
+
+const charterLines = () =>
+  ui.charterRules.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+function setCharterState(text) {
+  if (ui.charterState) ui.charterState.textContent = text;
+}
+
+if (ui.charterRules) {
+  ui.charterRules.addEventListener('input', () => {
+    charterDirty = true;
+    const count = charterLines().length;
+    setCharterState(
+      count === 0
+        ? '⚠️ 现在是空的 —— 保存后她将**没有任何思考约束**'
+        : `有未保存的修改（${count} 条）`,
+    );
+  });
+}
+
+if (ui.charterSave) {
+  ui.charterSave.addEventListener('click', async () => {
+    const rules = charterLines();
+    /*
+     * 清空要拦一下。用户说了"可自由更改"，所以**不禁止**，
+     * 但必须让他知道代价 —— 否则三个月后他会觉得"它怎么变得这么没主见"，
+     * 而完全想不起是自己清空的。
+     */
+    if (rules.length === 0) {
+      const ok = confirm(
+        '条例会被清空。\n\n' +
+          '清空 = 取消这几条思考约束，她会变回"别人说什么就是什么"的默认状态。\n\n' +
+          '确定要清空吗？',
+      );
+      if (!ok) return;
+    }
+    setBusy(ui.charterSave, true, '保存中…');
+    try {
+      const result = await api.setCharter(rules);
+      const ok = Boolean(result && result.ok);
+      if (ok) {
+        charterDirty = false;
+        // 回写权威值：空条目被过滤、顺序可能规整过
+        const fresh = Array.isArray(result.rules) ? result.rules : rules;
+        ui.charterRules.value = fresh.join('\n');
+        setCharterState(
+          fresh.length === 0
+            ? `⚠️ 已清空（${result.path}）—— 她现在没有思考约束了`
+            : `✅ 已保存 ${fresh.length} 条到 ${result.path}（已通知大脑立即生效）`,
+        );
+      } else {
+        setCharterState(`⚠️ 保存失败：${(result && result.message) || '未知错误'}`);
+      }
+    } catch (error) {
+      setCharterState(`⚠️ 保存出错：${error.message}`);
+    } finally {
+      setBusy(ui.charterSave, false);
+    }
+  });
+}
+
+if (ui.charterReload) {
+  ui.charterReload.addEventListener('click', async () => {
+    if (charterDirty && !confirm('当前有未保存的修改，重新载入会丢掉它们。继续？')) return;
+    try {
+      const result = await api.getCharter();
+      const rules = Array.isArray(result) ? result : [];
+      ui.charterRules.value = rules.join('\n');
+      charterDirty = false;
+      setCharterState(
+        rules.length === 0
+          ? '⚠️ 当前是空的 —— 她没有思考约束'
+          : `已重新载入 ${rules.length} 条`,
+      );
+    } catch (error) {
+      setCharterState(`⚠️ 载入出错：${error.message}`);
+    }
+  });
+}
+
+if (ui.charterReset) {
+  ui.charterReset.addEventListener('click', () => {
+    /*
+     * 「恢复默认」只填进输入框，**不直接保存** ——
+     * 与人格提示词的「重新载入」同一套习惯：先让用户看到要变成什么，再点保存。
+     * 直接保存会让"点错了"变成不可撤销的事（而这正是核心提示词）。
+     */
+    ui.charterRules.value = DEFAULT_CHARTER.join('\n');
+    charterDirty = true;
+    setCharterState(`已填入默认 ${DEFAULT_CHARTER.length} 条 —— 点「保存条例」才生效`);
+  });
+}
 
 /* --------------------------------------------------------------- 记忆设置 */
 

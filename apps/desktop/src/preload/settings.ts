@@ -21,6 +21,9 @@ const CHANNEL = {
   changed: 'settings:changed',
   peekOffset: 'settings:peek-offset',
   setPeekOffset: 'settings:set-peek-offset',
+  /** 语言层 / 性格层旋钮（2026-10-22）：一次读全量，写单个 */
+  expression: 'settings:expression',
+  setExpression: 'settings:set-expression',
   /** 文字弹窗（宠物上方的回应气泡）存在时间，默认 10 秒 */
   bubbleLinger: 'settings:bubble-linger',
   setBubbleLinger: 'settings:set-bubble-linger',
@@ -52,6 +55,16 @@ const CHANNEL = {
   /** 读人格提示词（`config/persona.yaml` 的 `persona.system_prompt`） */
   getPrompt: 'settings:get-prompt',
   setPrompt: 'settings:set-prompt',
+  /**
+   * 最高条例（2026-10-25）。
+   *
+   * 🔴 这不是普通设置：用户原话「要提醒用户条例的重要性，不亚于为宠物定义
+   * 作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+   *
+   * 所以设置页里这一块**必须带常驻警告**，不是 tooltip、不是问号图标。
+   */
+  getCharter: 'settings:get-charter',
+  setCharter: 'settings:set-charter',
   /** 截图对话时念出"它看到了什么"（2026-10-17） */
   snapshotDescription: 'settings:snapshot-desc',
   setSnapshotDescription: 'settings:set-snapshot-desc',
@@ -159,6 +172,29 @@ const api = {
    */
   setPrompt(prompt: string): Promise<unknown> {
     return ipcRenderer.invoke(CHANNEL.setPrompt, { prompt });
+  },
+
+  /**
+   * 读最高条例（字符串数组，2026-10-25）。
+   *
+   * ⚠️ 返回的是**数组**，不是字符串 —— 条例是"几条"，
+   * 用换行拼成字符串会在"条目本身含换行"时解析错。
+   */
+  getCharter(): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.getCharter);
+  },
+
+  /**
+   * 写最高条例。
+   *
+   * 主进程做两件事：落盘 `persona.yaml` 的 `charter` 段 + 热更新。
+   * 返回 `{ ok, message, path, rules }`，`rules` 是**实际生效**的列表
+   * （空条目会被过滤掉，前端据此校准显示）。
+   *
+   * ⚠️ 传空数组是**合法的**（清空 = 取消思考约束），前端负责确认。
+   */
+  setCharter(rules: string[]): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.setCharter, { rules });
   },
 
   /**
@@ -292,6 +328,30 @@ const api = {
 
   setPeekOffset(value: number): Promise<unknown> {
     return ipcRenderer.invoke(CHANNEL.setPeekOffset, { value });
+  },
+
+  /**
+   * 语言层旋钮（2026-10-22）。
+   *
+   *     expression  修辞 / 文化 / 词汇 / 温度·关心   —— 她怎么把话说出来
+   *
+   * ⚠️ 原来还有一组 `personality`（感性·理性），**已废弃**
+   *    （2026-10-22 用户决定不做，且明确"以后也没必要搞"）。
+   *
+   * ## 读一次拿全量，写只写一个
+   *
+   * 滑杆是边拖边存的（和活泼度同一条规矩），所以写接口只接受单个键；
+   * 而回显需要全部值，所以读接口一次给全 —— 省掉 4 次往返。
+   *
+   * 返回值带"真正生效的值"：主进程和 Python 两边都会夹取，
+   * 滑杆要按生效值校准，否则会显示一个实际没用上的数。
+   */
+  expression(): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.expression);
+  },
+
+  setExpression(section: 'expression', key: string, value: number): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.setExpression, { section, key, value });
   },
 
   /**

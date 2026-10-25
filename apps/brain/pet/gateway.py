@@ -28,6 +28,21 @@ from .embedding import build_embedder
 from .plugins import PluginHub
 from .protocol import PROTOCOL_VERSION, Incoming, ProtocolError, encode, msg, parse_incoming
 from . import web
+from . import expression
+from . import tools
+from .state import StateMachine, STATE_NAMES, BORED
+from .state_rules import build_state_rules
+from .curiosity import (
+    CuriositySession,
+    FOCUS_USER,
+    NagSession,
+    ask_user_prompt,
+    choose_focus,
+    gap_prompt,
+    nag_prompt,
+    nonsense_prompt,
+    nonsense_seed,
+)
 from .events import CAPABILITIES, EventEngine
 from .segments import SegmentTracker
 from . import quotes as quotes_mod
@@ -371,6 +386,21 @@ class Conversation:
         )
         # 活泼度镜像：从 activity.overall 同步（Autonomy 将来读它）
         self.sync_vitality()
+        # ── 状态机（2026-10-23）──
+        #
+        # 用户要求「将活泼度替换成状态」，四个状态：安静 / 无聊 / 好奇 / 自言自语。
+        #
+        # ⚠️ 精力用 **provider** 而不是传值：状态机每次 tick 都要读精力，
+        #    而精力由 `EmotionState` 持有。传 provider 让它自己取，
+        #    避免调用方忘了同步（"活泼度镜像"这类漏同步的 bug 在项目里出过好几次）。
+        #
+        # ⚠️ 初始状态是**无聊**而不是安静：刚启动时精力是 0.7（>0.4），
+        #    如果从安静开始，会因为"安静粘滞"永远出不来 —— 表现是
+        #    "宠物启动后一整天都很安静，怎么都不理人"。
+        self.state = StateMachine(
+            energy_provider=lambda: self.emotion.energy,
+            initial=BORED,
+        )
         # brain 可以由外部注入：Gateway 需要把**同一个实例**同时交给对话与记忆提炼，
         # 两处各建一个会出现"提炼用的模型和对话用的不是同一个"这种诡异问题。
         self.brain: Brain = brain or build_brain(config, self.emotion)
@@ -448,6 +478,51 @@ class Conversation:
     def attention_payload(self) -> dict[str, Any]:
         """给前端 / 日志的注意力快照（数值放这儿，提示词里不放）。"""
         return self.subjectivity.as_dict()
+
+    def _expression_with_warmth(self) -> dict[str, Any]:
+        """语言层配置 + **亲近度对温度的偏移**（2026-10-23）。
+
+        ## 用户要求
+
+        > 「亲近度越高，语言的温度越高、越亲近用户」
+
+        ## 为什么不能直接改 `expression.warmth`
+
+        那是**用户设定值**（`persona.yaml` 里存的）。运行时改它会导致：
+
+          · 用户会看到自己设的 0.5 莫名变成 0.8，还找不回来；
+          · 热更新会把它当"用户改了"写回文件，越跑越偏。
+
+        所以偏移**只在生成提示词时合成**，`config.expression` 本身一个字不动。
+
+        ## 偏移量怎么算
+
+        ```
+        有效温度 = 用户设定 + (亲近度 - 0.5) × 0.4
+        ```
+
+        · 亲近度 0.5（中性）-> 不加不减
+        · 亲近度 1.0（很亲）-> +0.2（0.5 变 0.7，明显更暖）
+        · 亲近度 0.0（疏远）-> -0.2（0.5 变 0.3，客气疏离）
+
+        为什么系数是 0.4 而不是 1.0：亲近度从 0 到 1 是很大的跨度，
+        直接全额加到温度上会让"最亲近"和"最疏远"差出整整一个档位，
+        用户设定值几乎被淹掉。0.4 让它"明显但没盖过用户"。
+        """
+        base = dict(self.config.expression)
+        try:
+            warmth = float(base.get("warmth", 0.5))
+        except (TypeError, ValueError):
+            warmth = 0.5
+        try:
+            intimacy = float(self.emotion.intimacy)
+        except (TypeError, ValueError):
+            intimacy = 0.2
+        if intimacy != intimacy:  # NaN
+            intimacy = 0.2
+        intimacy = max(0.0, min(1.0, intimacy))
+        base["warmth"] = round(max(0.0, min(1.0, warmth + (intimacy - 0.5) * 0.4)), 3)
+        return base
 
     # ------------------------------------------------------------------ 订阅
 
@@ -894,8 +969,16 @@ class Conversation:
             self.subjectivity.tick()
         else:
             assert user_text is not None
-            # 用户说话 -> 主观层把注意力拉向用户，并顺手更新情绪
-            self.subjectivity.on_user_message(user_text)
+            # 用户说话 -> 主观层把注意力拉向用户，并顺手更新情绪。
+            #
+            # ⚠️ 传入 `attention`：注意力在宠物自己那边时，用户说话会让心情**下降**
+            #    （「被打扰」机制，2026-10-23）。降幅 = attention × 0.2。
+            #    必须传**改动前**的注意力 —— `on_user_message` 内部会先把它拉向用户，
+            #    拉完再读就永远接近 0，惩罚永远不生效（这个顺序很容易写反）。
+            self.subjectivity.on_user_message(user_text, attention=self.subjectivity.attention)
+            # 用户真的聊天了 -> 重置「30 分钟没聊天进无聊」的计时。
+            # ⚠️ 只在这里调：点它、拖它**不算聊天**（用户第七轮明确）。
+            self.state.mark_chat()
 
             """
             ## 🔴 历史快照必须在 append **之前**取（2026-10-08 修，真 bug）
@@ -1258,7 +1341,18 @@ class Conversation:
                 "system.error",
                 msg("system.error", level="error", message=error_text, where="brain"),
             )
-        await self.bus.publish("pet.emotion", msg("pet.emotion", state=self.emotion.as_dict(), attention=self.attention_payload()))
+        await self.bus.publish(
+            "pet.emotion",
+            msg(
+                "pet.emotion",
+                state=self.emotion.as_dict(),
+                attention=self.attention_payload(),
+                # 状态快照（2026-10-23）：桌面端菜单要显示"当前是什么状态"。
+                # ⚠️ 状态会自己变（精力低 / 30 分钟没聊天 / 随机事件），
+                #    所以必须随事件下发，不能靠前端拿 activity 数值去猜。
+                pet_state=self.state.as_dict(),
+            ),
+        )
         # 一轮结束后异步提炼长期事实。刻意放在事件之后、且不 await：
         # 用户不该为"宠物记笔记"多等一秒，提炼失败也不影响这一轮对话。
         if self.memory is not None:
@@ -1916,7 +2010,60 @@ class Conversation:
                     )
                 )
 
-        parts.append(self.config.activity_for_prompt())
+        # ── 最高条例（2026-10-25）──
+        #
+        # 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+        # 不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+        #
+        # ## 位置：人格底子之后、状态之前
+        #
+        # · 在人格之后：先立"她是谁"，再立"她怎么想事情"；
+        # · 在状态之前：状态是**当下**的（会变），条例是**长期**的（稳定）。
+        #   长期的东西放前面，模型更容易把它当"底层设定"而不是"临时指示"。
+        #
+        # ⚠️ **不受 `system_prompt_enabled` 影响**：关掉人格底子不等于
+        #    关掉思考方式。两者是不同维度（见 `DEFAULT_CHARTER` 的说明）。
+        #
+        # ⚠️ 条例为空时不加任何内容 —— 用户清空 = 取消约束，这是允许的。
+        charter_rules = self.config.charter
+        if charter_rules:
+            # 每行一条、带序号。序号只是"便于引用"，不是优先级
+            # （提示词里已经明说"没有优先级"）。
+            lines = "\n".join(
+                f"{i}. {rule}" for i, rule in enumerate(charter_rules, 1)
+            )
+            parts.append(
+                self._render_prompt(
+                    "charter",
+                    "你思考事情时遵循下面这几条。它们**没有优先级**，"
+                    "遇到具体情境你自己权衡哪条更适用，不要把条例原样复述给用户。\n{rules}",
+                    rules=lines,
+                )
+            )
+
+        # ── 状态（2026-10-23，替换活泼度）──
+        #
+        # 用户要求「将活泼度替换成状态」。原来这里拼的是 `activity_for_prompt()`
+        # （"你现在很安静，基本不主动开口"那一套，按 overall 数值选档）。
+        #
+        # 现在改由状态机给：安静 / 无聊 / 好奇 / 自言自语。
+        # ⚠️ 状态**始终存在**，所以不像语言层那样可能返回空串。
+        #
+        # ⚠️ 保留 `activity_for_prompt()` 不删：自主调度器还在读 `activity.overall`
+        #    做概率计算（那是"多久开口一次"的量化参数，与"想不想说话"是两件事）。
+        #    但**提示词里不再提活泼度** —— 让模型按状态理解自己，而不是按一个数字。
+        parts.append(self.state.describe())
+        # ── 语言表达层（2026-10-22）──
+        #
+        # 与主观层（情绪、注意力、状态）**并列**：那些管"她此刻怎么样"，
+        # 这一层管"她怎么说出来"。见 `expression.py` 与 docs/进度交接.md §一百八十四。
+        #
+        # ⚠️ 放在情绪描述**之前**：先说"你平时怎么说话"，再说"你现在什么状态"，
+        #    模型对前者的理解更稳（反过来会被当下情绪盖掉）。
+        # ⚠️ 中性配置返回空串，`if text` 就不加 —— 默认配置不给提示词增加任何内容。
+        _expr = expression.describe(self._expression_with_warmth())
+        if _expr:
+            parts.append(_expr)
         parts.append(self.emotion.describe())
         parts.append(
             self._render_prompt(
@@ -2325,6 +2472,12 @@ class Gateway:
         )
         self.conversation.attach()
 
+        # 状态机的真源在 `Conversation`（它和情绪、注意力住在一起），
+        # 但循环挂在 Gateway（它才持有 task 生命周期）。
+        # 用一个 property 转发，避免两处各存一份 —— 那种"镜像"必然漂移。
+        self.state = self.conversation.state
+
+
         # 自主调度器：亲近度取自对话的情绪状态机，这样"养久了更爱搭话"是
         # 真实的耦合，而不是又一份独立状态。
         self.scheduler = Scheduler(
@@ -2333,7 +2486,7 @@ class Gateway:
             intimacy_provider=lambda: self.conversation.emotion.intimacy,
         )
         self._autonomy_task: Optional[asyncio.Task[None]] = None
-        # 随机事件（2026-10-17，用户列为重点功能）
+        # 随机事件 + 条件事件（2026-10-17 建，2026-10-25 合并成统一事件模块）
         self.events = EventEngine(
             base_chance=float(config.events.get("base_chance", 0.02)),
             min_gap_s=float(config.events.get("min_gap_s", 600.0)),
@@ -2341,11 +2494,25 @@ class Gateway:
             quiet_hours=list(config.events.get("quiet_hours") or []),
             max_per_day=int(config.events.get("max_per_day", 12)),
         )
+        # 条件事件表（状态切换的三条规则）。
+        #
+        # ⚠️ 这是 2026-10-25 的架构调整：判定从 `state.py::tick()` 搬到这里。
+        #    状态机现在只负责"怎么切"，不负责"该不该切"。
+        for _rule in build_state_rules():
+            self.events.add_rule(_rule)
+        # 状态机的"是否忙"改为读事件模块的槽位。
+        #
+        # 🔴 以前 `busy` = "状态是好奇/自言自语"，那个定义不准：
+        #    好奇可能已经搜完了、只是还没切状态 —— 那时它其实没事做，
+        #    却豁免了精力判定。现在真正的判据是"事件占着槽"。
+        self.state.set_busy_provider(lambda: self.events.busy)
         self._events_task: Optional[asyncio.Task[None]] = None
         # 自主截图循环（2026-10-18）。**必须在这里初始化为 None** ——
         # start_autonomy 里靠 is None 判断要不要起任务，漏了这句就是
         # AttributeError（这个项目踩过一次"两边都写好了、中间那根线没接"）。
         self._autosnap_task: Optional[asyncio.Task[None]] = None
+        # 状态机循环（2026-10-23）
+        self._state_task: Optional[asyncio.Task[None]] = None
         # 上一次「截图说话」的时刻（monotonic）。0 = 还没说过。
         # 截图说完 60 秒内不搭话 —— 见 _on_autonomy_speak 里的优先级判断。
         self._last_screen_speak_at: float = 0.0
@@ -3763,6 +3930,42 @@ class Gateway:
             await self.broadcast_config_ack(effective)
             return
 
+        if incoming.type == "pet.set_state":
+            """
+            用户从菜单切状态（2026-10-23）。
+
+            ## 为什么单独一个消息类型，而不是塞进 `config.update`
+
+            状态**不是配置** —— 它是运行时状态，会自己变（精力低、30 分钟没聊天、
+            随机事件）。塞进 `config.update` 会有两个问题：
+
+              ① `apply_patch` 会把未知键当成"插件配置"原样保留，
+                 于是 `pet_state` 会被写进 `config.root` 并跟着快照广播出去；
+              ② 更要命的是：用户切完状态后，`ready` 广播会让桌面端以为
+                 "配置变了"，而它拿到的 `activity.overall` 与状态**并不等价**。
+
+            所以走一条独立消息，语义清晰：这是"拨一下状态"，不是"改配置"。
+            """
+            raw = incoming.raw if isinstance(getattr(incoming, "raw", None), dict) else {}
+            key = str(raw.get("state") or "")
+            reason = str(raw.get("reason") or "用户切换")
+            change = self.conversation.state.set_state(key, reason)
+            if change is None:
+                log.info("状态：切换请求无效或状态未变（%r）", key)
+            else:
+                log.info("状态：%s", change)
+            # 无论有没有变都回一条快照，让菜单立刻显示真实状态
+            await self.bus.publish(
+                "pet.emotion",
+                msg(
+                    "pet.emotion",
+                    state=self.conversation.emotion.as_dict(),
+                    attention=self.conversation.attention_payload(),
+                    pet_state=self.conversation.state.as_dict(),
+                ),
+            )
+            return
+
     async def broadcast_config_ack(self, effective: dict[str, Any]) -> None:
         """把最新配置广播给所有已连接的前端。
 
@@ -3904,6 +4107,97 @@ class Gateway:
                 self._run_autosnap_forever(), name="autosnap"
             )
 
+        # 状态机循环（2026-10-23）。
+        #
+        # ⚠️ **必须独立一个任务**，不能挂在别的循环里：
+        #     · 自主截图循环会因为「看屏幕模块关掉」而不启动，
+        #       状态机不能跟着一起不跑（那样精力低了永远不会转安静）；
+        #     · 自主发言循环的节奏由 activity 决定，也不可靠。
+        #
+        # 30 秒一次：状态切换是"分钟级"的事，30 秒的粒度足够，
+        # 而且 `tick()` 是纯计算，很便宜。
+        if self._state_task is None or self._state_task.done():
+            self._state_task = asyncio.get_running_loop().create_task(
+                self._run_state_forever(), name="petstate"
+            )
+
+    async def _run_state_forever(self) -> None:
+        """条件事件循环（2026-10-23 建，2026-10-25 改成走事件模块）。
+
+        用户原话：「将活泼度替换成状态，下辖安静、无聊、好奇、自言自语四个状态」
+        以及「达到什么条件就触发什么事件，不要塞在主观层里面写」。
+
+        ## 每次 tick 做什么
+
+        1. 推进情绪（心情回归、亲近度衰减都在那里）
+        2. 组装 ctx，问事件模块"哪些条件规则成立"
+        3. 按 priority 依次执行（执行完状态会变，所以每条都重新组装 ctx）
+        4. 切了就记日志 + 落库 + 广播
+
+        ## 🔴 判定逻辑**不在这里**
+
+        三条规则（精力低转安静 / 安静粘滞 / 30 分钟没聊天转无聊）住在
+        `state_rules.py` 里，是可读、可测、可单独启停的数据。
+        这个循环只负责"每 30 秒问一次"。
+
+        ⚠️ 为什么是 30 秒：状态切换是"分钟级"的事，30 秒粒度足够，
+        而且规则判定是纯计算，很便宜。
+        """
+        log.info("条件事件循环启动（当前：%s）", STATE_NAMES.get(self.state.state, self.state.state))
+        while True:
+            try:
+                await asyncio.sleep(30.0)
+                # 情绪推进（心情回归 / 亲近度衰减）。规则读精力，所以要先推进。
+                #
+                # ⚠️ 用 `self.conversation.subjectivity`，不是 `self.subjectivity` ——
+                #    主观层住在 Conversation 里，Gateway 没有这个属性。
+                self.conversation.subjectivity.tick()
+                await self._check_condition_rules()
+            except asyncio.CancelledError:
+                log.info("条件事件循环已停止")
+                raise
+            except Exception:  # noqa: BLE001 —— 单轮异常不能让这个循环死
+                log.exception("条件事件循环单轮异常（已忽略，继续）")
+
+    async def _check_condition_rules(self) -> None:
+        """判一次条件事件。抽出来是为了能被测试直接调用（不用等 30 秒）。"""
+        for _ in range(4):  # 一轮最多连锁切 4 次（防规则互相触发成死循环）
+            ctx = {
+                "state": self.state.state,
+                "energy": float(self.conversation.emotion.energy),
+                "idle_s": max(0.0, time.time() - self.state.last_chat_at),
+                "switch": self.state.switch,
+            }
+            rules = self.events.check_rules(ctx)
+            if not rules:
+                return
+            rule = rules[0]
+            detail = await self.events.fire_rule(rule, ctx)
+            if not detail:
+                # 规则说"其实不用做" —— 直接返回，否则会死循环（条件仍成立）
+                return
+            log.info("条件事件「%s」：%s", rule.label, detail)
+            # 状态切换也要落库（2026-10-25）：用户该能查到"它今天为什么突然不说话了"。
+            try:
+                if self.memory is not None and self.memory.db is not None:
+                    self.memory.db.record_event(
+                        rule.kind,
+                        rule.label,
+                        detail,
+                        now=time.time(),
+                    )
+            except Exception:  # noqa: BLE001 —— 落库失败不影响已经发生的切换
+                log.debug("条件事件落库失败（已忽略）", exc_info=True)
+            await self.bus.publish(
+                "pet.emotion",
+                msg(
+                    "pet.emotion",
+                    state=self.conversation.emotion.as_dict(),
+                    attention=self.conversation.attention_payload(),
+                    pet_state=self.state.as_dict(),
+                ),
+            )
+
     async def _run_autosnap_forever(self) -> None:
         """
         「自己偶尔截一帧看一眼」（2026-10-18 用户给的数字）。
@@ -3968,6 +4262,286 @@ class Gateway:
         """今天 0 点的时间戳（日上限按自然日算，不按滚动 24 小时）。"""
         st = time.localtime(now)
         return time.mktime((st.tm_year, st.tm_mon, st.tm_mday, 0, 0, 0, 0, 0, -1))
+
+    async def _ask_model_once(self, prompt: str, max_tokens: int = 80) -> str:
+        """问模型一句话，收全文返回（不走流式、不写历史）。
+
+        ## 为什么不用 `brain.complete`
+
+        `Brain` 抽象基类**只有 `stream`**（见 `brains/base.py`）。
+        加一个 `complete` 会让每个 provider 都得实现两遍，
+        而这里只需要"拼出全文"这一个能力 —— 所以就地收集流。
+
+        ⚠️ 这个调用**不写 history、不触发 pet.say.***：它是内部判断
+        （"我还缺什么""怎么催他"），不是对用户说的话。
+        混进历史会污染对话，用户会看到"它刚才莫名其妙说了句缺什么"。
+        """
+        req = LLMRequest(
+            system="你是一个判断助手。只按用户要求回答，不要寒暄、不要解释。",
+            history=[],
+            user_text=prompt,
+            temperature=0.3,   # 判断类任务要稳，不要发散
+            max_tokens=max_tokens,
+            timeout_s=20.0,
+        )
+        parts: list[str] = []
+        try:
+            async for event in self.brain.stream(req):
+                # StreamEvent 的形状见 brains/base.py：有 delta 字段就收
+                delta = getattr(event, "delta", None)
+                if delta:
+                    parts.append(str(delta))
+        except Exception:  # noqa: BLE001 —— 判断失败由调用方决定怎么退化
+            log.debug("内部判断调用失败（已忽略）", exc_info=True)
+            return ""
+        return "".join(parts).strip()
+
+    async def _run_curiosity(self, ctx: dict[str, Any]) -> Optional[str]:
+        """好奇的自主搜索（2026-10-25 从独立流程并进事件模块）。
+
+        用户原话：
+
+        > 「好奇不在只对用户好奇，而是对未知的知识与事物，如若联网搜索开启，
+        > 允许宠物自行搜索联网信息，它将不定时的自由搜索信息满足自己的好奇心，
+        > 信息搜索有可能一连串不断的搜索直到它满足或者感到无聊」
+
+        > 「连串搜索只有在宠物搜不到想要的信息，比如搜索2012年的末日预言，
+        > 但找不到是谁说的，哪里说的，那些媒体报道的，有哪些要点，它就会去自己搜索。」
+
+        > 「搜索关闭时，进行连续的10次催促…10次后宠物失去耐心，退出好奇回到无聊状态。」
+
+        ## 两条分支
+
+        ```
+        搜索开启 -> 信息补全驱动的连串搜索（最多 5 轮）
+        搜索关闭 -> 催用户 10 次（间隔随机 7~60 秒，总 250/400 秒）
+        ```
+
+        ## ⚠️ 这个 handler 在**事件槽里**跑
+
+        所以它执行期间：别的随机事件抽不到、精力判定也不会打断它。
+        这正是用户要的「同一时间不存在两个事件」。
+
+        ## 返回值
+
+        返回一句"它做了什么"（记进 event_log）；返回 None = 没做成，不留痕迹。
+        """
+        search = ctx.get("search")
+        if search is None:
+            return None
+
+        # ① 先挑一个好奇的对象。
+        #
+        # 优先用"自己的兴趣"（从对话里长出来的），没有就退回一个通用方向。
+        # ⚠️ 不能空手去搜 —— 没有 topic 就没有第一轮的 query。
+        interests = [str(t).strip() for t in (ctx.get("interests") or []) if str(t).strip()]
+        topic = interests[0] if interests else "最近有什么新鲜事"
+
+        # ② 注意力分叉（2026-10-25）。
+        #
+        # 用户原话：「在好奇状态下，注意力在宠物自己时，它会自己去搜索信息，
+        # 在用户时，它会和用户聊天聊用户自己的故事。」
+        #
+        # ⚠️ 这是**按概率倾斜**，不是硬 if：注意力 0.9 -> 90% 自己查；
+        #    0.5 -> 各一半。硬分叉会让行为非常机械。
+        attention = float(self.conversation.subjectivity.attention)
+        focus = choose_focus(attention, rng=self.events.rng)
+        log.info("好奇：注意力 %.2f -> %s", attention, focus)
+
+        if focus == FOCUS_USER:
+            # 注意力在你身上：去缠你，而不是自己查。
+            return await self._ask_user_about(topic)
+
+        # ③ 搜索关着 -> 催用户（而不是硬搜，那样会被 tools 拒绝并留一条警告）
+        #
+        # ⚠️ `_web_enabled` 定义在 **Conversation** 上（它读 config 里的搜索模式），
+        #    不是 Gateway。写成 `self._web_enabled()` 会 AttributeError ——
+        #    和 2026-10-17 那次 `_interest_topics` 是同一个坑（见上面 ctx 的注释）。
+        if not self.conversation._web_enabled():
+            return await self._nag_for_search(topic)
+
+        # ④ 搜索开着 -> 连串搜索（缺口驱动）
+        session = CuriositySession(topic=topic, rng=self.events.rng)
+        log.info("好奇：开始查「%s」（最多 %d 轮）", topic, session.max_rounds)
+
+        while session.wants_more():
+            query = session.next_query()
+            try:
+                result = await search(query, 6)
+            except Exception:  # noqa: BLE001 —— 搜不到不算崩
+                log.warning("好奇：搜索「%s」失败（已忽略）", query, exc_info=True)
+                break
+            # 让模型判断"还缺什么"。这一步是连串搜索的**唯一驱动力**：
+            # 规则判不出"谁说的/哪里说的"这种语义缺口，只有模型能。
+            gap = await self._ask_gap(topic, result)
+            rnd = session.record(query, result, gap)
+            log.info("好奇：%s", rnd)
+            # 搜索过程中"自己决定要不要截图"（2026-10-25）。
+            #
+            # 用户原话：「搜索时由宠物自己决定是否自主截图记录获取图片信息」。
+            #
+            # ⚠️ 只在**第一轮之后**才考虑：第一轮刚搜完时还没有"要不要记下来"
+            #    的语境。而且截图有隐私闸门，抓不到就算了，绝不重试。
+            if rnd.gap and len(session.run.rounds) == 1:
+                await self._maybe_snap_while_curious(topic)
+            if not rnd.gap:
+                break
+
+        run = session.finish()
+        log.info("好奇：%s", run)
+        return f"它自己上网查了「{topic}」（{len(run.rounds)} 轮，{run.ended_by}）"
+
+    async def _ask_user_about(self, topic: str) -> Optional[str]:
+        """注意力在用户那边时的好奇：去缠用户（2026-10-25）。
+
+        用户原话：
+
+        > 「对用户好奇时，它会时不时的截图来询问用户在干什么，**捣乱**，
+        > 比如输出乱七八糟的如意大利面拌42号混凝土等胡言乱语但一本正经的事情
+        > 来吸引用户注意力。」
+
+        ## 两种表现，随机选
+
+        ```
+        截图问他在干嘛    -> 先抓一帧看一眼，再顺着画面问
+        胡言乱语捣乱      -> 一本正经说荒诞的话吸引注意（不可关闭）
+        ```
+
+        ⚠️ 截图有隐私闸门（`privacy` 规则），抓不到就退回胡言乱语。
+        ⚠️ 胡言乱语**不可关闭**（用户明确要求），所以没有开关。
+        """
+        # 一半概率尝试截图（要看用户此刻在干嘛），一半直接捣乱
+        try_snap = self.events.rng.random() < 0.5
+        screen = ""
+        if try_snap:
+            try:
+                result = await capture_and_describe(self.config, wait=False)
+                if result.ok:
+                    screen = describe_for_prompt(result)
+                    log.info("好奇（对用户）：看了一眼屏幕")
+            except Exception:  # noqa: BLE001 —— 截图失败就退回捣乱
+                log.debug("好奇：截图失败（已忽略）", exc_info=True)
+
+        if screen:
+            prompt = ask_user_prompt(topic) + f"\n\n你看到用户屏幕上：{screen}"
+        else:
+            # 胡言乱语：素材随机挑，提示词里写清"你在故意瞎说逗他"
+            seed = nonsense_seed(self.events.rng)
+            prompt = nonsense_prompt(seed)
+            log.info("好奇（对用户）：捣乱 —— %s", seed)
+
+        try:
+            line = await self._ask_model_once(prompt, max_tokens=100)
+        except Exception:  # noqa: BLE001
+            line = ""
+        if not line:
+            return None
+        try:
+            await self.conversation.speak_verbatim(line, reason="curious_user")
+        except Exception:  # noqa: BLE001 —— 说不出来也不算失败
+            log.debug("好奇：对用户说话失败（已忽略）", exc_info=True)
+        return f"它好奇你，{('看了你的屏幕' if screen else '一本正经地说了句胡话')}"
+
+    async def _maybe_snap_while_curious(self, topic: str) -> None:
+        """搜索过程中"自己决定要不要截图"（2026-10-25）。
+
+        用户原话：「搜索时由宠物自己决定是否自主截图记录获取图片信息」。
+
+        ## "自己决定"怎么落地
+
+        不是每次都截，而是**按概率 + 看有没有东西可截**：
+
+            · 50% 概率尝试（用户说的是"自己决定"，不是"每次必截"）
+            · 用户没开「允许偶尔截图」-> 直接放弃（隐私闸门优先）
+            · 截图失败/看不懂 -> 放弃，不重试
+
+        ⚠️ 截到的图**不发给模型**（这里只是"记录获取图片信息"）——
+        好奇心是自己在查资料，不是拿屏幕去问用户。图存进原文记忆即可。
+        """
+        if self.events.rng.random() >= 0.5:
+            return
+        if not self.config.screenshot.get("enabled", True):
+            log.debug("好奇：截图开关关着，跳过自主截图")
+            return
+        try:
+            result = await capture_and_describe(self.config, wait=False)
+        except Exception:  # noqa: BLE001 —— 截图失败绝不能影响搜索
+            log.debug("好奇：自主截图失败（已忽略）", exc_info=True)
+            return
+        if not result.ok:
+            log.debug("好奇：自主截图没看懂（%s）", result.message)
+            return
+        log.info("好奇：顺手记了一张图（%s）", (result.description or "")[:40])
+
+
+    async def _ask_gap(self, topic: str, result: str) -> str:
+        """问模型"关于这个话题你还缺什么"。
+
+        ⚠️ 这一步失败**不能中断搜索**：返回空串表示"够了"，
+        退化成"只搜一轮"——比整个好奇流程崩掉好。
+        """
+        try:
+            reply = await self._ask_model_once(gap_prompt(topic, result), max_tokens=60)
+        except Exception:  # noqa: BLE001 —— 判断缺口失败就当"够了"
+            log.debug("好奇：判断缺口失败（当作已补齐）", exc_info=True)
+            return ""
+        text = str(reply or "").strip()
+        # 模型被要求"够了就只输出一行：够了"，这里两种都认
+        if not text or text in ("够了", "够了。") or text.startswith("够了"):
+            return ""
+        # 只取第一行，避免它写一大段
+        return text.splitlines()[0].strip()
+
+    async def _nag_for_search(self, topic: str) -> Optional[str]:
+        """搜索关闭时催用户开（10 次，间隔随机）。
+
+        用户原话：
+
+        > 「每次催促要等上次催促优先语音判断过去20秒后再次进行催促，共催促10次，
+        > 10次后宠物失去耐心，退出好奇回到无聊状态。」
+
+        > 「这20和40秒我觉得用随机值好，最低不滴7秒，最高不高于60秒，
+        > 语音与文本总等待时间设为250秒和400秒，分属9轮等待。」
+
+        ## ⚠️ 这里会**长时间占槽**（最长约 400 秒）
+
+        这是有意的：它正在缠着用户开搜索，本来就不该同时去唱歌。
+        但 `EventSpec.duration_s` 必须给够（现在给 15 分钟），否则会被超时兜底掐断。
+        """
+        has_tts = bool(self.config.providers.get("tts", {}).get("enabled", False))
+        session = NagSession(has_tts=has_tts, rng=self.events.rng)
+        log.info(
+            "好奇：联网关着，准备催用户 %d 次（总等待约 %.0f 秒）",
+            session.max_nags,
+            sum(session.waits),
+        )
+
+        for idx in range(session.max_nags):
+            style = session.next_nag()
+            try:
+                text = await self._ask_model_once(nag_prompt(style, has_tts), max_tokens=60)
+            except Exception:  # noqa: BLE001 —— 生成失败就用一句兜底
+                text = ""
+            line = str(text or "").strip().splitlines()[0] if str(text or "").strip() else ""
+            if not line:
+                line = "就让我查一下嘛，一下就好。"
+            # 说出来（走真实的说话链路，用户能听见/看见）
+            #
+            # ⚠️ `speak_verbatim` 定义在 **Conversation** 上，不是 Gateway。
+            try:
+                await self.conversation.speak_verbatim(line, reason="nag_search")
+            except Exception:  # noqa: BLE001 —— 说不出来也不能中断催促
+                log.debug("好奇：催用户的话没说出来（已忽略）", exc_info=True)
+            if not session.wants_more():
+                break
+            wait = session.wait_seconds()
+            log.info("好奇：第 %d 次催完，等 %.0f 秒", idx + 1, wait)
+            await asyncio.sleep(wait)
+
+        session.finish()
+        # 失去耐心 -> 回无聊（用户原话）
+        self.state.switch(BORED, "催了 10 次仍没开联网，失去耐心")
+        return f"它想查「{topic}」，催了你 {len(session.run.nags)} 次没成，最后没耐心了"
 
     async def _run_events_forever(self) -> None:
         """
@@ -4154,9 +4728,12 @@ class Gateway:
         # 执行（可能真去联网）
         ctx = {
             "rng": self.events.rng,
-            # ⚠️ 2026-10-18 去掉 `ctx["search"]`：哲学事件已删除，当前没有事件需要联网。
-            # 第二版如果要有"自己去查东西"的事件，调 `tools.search_web()` ——
-            # 它已经统一带上了「联网关了就不许搜」的闸门（见 tools.py）。
+            # 好奇搜索要用（2026-10-25 并入事件模块）。
+            #
+            # ⚠️ `search` 走 `tools.search_web()` —— 它已经统一带上了
+            #    「联网关了就不许搜」的闸门（见 tools.py），所以这里不用再判。
+            "search": tools.search_web,
+            "curiosity": self._run_curiosity,
             # ⚠️ `_interest_topics` 定义在 **Conversation** 上（它要读 memory），
             #    不是 Gateway。2026-10-17 第一版写成 `self._interest_topics(...)`，
             #    于是**每一轮事件判定都抛 AttributeError**：

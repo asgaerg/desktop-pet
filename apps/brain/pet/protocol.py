@@ -104,6 +104,20 @@ INCOMING_TYPES = frozenset(
         "modules.query",
         "modules.set",
         "config.update",
+        # 用户从菜单切状态（2026-10-23，「将活泼度替换成状态」）。
+        #
+        # ## ⚠️ 这是**第五次**加处理分支，白名单先加
+        #
+        # 上面那四条注释（voice.ptt / tts.result / web.browser.result /
+        # vision.snap）都在警告同一件事：漏了白名单，消息在解析阶段就被拒，
+        # 日志里只有一句"未知消息类型"，界面上是"点了没反应"。
+        #
+        # 这次**先加白名单**再写处理分支。
+        #
+        # 为什么不复用 `config.update`：状态是运行时状态（会自己变），
+        # 不是配置。塞进 config.update 会让 `apply_patch` 把未知键
+        # 原样保留进 config.root，还会跟着快照广播出去。
+        "pet.set_state",
     }
 )
 

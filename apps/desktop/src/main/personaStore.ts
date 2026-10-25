@@ -1043,3 +1043,105 @@ export function writeNestedScalar(
   }
   return { ok: true, message: '已保存', path };
 }
+
+/**
+ * 读一个**顶层字符串列表**（如 `charter`），2026-10-25 加。
+ *
+ * ## 为什么不复用 `readScalar`
+ *
+ * `readScalar` 只认标量和块标量，列表项（`  - xxx`）它读不出来 ——
+ * 会返回 null，于是设置页永远是空的，用户以为"条例没了"。
+ *
+ * ## 解析规则
+ *
+ * 只认顶层段下的 `- ` 项，遇到下一个顶层键（`^\S`）就停。
+ * 段内注释和空行跳过（它们不属于任何一项）。
+ */
+export function readList(projectRoot: string, section: string): string[] {
+  const path = personaPath(projectRoot);
+  if (!path) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  let inside = false;
+  for (const line of raw.split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inside = new RegExp(`^${section}\\s*:`).test(line);
+      continue;
+    }
+    if (!inside) continue;
+    const m = /^\s*-\s+(.*)$/.exec(line);
+    if (!m) continue;
+    // 去掉行尾注释（只在"空格 + #"处切，避免切掉内容里的 #）
+    const value = m[1].replace(/\s+#.*$/, '').trim();
+    if (value) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * 写一个**顶层字符串列表**（如 `charter`），2026-10-25 加。
+ *
+ * ## 为什么整体替换而不是逐项改
+ *
+ * 条例是"一组"，用户可能加行、删行、改行。逐项 diff 会让代码复杂好几倍，
+ * 而这里**不需要保留块内注释** —— 条例本身的含义在文本里，
+ * 不像 `expression` 那样每条都要带"为什么这么设"的长注释。
+ *
+ * ⚠️ 但**段前的注释块要保留**（那段解释了"这不是普通设置"）。
+ * 所以替换范围从 `section:` 这一行开始，到下一个顶层键之前结束。
+ *
+ * 空列表 -> 写成 `charter: []`（**不是删掉整段**）——
+ * 删段会让下次读取退回默认值，而用户的本意是"清空"。
+ */
+export function writeList(
+  projectRoot: string,
+  section: string,
+  items: string[],
+): WritePromptResult {
+  const path = personaPath(projectRoot);
+  if (!path) return { ok: false, message: '未找到 config/persona.yaml', path: '' };
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    return { ok: false, message: `读取失败：${(error as Error).message}`, path };
+  }
+
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  const lines = raw.split(/\r?\n/);
+
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (new RegExp(`^${section}\\s*:`).test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) {
+    return { ok: false, message: `文件里没有 ${section} 段`, path };
+  }
+
+  // 找到这一段的结束位置（下一个顶层键）
+  let end = start + 1;
+  while (end < lines.length && !/^\S/.test(lines[end])) end += 1;
+
+  const clean = items.map((s) => String(s ?? '').trim()).filter(Boolean);
+  const block =
+    clean.length === 0
+      ? [`${section}: []`]
+      : [`${section}:`, ...clean.map((item) => `  - ${item}`)];
+
+  lines.splice(start, end - start, ...block);
+  try {
+    writeFileSync(path, lines.join(eol), 'utf8');
+  } catch (error) {
+    return { ok: false, message: `写入失败：${(error as Error).message}`, path };
+  }
+  return { ok: true, message: '已保存', path };
+}

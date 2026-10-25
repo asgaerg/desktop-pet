@@ -115,6 +115,17 @@ export interface PetMenuState {
   paused: boolean;
   visionWatching: boolean;
   activity: number;
+  /**
+   * 当前状态键（quiet / bored / curious / monologue），2026-10-23 加。
+   *
+   * 为什么不能只用 `activity` 数值猜：状态现在**会自己变**
+   * （精力 <0.4 转安静且粘滞、30 分钟没聊天转无聊、随机事件触发好奇）。
+   * 数值是"多久开口一次"的量化参数，与状态不再一一对应 ——
+   * 按数值猜会出现"菜单显示无聊，其实它在安静"。
+   *
+   * 空串表示后端还没回报过（刚启动那一刻），此时退回按数值猜。
+   */
+  petState: string;
   petScale: number;
   /** "边缘探头"开关（拖到屏幕左/右边缘后倾斜 45° 窥视） */
   edgePeek: boolean;
@@ -247,37 +258,53 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
    * 塞不下的一两句解释放右边，比把名字拼成一长串好读。
    */
   /**
-   * 活泼度四档 —— **权威定义**（2026-10-17 用户口述，原话要点）。
+   * 四个状态 —— **权威定义**（2026-10-23 起叫「状态」，不再叫「活泼度」）。
+   *
+   * ## 为什么从"数值档位"改成"状态"
+   *
+   * 用户原话：「将活泼度替换成状态」。
+   *
+   * 原来这里是四个 `0.1 / 0.5 / 0.8 / 1.0` 的数值档，含义是"多久开口一次"。
+   * 现在四个名字变成**宠物的内在状态**：由它自己按事件切换（精力低转安静、
+   * 30 分钟没聊天转无聊、随机事件触发好奇），用户也能在菜单里拨。
+   *
+   * ⚠️ 数值仍然保留（`activity.overall`），因为自主调度器还靠它算概率。
+   *    但**菜单传的是状态名**，不是数值 —— 用数值表达状态会丢掉
+   *    "安静 vs 无聊"的语义差别（0.1 和 0.5 只差个数字）。
+   *
+   * ## 四档的原意（2026-10-17 用户口述，名字沿用，含义已按状态重写）
    *
    * ```
-   * 安静    玩伴不怎么说话，也不会自主截图
-   * 无聊    会自己想自己要干什么（看小说 / 和用户聊天打游戏 /
-   *         看用户打游戏顺便解说），偶尔发呆
-   * 好奇    部分注意力在用户身上，比较好奇用户在干什么，
-   *         偶尔搭话或截图和用户聊天
-   * 自言自语 神神叨叨，嘴里念着道经 / 圣经 / 佛经 / 时不时搜哲学句子学习体会；
-   *         也会和用户搭话，但大部分时间在讲自己读了什么、觉得什么；
-   *         注意力掉得很快，20 分钟不到就回到安静（情绪发泄完了）
+   * 安静      不想说话，也不想动（精力低了会**自动**进这个状态，且粘滞）
+   * 无聊      想找点事做但没目标；30 分钟没聊天会自动进
+   * 好奇      对某个具体东西好奇，会自己搜（随机事件触发）
+   * 自言自语  沉浸在自己念头里，说给自己听（心情维持兴奋）
    * ```
    *
    * ⚠️ 两处容易搞错：
-   *   ① **「无聊」是 0.5 那档**（老文案写的「普通」），不是新的第五档。
+   *   ① 「无聊」是原来的 0.5 那档（老文案写的「普通」），不是第五档。
    *   ② 「自言自语」的自主截图频率**和「好奇」差不多**（用户 2026-10-17 补），
    *      不是更频繁 —— 老设计说"更频繁"，作废。
    */
-  const ACTIVITY_TIERS: Array<{ name: string; value: number }> = [
-    { name: '安静', value: 0.1 },
-    { name: '无聊', value: 0.5 },
-    { name: '好奇', value: 0.8 },
-    { name: '自言自语', value: 1.0 },
+  const STATE_TIERS: Array<{ key: string; name: string; value: number }> = [
+    { key: 'quiet', name: '安静', value: 0.1 },
+    { key: 'bored', name: '无聊', value: 0.5 },
+    { key: 'curious', name: '好奇', value: 0.8 },
+    { key: 'monologue', name: '自言自语', value: 1.0 },
   ];
 
-  const activityOption = (label: string, value: number, hint = ''): PetMenuItem => ({
+  /**
+   * 状态选项。
+   *
+   * ⚠️ `action` 传的是**状态名**（`state:quiet`），不是数值 ——
+   *    处理器 `setPetState` 收字符串（见 `petMenu.ts` 的 ACTIONS_WITH_VALUE）。
+   */
+  const stateOption = (label: string, key: string, checked: boolean, hint = ''): PetMenuItem => ({
     label,
     ...(hint ? { value: hint } : {}),
     type: 'radio',
-    checked: near(state.activity, value),
-    action: `activity:${value}`,
+    checked,
+    action: `state:${key}`,
   });
 
   /**
@@ -650,30 +677,36 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
 
     {
       /*
-       * ⚠️ 数值从 label 里**挪到了 `value`**（2026-10-14）。
+       * 「状态」—— 2026-10-23 由「活泼度」改名而来（用户要求「将活泼度替换成状态」）。
        *
+       * ⚠️ 数值从 label 里**挪到了 `value`**（2026-10-14）。
        * 设计稿这一行是「活泼度」+ 右侧灰色 `0.60` + 箭头 —— 数值单独占一格。
        * 原来拼成 `活泼度 0.60` 的话，渲染层只能靠正则把它拆出来，
        * 而「宠物大小（300 px）」这类**标签里本来就带数字**的行会被误伤。
        */
-      label: '活泼度',
+      label: '状态',
       /*
-       * 父行右侧显示**最近的档位名**，不是滑杆的原始数值（2026-10-17 用户要求）。
+       * 父行右侧显示**当前状态名**（2026-10-17 起就是档位名，现在沿用）。
        *
        * 用户看到的是四个名字，一个 `0.60` 对他没意义 —— 而且 0.60 四个档位
        * 一个都不勾（`near` 容差 0.01），会让人以为"当前没有选中任何档"。
+       *
+       * 2026-10-23：优先用后端回报的**真实状态**（`state.petState`），
+       * 拿不到才退回按数值猜 —— 因为状态现在会自己变（精力低、30 分钟没聊天），
+       * 数值猜出来的可能已经过期。
        */
-      value: ACTIVITY_TIERS.reduce(
-        (best, tier) =>
+      value:
+        STATE_TIERS.find((tier) => tier.key === state.petState)?.name ??
+        STATE_TIERS.reduce((best, tier) =>
           Math.abs(tier.value - state.activity) < Math.abs(best.value - state.activity) ? tier : best,
-      ).name,
+        ).name,
       icon: 'spark',
       /*
-       * 四档的名字与后缀（2026-10-17 用户要求）。
+       * 四个状态的名字与后缀。
        *
        * ## 名字来自 §115 拍板，不能自己改
        *
-       * 用户看的是**四个名字**，不是一个数字：安静 / 普通 / 好奇 / 自言自语。
+       * 用户看的是**四个名字**：安静 / 无聊 / 好奇 / 自言自语。
        * 老文案是「活泼（0.8）」「话痨（1.0）」—— 那两个名字**没有拍板过**，
        * 是壳子时期的占位写法。
        *
@@ -681,7 +714,7 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
        *
        * `会自主截图`  这一档会**自己**抓屏（不是用户按 Ctrl+Alt+S 那种）。
        *               ⚠️ 它有前置条件：设置里的「允许偶尔截图」必须**由用户打开**。
-       *               活泼度只决定频率，**永远不能自己把权限打开**（§115 的硬约束）。
+       *               状态只决定频率，**永远不能自己把权限打开**（§115 的硬约束）。
        * `注意力…`     注意力在谁身上（0 = 全在你，1 = 全在它自己）。
        *               只标两端，中间两档标了反而噪音。
        *
@@ -690,15 +723,20 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
        *    两者是**不同维度**，所以最高档两个后缀都带。
        */
       submenu: [
-        activityOption(
+        stateOption(
           '安静 · 注意力在你身上，不截图',
-          0.1,
+          'quiet',
+          state.petState === 'quiet',
         ),
-        activityOption('无聊 · 自己找事做，偶尔发呆', 0.5),
-        activityOption('好奇 · 会自主截图，偶尔搭话', 0.8),
+        stateOption('无聊 · 自己找事做，偶尔发呆', 'bored', state.petState === 'bored'),
+        stateOption('好奇 · 会自主截图，偶尔搭话', 'curious', state.petState === 'curious'),
         // 自言自语：用户 2026-10-17 定的写法 —— 三个要点一条说完，
         // **不要**右侧灰字（那条曾被挤成省略号，「会自…」根本读不出是什么）。
-        activityOption('自言自语 · 注意力在自己，会自主截图，20 分钟后安静', 1.0),
+        stateOption(
+          '自言自语 · 注意力在自己，会自主截图，20 分钟后安静',
+          'monologue',
+          state.petState === 'monologue',
+        ),
       ],
     },
 

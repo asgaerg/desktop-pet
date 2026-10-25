@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -216,6 +217,86 @@ empty_map: {}
         prompt = cfg.activity_for_prompt()
         _assert("安静" in prompt, f"活泼度未翻译成口吻：{prompt}")
         return "夹取/补丁/报错/口吻均正常"
+
+    @suite.check("语言表达层：中性不污染提示词、极端可关到 0、非法值不炸")
+    def _() -> str:
+        # 2026-10-22「不写人格内容，改做可调旋钮」。
+        #
+        # 这一层是**用户可编辑的配置**，所以三条底线必须成立：
+        #   ① 默认（全中性）不能给提示词增加任何内容 —— 否则所有人突然变了说话风格；
+        #   ② 每一项都能关到 0 而系统仍然正常说话 —— 表达层是调味，不是地基；
+        #   ③ 手滑写错（字符串/None/NaN）不能让 sidecar 起不来。
+        from . import expression
+        from .config import DEFAULT_EXPRESSION
+
+        # ① 中性 -> 空串
+        neutral = dict(DEFAULT_EXPRESSION)
+        _assert(
+            expression.describe(neutral) == "",
+            f"默认配置污染了提示词：{expression.describe(neutral)!r}",
+        )
+
+        # ② 全 0 / 全 1 都要有内容，且方向相反
+        zero = expression.describe({k: 0 for k in neutral})
+        one = expression.describe({k: 1 for k in neutral})
+        _assert(zero, "全 0 时应当给出'不用修辞/说大白话'的约束")
+        _assert(one, "全 1 时应当给出'爱打比方/用典'的约束")
+        _assert(zero != one, "全 0 与全 1 的措辞不能一样")
+        _assert("白话" in zero or "直说" in zero, f"全 0 应偏直白：{zero[:60]}")
+        _assert("比方" in one, f"全 1 应偏修辞：{one[:60]}")
+
+        # ③ 容错：这些都不该抛异常
+        for bad in (None, "abc", 123, {"warmth": "abc"}, {"warmth": float("nan")}):
+            try:
+                expression.describe(bad)
+            except Exception as exc:  # noqa: BLE001
+                raise AssertionError(f"非法输入 {bad!r} 抛了异常：{exc}") from exc
+
+        # ④ 四个旋钮**互不干扰**：只动一个，只有那一个的措辞出现
+        only_warmth = expression.describe({"warmth": 1.0, **{k: 0.5 for k in neutral if k != "warmth"}})
+        _assert("温度" in only_warmth or "留意" in only_warmth, f"只调温度却没出现温度措辞：{only_warmth}")
+        _assert("比方" not in only_warmth, f"只调温度却带出了修辞措辞：{only_warmth}")
+
+        # ⑤ 语言层**不含**感性/理性 —— 那一项已废弃（2026-10-22 用户决定）
+        _assert(
+            "sensibility" not in neutral,
+            f"感性/理性已废弃，不该在语言层里：{sorted(neutral)}",
+        )
+        full = expression.describe({k: 1 for k in neutral})
+        _assert(
+            "感性" not in full and "理性" not in full,
+            f"语言层的措辞里混进了已废弃的认知取向：{full}",
+        )
+
+        return "中性空串、全0/全1 相反、非法值不抛、旋钮互不干扰、不含感性理性"
+
+    @suite.check("语言表达层：热更新即时生效（不重启）")
+    def _() -> str:
+        # 用户要求这一层和活泼度、情绪一样"改完立刻生效"。
+        # 走 apply_patch -> _validate -> expression，所以只要 config 变了，
+        # 下一轮 build_system_prompt 就会读到新值。
+        from . import expression
+
+        cfg = Config()
+        before = expression.describe(cfg.expression)
+        _assert(before == "", f"默认不该有内容：{before!r}")
+
+        cfg.apply_patch({"expression": {"warmth": 1.0}})
+        after = expression.describe(cfg.expression)
+        _assert(after != before, "改了 warmth 但提示词没变")
+        _assert("留意" in after or "温度" in after, f"没体现温度：{after}")
+
+        # 夹取：越界值被收进 0~1，不报错
+        cfg.apply_patch({"expression.warmth": 9})
+        _assert(cfg.expression["warmth"] == 1.0, f"越界未夹取：{cfg.expression['warmth']}")
+
+        # 非法值回落中性，而不是抛异常
+        cfg.apply_patch({"expression.culture": "很文雅"})
+        _assert(
+            cfg.expression["culture"] == 0.5,
+            f"非法值应回落中性 0.5，实际 {cfg.expression['culture']}",
+        )
+        return "热更新生效、越界夹取、非法值回落中性"
 
     @suite.check("随附 config 文件可解析且键名齐全")
     def _() -> str:
@@ -6925,6 +7006,572 @@ def test_subjectivity(suite: SelfTest) -> None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_state_machine(suite: SelfTest) -> None:
+    """状态机 + 三件套新动力学（2026-10-23）。
+
+    这一组是整个主观层里**最该被测住**的部分：状态切换是黑盒里最难排查的东西
+    （"它为什么一整天不说话"），而它本身是纯逻辑 —— 用假时钟能精确验证每一次切换。
+    """
+    import random
+
+    from .brains.base import EmotionState
+    from .events import EventEngine
+    from .state import (
+        BORED,
+        BUSY_TIMEOUT_S,
+        CURIOUS,
+        MONOLOGUE,
+        QUIET,
+        STATE_NAMES,
+        StateMachine,
+        plan_wait_for_target,
+        plan_wait_seconds,
+    )
+    from .state_rules import build_state_rules
+
+    class Clock:
+        """可手动推进的假时钟（避免真等 30 分钟）。"""
+
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+        def advance(self, seconds: float) -> None:
+            self.now += seconds
+
+    def make(energy: float = 0.8, initial: str = BORED):
+        clock = Clock()
+        box = {"energy": energy}
+        sm = StateMachine(
+            energy_provider=lambda: box["energy"],
+            initial=initial,
+            clock=clock,
+        )
+        return sm, clock, box
+
+    def make_rules(energy: float = 0.8, initial: str = BORED):
+        """造一套"事件模块 + 状态机"，并接上 busy provider。
+
+        ⚠️ 2026-10-25 起判定在规则表里，所以要同时驱动两边。
+        这个辅助函数就是"两边怎么接"的**唯一范例** —— 生产代码
+        （`gateway._check_condition_rules`）用的是同一套接法。
+        """
+        eng = EventEngine(clock=lambda: 1000.0)
+        for rule in build_state_rules():
+            eng.add_rule(rule)
+        sm = StateMachine(initial=initial, clock=lambda: 1000.0)
+        sm.set_busy_provider(lambda: eng.busy)
+        box = {"energy": energy, "idle": 0.0}
+        return eng, sm, box
+
+    def run_rules(eng, sm, box, idle_override=None) -> list[str]:
+        """跑一遍条件规则，返回触发了哪些。
+
+        `ctx` 的组装与生产代码一致（见 `gateway._check_condition_rules`）。
+        """
+        fired: list[str] = []
+        for _ in range(4):  # 与生产一致：最多连锁 4 次
+            ctx = {
+                "state": sm.state,
+                "energy": box["energy"],
+                "idle_s": box["idle"] if idle_override is None else idle_override,
+                "switch": sm.switch,
+            }
+            rules = eng.check_rules(ctx)
+            if not rules:
+                break
+            rule = rules[0]
+            detail = asyncio.run(eng.fire_rule(rule, ctx))
+            if not detail:
+                break
+            fired.append(rule.kind)
+        return fired
+
+    @suite.check("状态机：精力 <0.4 转安静，回升也不离开（粘滞）")
+    def _() -> str:
+        # 用户原话：「精力这个低于0.4就转为安静状态，进入安静状态后精力高于0.4
+        # 也仍旧是安静状态，除非用户切换状态或者随机事件触发状态等等。」
+        #
+        # ⚠️ 2026-10-25 起判定在**规则表**里（state_rules.py），不在状态机上。
+        #    状态机只负责"怎么切"，所以这里要同时驱动规则和状态机。
+        eng, sm, box = make_rules(energy=0.8, initial=BORED)
+        _assert(sm.state == BORED, f"初始应为无聊，实际 {sm.state}")
+
+        box["energy"] = 0.35
+        fired = run_rules(eng, sm, box)
+        _assert(sm.state == QUIET, f"应转安静，实际 {sm.state}")
+        _assert("0.35" in sm.last_reason, f"切换原因应带精力值：{sm.last_reason}")
+        _assert(fired, "应当有规则被触发")
+
+        # 粘滞：精力回到 0.9 也**不能**自己离开安静
+        box["energy"] = 0.9
+        _assert(not run_rules(eng, sm, box), "精力回升不该触发任何规则（粘滞）")
+        _assert(sm.state == QUIET, f"粘滞失效，跑到了 {sm.state}")
+
+        # 但用户手动切可以离开
+        sm.switch(BORED, "用户切换")
+        _assert(sm.state == BORED, "用户手动切换应当生效（粘滞不能挡）")
+        return "0.35 -> 安静；回到 0.9 仍安静；手动可离开"
+
+    @suite.check("状态机：30 分钟没聊天进无聊，且只有这一条路")
+    def _() -> str:
+        # 用户第七轮：「用用户 30 分钟没跟它聊天这个先。」
+        # 原来的「精力+心情都>0.5 持续10分钟」已废弃删除。
+        eng, sm, box = make_rules(energy=0.9, initial=MONOLOGUE)
+        _assert(sm.state == MONOLOGUE, "预置状态失败")
+
+        box["idle"] = 29 * 60
+        _assert(not run_rules(eng, sm, box), "29 分钟不该进无聊")
+
+        box["idle"] = 31 * 60  # 累计 31 分钟
+        run_rules(eng, sm, box)
+        _assert(sm.state == BORED, f"31 分钟应进无聊，实际 {sm.state}")
+
+        # mark_chat 会重置计时（规则读的是 last_chat_at）
+        sm.switch(MONOLOGUE, "x")
+        sm.mark_chat()
+        _assert(not run_rules(eng, sm, box, idle_override=0.0), "刚聊过不该进无聊")
+        return "29 分钟不进、31 分钟进；mark_chat 重置计时"
+
+    @suite.check("状态机：有事在做时精力再低也不打断")
+    def _() -> str:
+        # 用户原话：「必须等事件结束或功能退出，才能进行精力等判定转换状态。」
+        #
+        # ⚠️ 2026-10-25 起"有事在做"= **事件模块的槽被占**，
+        #    不再是"状态是好奇/自言自语"。
+        eng, sm, box = make_rules(energy=0.8, initial=BORED)
+        _assert(eng.acquire("reading", "读小说", 600.0), "抢槽应成功")
+        _assert(sm.busy, "占槽后状态机应报告 busy")
+
+        box["energy"] = 0.1  # 极低
+        _assert(not run_rules(eng, sm, box), "有事件时精力再低也不该转安静")
+        _assert(sm.state == BORED, f"不该被打断，实际 {sm.state}")
+
+        eng.release("reading")
+        run_rules(eng, sm, box)
+        _assert(sm.state == QUIET, "事件结束后才按精力结算")
+        return "占槽期间 0.1 精力也不打断；释放后立刻转安静"
+
+    @suite.check("事件槽：互斥、超时兜底、release 校验 kind")
+    def _() -> str:
+        # 用户原话：「同一时间不存在两个事件就可以了」
+        clock = Clock()
+        eng = EventEngine(clock=clock)
+
+        _assert(not eng.busy, "初始应为空")
+        _assert(eng.acquire("a", "事件A", 60.0), "第一次抢槽应成功")
+        _assert(not eng.acquire("b", "事件B", 60.0), "槽被占时第二次抢槽必须失败")
+        _assert(eng.current_kind == "a", f"当前事件应是 a，实际 {eng.current_kind}")
+
+        # release 校验 kind：放错的事件不能把别人的槽清掉
+        eng.release("b")
+        _assert(eng.busy, "释放错的 kind 不该清槽")
+
+        eng.release("a")
+        _assert(not eng.busy, "释放对的 kind 应清槽")
+
+        # 瞬时事件（duration=None）不占槽
+        _assert(eng.acquire("x", "瞬时", None), "瞬时事件应成功")
+        _assert(not eng.busy, "瞬时事件不该占槽")
+
+        # 超时兜底
+        eng.acquire("slow", "慢事件", 10.0)
+        _assert(eng.busy, "应占槽")
+        clock.advance(15.0)
+        _assert(not eng.busy, "超时后应自动释放")
+        _assert(eng.timeouts == 1, f"应记一次超时，实际 {eng.timeouts}")
+        return "互斥、kind 校验、瞬时不占槽、10 秒超时自动释放"
+
+    @suite.check("事件槽：占槽时随机事件也不触发")
+    def _() -> str:
+        # 这是"同一时间不存在两个事件"的另一半：随机事件也要看槽。
+        eng = EventEngine(base_chance=1.0, clock=lambda: 10000.0)
+        spec, why = eng.pick(
+            now=10000.0,
+            last_interaction_at=0.0,
+            last_event_at=0.0,
+            events_today=0,
+        )
+        # 空槽时（chance=1.0）应当能抽到某事件或至少不是 busy
+        _assert(why != "busy", f"空槽时不该报 busy：{why}")
+
+        eng.acquire("hold", "占着", 600.0)
+        spec2, why2 = eng.pick(
+            now=10000.0,
+            last_interaction_at=0.0,
+            last_event_at=0.0,
+            events_today=0,
+        )
+        _assert(spec2 is None and why2 == "busy", f"占槽时应报 busy，实际 {why2}")
+        return "空槽可抽；占槽时报 busy 且不抽"
+
+    @suite.check("状态机：四个状态都有提示词，且互不相同")
+    def _() -> str:
+        texts = {}
+        for key in (QUIET, BORED, CURIOUS, MONOLOGUE):
+            sm = StateMachine(initial=key)
+            text = sm.describe()
+            _assert(text, f"{STATE_NAMES[key]} 没有提示词")
+            texts[key] = text
+        _assert(
+            len(set(texts.values())) == 4,
+            f"四个状态的提示词应当各不相同，实际只有 {len(set(texts.values()))} 种",
+        )
+        # 事件描述要拼进去
+        sm = StateMachine(initial=BORED)
+        sm.begin_event("读小说")
+        _assert("读小说" in sm.describe(), f"事件没拼进提示词：{sm.describe()}")
+        return "四状态提示词齐全且互不相同；事件描述会拼进去"
+
+    @suite.check("状态机：非法状态名不生效（不炸、不改状态）")
+    def _() -> str:
+        sm = StateMachine(initial=BORED)
+        _assert(sm.switch("不存在", "测试") is None, "非法状态应返回 None")
+        _assert(sm.state == BORED, f"非法状态改了状态：{sm.state}")
+        return "非法状态名被忽略"
+
+    @suite.check("好奇搜索：信息补全驱动，最多 5 轮")
+    def _() -> str:
+        # 用户原话：「连串搜索只有在宠物搜不到想要的信息…它就会去自己搜索」
+        # 「连串搜索加个上限，5轮足以。」
+        from .curiosity import CuriositySession, MAX_SEARCH_ROUNDS
+
+        # ① 3 轮补齐 -> 提前结束
+        s = CuriositySession("2012 末日预言", rng=random.Random(1))
+        gaps = ["不知道是谁提出的", "不知道哪些媒体报道过", ""]
+        i = 0
+        while s.wants_more():
+            s.record(s.next_query(), "结果", gaps[i] if i < len(gaps) else "")
+            i += 1
+        run = s.finish()
+        _assert(len(run.rounds) == 3, f"应在第 3 轮补齐，实际 {len(run.rounds)} 轮")
+        _assert(run.ended_by == "satisfied", f"结束原因应为 satisfied，实际 {run.ended_by}")
+
+        # ② 永远补不齐 -> 撞 5 轮上限
+        s2 = CuriositySession("查不到的东西", rng=random.Random(1))
+        while s2.wants_more():
+            s2.record(s2.next_query(), "结果", "还是不知道")
+        run2 = s2.finish()
+        _assert(len(run2.rounds) == MAX_SEARCH_ROUNDS, f"应撞上限 {MAX_SEARCH_ROUNDS}")
+        _assert(run2.ended_by == "exhausted", f"应为 exhausted，实际 {run2.ended_by}")
+
+        # ③ 第 2 轮起 query 要带上缺口（不是重复搜同一个词）
+        s3 = CuriositySession("某个话题", rng=random.Random(1))
+        q1 = s3.next_query()
+        s3.record(q1, "结果", "缺出处")
+        q2 = s3.next_query()
+        _assert(q1 != q2, "第二轮 query 应当不同（要带上缺口）")
+        _assert("缺出处" in q2, f"第二轮 query 应包含缺口：{q2}")
+        return "3 轮补齐提前停；补不齐撞 5 轮上限；后续 query 带缺口"
+
+    @suite.check("催用户：10 次、9 段等待、总 250/400 秒、语气基本不重样")
+    def _() -> str:
+        # 用户第七轮：「共催促10次」「最低不滴7秒，最高不高于60秒，
+        # 语音与文本总等待时间设为250秒和400秒，分属9轮等待」
+        # 「语气要求随机、不尽相同，但仍然可以相同，只不过概率较低，3%」
+        from .curiosity import MAX_NAGS, NAG_STYLES, NagSession
+
+        # 风格池必须比催的次数大，否则"不重样"是空话（抽屉原理）
+        _assert(
+            len(NAG_STYLES) > MAX_NAGS,
+            f"风格池({len(NAG_STYLES)})必须大于催的次数({MAX_NAGS})",
+        )
+
+        for has_tts, target in ((True, 250.0), (False, 400.0)):
+            n = NagSession(has_tts=has_tts, rng=random.Random(7))
+            styles = []
+            while n.wants_more():
+                styles.append(n.next_nag())
+            _assert(len(styles) == MAX_NAGS, f"应催 {MAX_NAGS} 次，实际 {len(styles)}")
+            _assert(len(n.waits) == MAX_NAGS - 1, f"应有 {MAX_NAGS - 1} 段等待")
+            _assert(abs(sum(n.waits) - target) < 0.5, f"总等待应约 {target}")
+            # 洗牌队列：10 次可以做到完全不重样（3% 命中除外）
+            dup = len(styles) - len(set(styles))
+            _assert(dup <= 1, f"重复次数过多（{dup}）—— 洗牌队列没生效")
+
+        # 3% 重复确实会触发
+        n2 = NagSession(has_tts=True, rng=random.Random(3), repeat_chance=1.0)
+        a, b = n2.next_nag(), n2.next_nag()
+        _assert(a == b, "repeat_chance=1.0 时应重复上一次")
+        return f"10 次/9 段/250-400 秒；风格池 {len(NAG_STYLES)} 个；重复 ≤1 次"
+
+    @suite.check("好奇事件：占槽 15 分钟、联网关了也不 dormant")
+    def _() -> str:
+        # 用户要求把好奇搜索并进事件模块，且它要能占槽（"同一时间不存在两个事件"）。
+        from .events import get_event
+
+        spec = get_event("curious_search")
+        _assert(spec is not None, "curious_search 事件没注册")
+        _assert(spec.duration_s is not None, "好奇搜索必须占槽（duration_s 不能为 None）")
+        _assert(
+            spec.duration_s >= 600.0,
+            f"占槽时长要给够（催 10 次最长 400 秒 + 生成时间），实际 {spec.duration_s}",
+        )
+        _assert(
+            not spec.dormant,
+            f"好奇搜索不该是路口（联网关了是运行时判断，不是缺能力）：{spec.missing()}",
+        )
+        return f"curious_search 占槽 {spec.duration_s:.0f} 秒、不 dormant"
+
+    @suite.check("最高条例：默认四条齐全、能进提示词、清空后消失")
+    def _() -> str:
+        # 用户原话：「条例写在提示词中，用户可自由更改，但要提醒用户条例的重要性，
+        # 不亚于为宠物定义作为人的感受与思维方式，这是事关宠物思考的重要提示词。」
+        #
+        # 这一组守三件事：
+        #   ① 默认三条在（内容与 §一百八十四 定稿一致）；
+        #   ② 能拼进提示词，且明说"没有优先级"（否则模型只执行第一条）；
+        #   ③ 清空后提示词里不留痕迹（清空 = 取消约束，是允许的）。
+        from .config import DEFAULT_CHARTER
+
+        _assert(len(DEFAULT_CHARTER) == 3, f"默认应是 3 条，实际 {len(DEFAULT_CHARTER)}")
+        joined = "".join(DEFAULT_CHARTER)
+        # 三条的关键词必须在（防止有人手滑改错）
+        for keyword, label in (
+            ("主观层", "第 1 条「根据主观层调节自身状态」"),
+            ("新鲜感", "第 2 条「对没有明显记忆的知识拥有新鲜感」"),
+            ("保留其他可能", "第 3 条「保留其他可能的概率」"),
+        ):
+            _assert(keyword in joined, f"{label} 不在默认条例里：{joined}")
+
+        # 与前端 `settings.js` 的 DEFAULT_CHARTER 必须一致
+        # （用户点「恢复默认」得到的就是那份副本）
+        js_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "desktop"
+            / "src"
+            / "renderer"
+            / "settings.js"
+        )
+        if js_path.exists():
+            js = js_path.read_text(encoding="utf-8")
+            for rule in DEFAULT_CHARTER:
+                _assert(
+                    rule in js,
+                    f"前端的默认条例副本缺了这条：{rule!r}（改 config.py 时要同步 settings.js）",
+                )
+
+        # ② 进提示词
+        from .gateway import Conversation
+
+        cfg = Config()
+        conv = Conversation(bus=None, config=cfg, memory=None, brain=None)  # type: ignore[arg-type]
+        prompt = conv.build_system_prompt(idle=False)
+        _assert("条例" in prompt, f"提示词里没有条例段：{prompt[-300:]}")
+        _assert(
+            "没有优先级" in prompt,
+            "提示词必须明说「没有优先级」—— 否则模型会只执行第一条",
+        )
+        for rule in DEFAULT_CHARTER:
+            _assert(rule in prompt, f"条例没拼进提示词：{rule!r}")
+
+        # ③ 清空 -> 提示词里不留痕迹
+        cfg2 = Config()
+        cfg2.apply_patch({"charter": []})
+        conv2 = Conversation(bus=None, config=cfg2, memory=None, brain=None)  # type: ignore[arg-type]
+        prompt2 = conv2.build_system_prompt(idle=False)
+        _assert("条例" not in prompt2, f"清空后提示词仍提到条例：{prompt2[-300:]}")
+        _assert(len(prompt2) < len(prompt), "清空后提示词应当变短")
+
+        return f"默认 {len(DEFAULT_CHARTER)} 条；含「没有优先级」；清空后 {len(prompt)} -> {len(prompt2)} 字"
+
+    @suite.check("最高条例：校验宽容（单字符串/空条目/类型错都不炸）")
+    def _() -> str:
+        # 这一项是**用户可编辑**的，所以校验必须宽容：
+        # 与 `persona.system_prompt` 的花括号事故同一条教训 —— 手滑不该让宠物哑掉。
+        from .config import DEFAULT_CHARTER, _validate_charter
+
+        # 写成单个字符串（手改 yaml 最常见）-> 包成一项
+        got = _validate_charter({"charter": "只有一条。"})["charter"]
+        _assert(got == ["只有一条。"], f"单字符串应包成一项，实际 {got}")
+
+        # 空条目被丢掉（用户多按几个回车）
+        got2 = _validate_charter({"charter": ["a", "  ", "", "b"]})["charter"]
+        _assert(got2 == ["a", "b"], f"空条目应被丢掉，实际 {got2}")
+
+        # 空列表**合法**（清空 = 取消约束）
+        got3 = _validate_charter({"charter": []})["charter"]
+        _assert(got3 == [], f"空列表应当保留，实际 {got3}")
+
+        # 类型完全不对 -> 退回默认，不报错
+        got4 = _validate_charter({"charter": 123})["charter"]
+        _assert(got4 == DEFAULT_CHARTER, f"非法类型应退回默认，实际 {got4}")
+
+        # 缺失 -> 默认
+        got5 = _validate_charter({})["charter"]
+        _assert(got5 == DEFAULT_CHARTER, "缺失时应填默认")
+
+        return "单字符串包成一项；空条目过滤；空列表保留；类型错退回默认"
+
+    @suite.check("好奇：注意力决定行为分叉（自己查 / 缠用户）")
+    def _() -> str:
+        # 用户原话：「在好奇状态下，注意力在宠物自己时，它会自己去搜索信息，
+        # 在用户时，它会和用户聊天聊用户自己的故事。」
+        from .curiosity import FOCUS_SELF, FOCUS_USER, choose_focus
+
+        # ① 极端值必须确定
+        _assert(choose_focus(0.0, random.Random(1)) == FOCUS_USER, "注意力 0 应去找用户")
+        _assert(choose_focus(1.0, random.Random(1)) == FOCUS_SELF, "注意力 1 应自己查")
+
+        # ② 中间值应当**按概率倾斜**，而不是硬分叉
+        #    这是关键：硬 if 会让 0.51 永远搜、0.49 永远问，行为非常机械。
+        for attention, expect in ((0.2, 0.2), (0.5, 0.5), (0.8, 0.8)):
+            rng = random.Random(42)
+            hits = sum(1 for _ in range(400) if choose_focus(attention, rng) == FOCUS_SELF)
+            ratio = hits / 400.0
+            _assert(
+                abs(ratio - expect) < 0.08,
+                f"注意力 {attention} 应约 {expect:.0%} 自己查，实际 {ratio:.0%}",
+            )
+
+        # ③ 非法值不炸
+        for bad in (None, "abc", float("nan")):
+            choose_focus(bad, random.Random(1))
+        return "0/1 确定；0.2/0.5/0.8 按概率倾斜（±8%）；非法值不炸"
+
+    @suite.check("胡言乱语：素材齐全、提示词要求「知道自己在瞎扯」")
+    def _() -> str:
+        # 用户原话：「胡言乱语就按照我说的意大利面拌42号混凝土、
+        # 面包树可解宇宙大爆炸等等荒诞的词，甚至可以使用颜文字或者文字图像等表情包，
+        # **不可关闭**。」
+        from .curiosity import NONSENSE_SEEDS, nonsense_prompt, nonsense_seed
+
+        _assert(len(NONSENSE_SEEDS) >= 5, f"素材太少：{len(NONSENSE_SEEDS)}")
+        # 用户点名的两个必须在内
+        joined = "|".join(NONSENSE_SEEDS)
+        _assert("意大利面" in joined, "用户点名的「意大利面拌 42 号混凝土」不在素材里")
+        _assert("面包树" in joined, "用户点名的「面包树可解宇宙大爆炸」不在素材里")
+
+        seed = nonsense_seed(random.Random(1))
+        prompt = nonsense_prompt(seed)
+        # 🔴 最关键的一句：模型必须**知道自己在瞎扯**。
+        #    没有它，模型会真以为自己在大谈科学 —— 那就变成条例第 3 条
+        #    （不保持一味肯定）的反面：把编造当成事实陈述。
+        _assert(
+            "瞎扯" in prompt or "开玩笑" in prompt or "清楚" in prompt,
+            f"提示词必须让模型知道自己在瞎说：{prompt[:80]}",
+        )
+        _assert("颜文字" in prompt or "表情" in prompt, "提示词应允许颜文字/表情")
+        _assert(seed in prompt, "素材应拼进提示词")
+        return f"{len(NONSENSE_SEEDS)} 条素材；提示词含「知道自己在瞎扯」+ 允许颜文字"
+
+    @suite.check("心情：初值 0.3、回归 3%/分钟、不爽线 0.2")
+    def _() -> str:
+        e = EmotionState()
+        _assert(abs(e.mood - 0.3) < 1e-9, f"心情初值应为 0.3，实际 {e.mood}")
+
+        # 回归：0.8 过 10 分钟应当接近 0.71（3%/分钟，向 0.5 靠）
+        import time as _time
+
+        e = EmotionState(mood=0.8)
+        e._last_update = _time.time() - 600
+        e.tick()
+        _assert(0.68 < e.mood < 0.74, f"10 分钟后应在 0.71 附近，实际 {e.mood:.3f}")
+
+        # 不爽线：0.19 才算不爽，0.25 不算
+        e.mood = 0.19
+        _assert(e.dominant == "annoyed", f"0.19 应不爽，实际 {e.dominant}")
+        e.mood = 0.25
+        _assert(e.dominant != "annoyed", f"0.25 不该不爽，实际 {e.dominant}")
+        return "初值 0.3；10 分钟 0.8->0.71；不爽线 0.2"
+
+    @suite.check("亲近度：按自身比例衰减 3%/分钟（不是只增不减）")
+    def _() -> str:
+        import time as _time
+
+        # 指数衰减：0.8 过 10 分钟 -> 0.8 × 0.7 = 0.56
+        e = EmotionState(intimacy=0.8)
+        e._last_update = _time.time() - 600
+        e.tick()
+        _assert(0.53 < e.intimacy < 0.59, f"应在 0.56 附近，实际 {e.intimacy:.3f}")
+
+        # 越低掉得越慢（这就是"按自身比例"的特征）
+        low = EmotionState(intimacy=0.2)
+        low._last_update = _time.time() - 600
+        low.tick()
+        dropped_low = 0.2 - low.intimacy
+        dropped_high = 0.8 - e.intimacy
+        _assert(
+            dropped_high > dropped_low * 2,
+            f"高亲近度应掉得更快（指数衰减）：高掉 {dropped_high:.3f} 低掉 {dropped_low:.3f}",
+        )
+        return (
+            f"0.8->{e.intimacy:.3f}（掉 {dropped_high:.3f}）、"
+            f"0.2->{low.intimacy:.3f}（掉 {dropped_low:.3f}）"
+        )
+
+    @suite.check("被打扰：注意力在自己那边时心情下降，且能靠多聊恢复")
+    def _() -> str:
+        # 用户原话：「注意力在宠物时，宠物注意力在自己越高越专注，心情降的越多，
+        # 最高降0.2」「就像是宠物被打扰了一样，不过多聊几句就好了」
+        #
+        # ⚠️ 分界是 **0.5**：注意力在用户那边（<=0.5）不该被惩罚。
+        #    第一版写成"penalty > 0.01"，等于 attention>0.05 就扣，
+        #    结果 attention=0.2 时扣 0.04 正好抵消 +0.04 —— 表现为心情纹丝不动。
+        for attention, expect_sign in ((0.0, 1), (0.2, 1), (0.5, 1), (0.7, -1), (0.9, -1)):
+            e = EmotionState(mood=0.3)
+            before = e.mood
+            e.on_user_message("在吗", attention=attention)
+            delta = e.mood - before
+            if expect_sign > 0:
+                _assert(delta > 0.02, f"attention={attention} 应上涨，实际 {delta:+.3f}")
+            else:
+                _assert(delta < -0.02, f"attention={attention} 应下降，实际 {delta:+.3f}")
+
+        # 上限：attention=1.0 时降幅不超过 0.2
+        e = EmotionState(mood=0.5)
+        e.on_user_message("在吗", attention=1.0)
+        _assert(e.mood >= 0.5 - 0.2, f"降幅超过 0.2 上限：{e.mood}")
+
+        # 「多聊几句就好了」：沉浸时第一句掉，之后注意力被拉走、心情回升
+        from .subjectivity import SubjectiveState
+
+        s = SubjectiveState()
+        s.emotion = EmotionState(mood=0.3)
+        s.attention = 0.95
+        s.on_user_message("在吗", attention=s.attention)
+        first = s.emotion.mood
+        _assert(first < 0.25, f"第一句应被打扰（掉到 0.25 以下），实际 {first:.3f}")
+        for _i in range(4):
+            s.on_user_message("在吗", attention=s.attention)
+        _assert(
+            s.emotion.mood > first + 0.1,
+            f"聊几句应回升：{first:.3f} -> {s.emotion.mood:.3f}",
+        )
+        return f"0.5 以下不罚、0.7/0.9 罚；上限 0.2；聊几句 {first:.2f}->{s.emotion.mood:.2f}"
+
+    @suite.check("催用户等待：9 段、7~60 秒、总和收敛到 250/400")
+    def _() -> str:
+        # 用户第七轮：「最低不滴7秒，最高不高于60秒，语音与文本总等待时间设为250秒和400秒，
+        # 分属9轮等待」；第八轮确认算法选 A（归一化）。
+        for has_tts, target in ((True, 250.0), (False, 400.0)):
+            for seed in range(6):
+                waits = plan_wait_seconds(has_tts, random.Random(seed))
+                _assert(len(waits) == 9, f"应为 9 段，实际 {len(waits)}")
+                _assert(
+                    abs(sum(waits) - target) < 0.5,
+                    f"总和应约 {target}，实际 {sum(waits):.2f}",
+                )
+                _assert(min(waits) >= 7.0 - 1e-6, f"低于 7 秒：{min(waits)}")
+                _assert(max(waits) <= 60.0 + 1e-6, f"高于 60 秒：{max(waits)}")
+
+        # 不同种子要给出不同的分配（否则等于写死）
+        a = plan_wait_seconds(True, random.Random(1))
+        b = plan_wait_seconds(True, random.Random(2))
+        _assert(a != b, "不同随机种子应给出不同分配")
+
+        # 预算不可达要**报错**而不是死循环
+        raised = False
+        try:
+            plan_wait_for_target(50.0, random.Random(0), segments=9)  # 9×7=63 > 50
+        except ValueError:
+            raised = True
+        _assert(raised, "预算不可达时应当抛 ValueError")
+        return "两种预算下 9 段、区间内、总和精确；不可达预算报错"
+
+
 def run_selftest(config_path: Optional[Path] = None) -> SelfTest:
     suite = SelfTest()
     test_config(suite, config_path)
@@ -6932,6 +7579,7 @@ def run_selftest(config_path: Optional[Path] = None) -> SelfTest:
     test_brains(suite)
     test_autonomy(suite)
     test_subjectivity(suite)
+    test_state_machine(suite)
     test_vision(suite)
     test_content(suite)
     test_voice(suite)
