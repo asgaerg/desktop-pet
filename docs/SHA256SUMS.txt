@@ -1,2 +1,2 @@
-e9c76ecf0947c6b4bd19e958429f16ec56d6a2f77774a867df8d13477f2e10d3  DesktopPet-0.1.2-online-setup.exe
-ce558ccf761def4fc24a443a2532867b1799b45b7d04e766d9967d8bc6bd82da  DesktopPet-0.1.2-online-portable.zip
+a50fc85582bcbdb1ad5692938b9097a9ecb1ee1d2620da40ed3f462026f6e4ce  DesktopPet-0.2.0-online-setup.exe
+c12b336b23308f10780e6a4c3fa876ed4d60e05193244183e619e68d34c0db5e  DesktopPet-0.2.0-online-portable.zip
