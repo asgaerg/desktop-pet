@@ -4883,6 +4883,92 @@ def test_empty_reply(suite: SelfTest) -> None:
         _assert(last_text == FAILED_REPLY_FALLBACK, f"没用「连不上」的兜底句，实际 {last_text!r}")
         return f"连接被拒 -> 「{last_text}」"
 
+    @suite.check("半句被截断：标记成 truncated_text，不重试但留痕")
+    def _() -> str:
+        """2026-10-28 用户报：记忆里有一条半句话。
+
+            #1738  10-28 13:45  宠物  诶，中午了，光把桌面照得发
+
+        **"光把桌面照得发"后面没了**，却被当成完整回复落进了 `raw_log`。
+
+        ## 根因
+
+        `_run_tool_round` 里只处理"截断到**空**"（`not produced`）。
+        而被截断时如果**已经吐了半句**，`reason` 仍是 `"done"` ——
+        上层当作正常回复收尾、原样落库，全程不报错。
+
+        ## 这条测试守什么
+
+        源码里必须有 `truncated_text` 这个分支，且它：
+          ① 与 `"truncated"`（截断到空）**区分开** —— 后者会触发重试，
+             而已经说出口的半句重来会让用户看到"话说到一半重说"；
+          ② 记 WARNING（`truncated` 那条是 DEBUG，因为它有救）。
+
+        ⚠️ 为什么不测"丢弃这半句"：那会和用户实际看到的不一致 ——
+           历史里没有、但屏幕上明明说了。这种不一致比截断本身更糟。
+        """
+        import inspect
+
+        from .gateway import Conversation
+
+        src = inspect.getsource(Conversation._run_tool_round)
+        _assert(
+            'reason = "truncated_text"' in src,
+            "正文说了一半被截断时必须标记成 truncated_text（否则会被当成完整回复落库）",
+        )
+        # 与"截断到空"要有区分：两条分支的赋值不能混
+        _assert(
+            'reason = "truncated"' in src,
+            "「截断到空」那条分支不能丢（它会触发加大预算重试）",
+        )
+        # 必须留痕（WARNING 级别，能查到"模型被截断"）
+        seg_start = src.find('reason = "truncated_text"')
+        _assert(seg_start > 0, "找不到 truncated_text 分支")
+        seg = src[seg_start : seg_start + 900]
+        _assert(
+            "log.warning" in seg,
+            "截断半句要记 WARNING 留痕（不能静默）",
+        )
+        return "截断半句标记 truncated_text；与 truncated 区分；记 WARNING"
+
+    @suite.check("自主发言预算够说完一句话（不能被截成半句）")
+    def _() -> str:
+        """2026-10-28：`max_idle_tokens: 220` 会让自主发言说一半就断。
+
+        实测（记忆 #1738）：
+
+            10-28 13:45  宠物  诶，中午了，光把桌面照得发
+
+        ## 为什么 220 不够
+
+        思考模式下**推理和正文共享同一个 max_tokens**
+        （§一百五十九 那次真机数据：200 token 全被推理吃掉、正文 0 字）。
+        自主发言虽然短，模型仍会先想一段 —— 220 里推理占掉一百多，
+        正文只剩十几个字，正好卡在"说得出一半"。
+
+        ## 断言什么
+
+        不锁具体数字（用户可能调到 500），只锁**下限够不够**：
+        自主发言的预算不能比正常回复小太多 —— 两者都要能说完一句完整的话。
+
+        ⚠️ 也不能无脑拉大：用户要的是**短句**，长度约束在提示词里，
+        预算只是"别截断"的安全线。
+        """
+        cfg = Config()
+        idle = int(cfg.autonomy.get("max_idle_tokens") or 0)
+        normal = int((cfg.providers.get("brain") or {}).get("max_tokens") or 0)
+        _assert(idle > 0, "max_idle_tokens 必须为正")
+        _assert(
+            idle >= 300,
+            f"自主发言预算 {idle} 太小 —— 思考会吃掉大半，正文只剩十几个字"
+            "（实测 220 时会截断成半句）",
+        )
+        _assert(
+            normal > 0 and idle <= normal * 2,
+            f"自主发言预算 {idle} 不该远超正常回复 {normal}（用户要短句）",
+        )
+        return f"自主发言 {idle} token / 正常 {normal} token；下限够、不至于截断"
+
 
 
 def test_search_backends(suite: SelfTest) -> None:

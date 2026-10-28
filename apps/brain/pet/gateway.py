@@ -1830,6 +1830,41 @@ class Conversation:
                 "本轮被 max_tokens 截断且正文为空（推理吃光了预算）。max_tokens=%s",
                 req.max_tokens,
             )
+        elif state_finish.get("length") and produced:
+            """
+            ## 🔴 正文**说了一半**被截断（2026-10-28 修）
+
+            用户发现记忆里有一条：
+
+                #1738  10-28 13:45  宠物  诶，中午了，光把桌面照得发
+
+            **"光把桌面照得发"后面没了** —— 语义上是半句话，但被当成
+            完整回复落进了 `raw_log`（还会进对话历史发给模型）。
+
+            ## 为什么原来没发现
+
+            上面那条只处理"截断到**空**"（`not produced`）。
+            而被截断时如果**已经吐了半句**，`reason` 仍是 `"done"`，
+            于是上层当作正常回复收尾、原样落库 —— 全程不报错。
+
+            ## 这里的处理
+
+            标记成 `"truncated_text"`（与 `"truncated"` 区分开），
+            上层据此：
+              · **不重试**（已经说出口了，重来会让用户看到"话说到一半重说"）
+              · **照常落库**（用户确实听到/看到了这半句，历史要一致）
+              · 但**记一条 WARNING**，让"模型被截断"这件事可查
+
+            ⚠️ 不改成"丢弃这半句"：那会和用户实际看到的不一致 ——
+               历史里没有、但屏幕上明明说了。这种不一致比截断本身更糟。
+            """
+            reason = "truncated_text"
+            log.warning(
+                "本轮正文说了一半被 max_tokens 截断（%d 字，max_tokens=%s）——"
+                "已按原样收尾，但这句是不完整的",
+                len("".join(collected)),
+                req.max_tokens,
+            )
         elif reason == "done" and not produced and not collected and not tool_calls:
             """
             🔴 正常结束、但**正文一个字都没有**（2026-10-19 真机）。
