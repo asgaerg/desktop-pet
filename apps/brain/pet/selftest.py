@@ -1272,6 +1272,19 @@ def test_autonomy(suite: SelfTest) -> None:
         行为在 autosnap 循环里（要真截图才跑得到），这里查**源码不变量**：
         `_on_autonomy_speak` 开头必须读 `_last_screen_speak_at` 并按 60 秒判、
         截图也到点时必须让路，且 autosnap 说完话必须写时间戳。
+
+        ## 🔴 2026-10-27 修：这条测试原来把 bug 钉住了
+
+        原来它只断言源码里有 `"self.scheduler.screenshot_due()"` 这个**字符串**。
+        而真正的 bug 恰恰是那个写法：
+
+            if self.scheduler.screenshot_due():     # 返回 (bool, str)，元组恒真！
+
+        于是"有这句话"= 测试绿，而宠物**每次开口都被拦掉**。
+        这正是"测源码字符串"的典型危害 —— 它验证的是**长得像**，不是**做得对**。
+
+        现在改成断言**解包**（`= ...screenshot_due()`），并且
+        直接跑一次语义验证：截图不该到点时，这条分支必须**不进**。
         """
         import inspect
 
@@ -1280,8 +1293,15 @@ def test_autonomy(suite: SelfTest) -> None:
         speak_src = inspect.getsource(Gateway._on_autonomy_speak)
         _assert("_last_screen_speak_at" in speak_src, "搭话那条路没检查截图优先")
         _assert("_SCREEN_SPEAK_HOLD_S" in speak_src, "没用 60 秒闭嘴期常量")
+        # ⚠️ 必须是**解包赋值**，不能是 `if ...screenshot_due():`（元组恒真）
         _assert(
-            "self.scheduler.screenshot_due()" in speak_src, "截图也到点时没让路"
+            "= self.scheduler.screenshot_due()" in speak_src,
+            "screenshot_due() 必须解包成 (due, why) —— 直接当条件用会恒为真"
+            "（返回的是元组），导致每一次自主开口都被'让给截图'拦掉",
+        )
+        _assert(
+            "if self.scheduler.screenshot_due():" not in speak_src,
+            "还有把 screenshot_due() 当布尔用的地方 —— 元组恒真，会拦掉所有开口",
         )
         snap_src = inspect.getsource(Gateway._run_autosnap_forever)
         _assert(
@@ -7105,15 +7125,29 @@ def test_state_machine(suite: SelfTest) -> None:
         _assert("0.35" in sm.last_reason, f"切换原因应带精力值：{sm.last_reason}")
         _assert(fired, "应当有规则被触发")
 
-        # 粘滞：精力回到 0.9 也**不能**自己离开安静
-        box["energy"] = 0.9
-        _assert(not run_rules(eng, sm, box), "精力回升不该触发任何规则（粘滞）")
+        # 粘滞：精力回升到 0.5（还没回满）**不能**自己离开安静。
+        #
+        # ⚠️ 2026-10-26 改了：原来测的是"回到 0.9 也不离开"，
+        #    但那时还没有"休息够了"这条规则。现在**回满会自动转无聊**
+        #    （用户决定：否则精力回血只救精力、救不回状态，宠物永久卡在安静）。
+        #    所以粘滞的边界从"任何回升"变成"**没回满**就仍安静"。
+        box["energy"] = 0.5
+        _assert(not run_rules(eng, sm, box), "没回满不该触发任何规则（粘滞）")
         _assert(sm.state == QUIET, f"粘滞失效，跑到了 {sm.state}")
 
-        # 但用户手动切可以离开
+        # 回满 -> 自动转无聊（这是 2026-10-26 新增的出口）
+        box["energy"] = 0.9
+        fired2 = run_rules(eng, sm, box)
+        _assert(sm.state == BORED, f"回满应转无聊，实际 {sm.state}")
+        _assert("quiet_rested" in fired2, f"应触发 quiet_rested，实际 {fired2}")
+
+        # 用户手动切也能离开（重新进安静再验证一次）
+        box["energy"] = 0.1
+        run_rules(eng, sm, box)
+        _assert(sm.state == QUIET, "应重新进入安静")
         sm.switch(BORED, "用户切换")
         _assert(sm.state == BORED, "用户手动切换应当生效（粘滞不能挡）")
-        return "0.35 -> 安静；回到 0.9 仍安静；手动可离开"
+        return "0.35 -> 安静；没回满仍安静；回满转无聊；手动可离开"
 
     @suite.check("状态机：30 分钟没聊天进无聊，且只有这一条路")
     def _() -> str:
@@ -7404,6 +7438,225 @@ def test_state_machine(suite: SelfTest) -> None:
         _assert(got5 == DEFAULT_CHARTER, "缺失时应填默认")
 
         return "单字符串包成一项；空条目过滤；空列表保留；类型错退回默认"
+
+    @suite.check("时段划分：13:45 是下午，不是中午")
+    def _() -> str:
+        # 🔴 用户 2026-10-28 报：「我说的是他下午说了句中午」。
+        #
+        # 实测：13:45 那条自主发言说「诶，中午了，光把桌面照得发」。
+        #
+        # 根因：`_current_time_prompt` 里写成 `hour < 14 -> 中午`，
+        # 于是 **13:45 被判成中午**，宠物照着提示词说了出来。
+        #
+        # 中文语感里"中午"是 **11:00–13:00 那一小段**（午饭前后），
+        # 13:00 之后说"中午"已经不自然了。
+        #
+        # ⚠️ 用**生产代码里的同一个函数**（`gateway.part_of_day`），
+        #    不要在测试里复制一份边界 —— 复制必然漂移。
+        from .gateway import part_of_day
+
+        expected = {
+            0: "凌晨", 4: "凌晨",
+            5: "早上", 8: "早上",
+            9: "上午", 10: "上午",
+            11: "中午", 12: "中午",
+            13: "下午", 14: "下午", 17: "下午",
+            18: "晚上", 22: "晚上",
+            23: "深夜",
+        }
+        for hour, want in expected.items():
+            got = part_of_day(hour)
+            _assert(got == want, f"{hour}:00 应为「{want}」，实际「{got}」")
+
+        # 用户报的那个具体时刻（原来会被判成"中午"）
+        _assert(
+            part_of_day(13) == "下午",
+            "13:xx 必须是下午 —— 原来 `hour < 14` 会判成中午",
+        )
+        # "中午"必须是一小段，不能跨到 14 点
+        _assert(
+            part_of_day(12) == "中午" and part_of_day(13) != "中午",
+            "「中午」只覆盖 11:00–13:00",
+        )
+
+        return "凌晨/早上/上午/中午(11-13)/下午/晚上/深夜 边界正确；13:45 -> 下午"
+
+    @suite.check("历史注入：跨天的消息带日期前缀，且前缀在行首")
+    def _() -> str:
+        # 🔴 用户 2026-10-28 报：「昨天宠物的时间观念还在很久以前我说的新版本上」。
+        #
+        # 根因：历史是**直接灌进 `messages`** 的，里面一个字的时间信息都没有。
+        # 模型看到几十条对话分不清哪天，把几天前说的「刚出了个新版本」
+        # 当成现在的状态。实测那段对话里它自己都说：
+        #     「是我记岔了，把上周的事说成明天」
+        from .memory2 import _merge_consecutive_same_role
+
+        # ① `_when` 的相对时间说法
+        import time as _time
+
+        from .memory2 import MemoryService
+
+        now = _time.time()
+        cases = [
+            (now, "今天"),
+            (now - 1.2 * 86400, "昨天"),
+            (now - 3.2 * 86400, "3 天前"),
+            (now - 40 * 86400, "1 个月前"),
+            (now - 400 * 86400, "1 年前"),
+        ]
+        for ts, want in cases:
+            got = MemoryService._when(ts)
+            _assert(got == want, f"距今 {(now - ts) / 86400:.1f} 天应为「{want}」，实际「{got}」")
+
+        # ② 带前缀的消息**不并进**上一条（否则前缀会落到中间）
+        merged = _merge_consecutive_same_role(
+            [
+                {"role": "assistant", "text": "前面的话"},
+                {"role": "assistant", "text": "〔今天〕新的一段"},
+            ]
+        )
+        _assert(
+            any(item["text"].startswith("〔今天〕") for item in merged),
+            f"日期前缀必须留在行首（否则模型看不到时间边界）：{merged}",
+        )
+
+        # ③ 不带前缀的同角色仍然合并（原有行为不能丢）
+        merged2 = _merge_consecutive_same_role(
+            [
+                {"role": "user", "text": "第一句"},
+                {"role": "user", "text": "第二句"},
+            ]
+        )
+        _assert(len(merged2) == 1, f"同角色应合并，实际 {len(merged2)} 条")
+        _assert("第一句" in merged2[0]["text"] and "第二句" in merged2[0]["text"], "合并内容丢了")
+
+        # ④ 时间戳取不到时不能炸（会退回不加前缀）
+        _assert(MemoryService._row_ts({}) == 0.0, "空行应返回 0")
+        _assert(MemoryService._row_ts({"ts": 123}) == 123.0, "ts 字段应能取到")
+        _assert(MemoryService._row_ts({"created_at": 456}) == 456.0, "created_at 应能取到")
+
+        return "今天/昨天/N天前/N个月前/N年前；前缀留在行首；同角色仍合并"
+
+    @suite.check("状态 -> 活泼度同步：切状态后开口阈值必须跟着变")
+    def _() -> str:
+        # 🔴 这是 2026-10-27 用户报「安静状态下还是不会说话」的**第二个根因**。
+        #
+        # 状态机和 `activity.overall` 是两套并行的东西：
+        #   状态机          她"想不想说话"
+        #   activity.overall 她"多常说话"（开口阈值按它线性算）
+        #
+        # 菜单手动切换时两边都写了，但**自动切换（精力低/休息够）只改状态**。
+        # 于是"状态是无聊、阈值还是安静档的 0.967" —— 一直在无聊但一句话不说。
+        #
+        # ⚠️ `_sync_activity_to_state` 在 **Gateway** 上（它要读 config 并热更新），
+        #    不在 Conversation 上。用 Gateway 测。
+        from .gateway import Gateway
+
+        cfg = Config()
+        cfg.apply_patch({"providers.brain.provider": "mock", "autonomy.enabled": False})
+        gw = Gateway(cfg)
+
+        # 各个状态对应的 overall 必须与桌面端一致
+        expected = {"quiet": 0.1, "bored": 0.5, "curious": 0.8, "monologue": 1.0}
+        for key, want in expected.items():
+            gw.state.switch(key, "测试")
+            gw._sync_activity_to_state()
+            got = float(cfg.activity.get("overall"))
+            _assert(
+                abs(got - want) < 1e-6,
+                f"状态 {key} 应同步 overall={want}，实际 {got}",
+            )
+            # 阈值必须跟着变（0.1 档的 0.967 是"几乎永不开口"）
+            thr = cfg.speak_threshold()
+            if key == "quiet":
+                _assert(thr > 0.9, f"安静档阈值应很高，实际 {thr:.3f}")
+            else:
+                _assert(thr < 0.9, f"{key} 档阈值不该是安静档的 {thr:.3f}")
+
+        # 幂等：已经一致时不重复写（避免每 30 秒一次无意义的配置变更）
+        gw.state.switch("bored", "测试")
+        gw._sync_activity_to_state()
+        before = cfg.activity.get("overall")
+        gw._sync_activity_to_state()
+        _assert(cfg.activity.get("overall") == before, "重复同步不该改变值")
+
+        return "quiet/bored/curious/monologue 四处映射正确；阈值跟着变；幂等"
+
+    @suite.check("精力：安静时回血，回满后自动转无聊（不会永久卡死）")
+    def _() -> str:
+        # 🔴 这是一个**真 bug**（2026-10-26 用户报「安静状态下宠物不说话」）。
+        #
+        # 根因：精力只有衰减、没有恢复 —— 挂机 6 小时归零，
+        # 然后因为"安静粘滞"永久卡死（精力 0 < 0.4 -> 安静 -> 出不来）。
+        #
+        # 修法两步（都是用户定的）：
+        #   ① 安静时缓慢回血（0.02/分钟，封顶 0.85）
+        #   ② 回满后自动转无聊（否则回血只救精力、救不回状态）
+        import time as _time
+
+        # ① 回血
+        #
+        # ⚠️ `tick()` 把 elapsed **截断到 600 秒**（10 分钟）——
+        #    那是防"挂机一夜后一次性跳变"的有意设计（见 `tick` 的注释）。
+        #    所以这里测"10 分钟回多少"，不要拿 20 分钟去算。
+        e = EmotionState(energy=0.0)
+        e.set_state_provider(lambda: QUIET)
+        e._last_update = _time.time() - 600   # 正好 10 分钟
+        e.tick()
+        _assert(
+            abs(e.energy - 0.2) < 0.01,
+            f"安静 10 分钟应回到约 0.20，实际 {e.energy:.3f}",
+        )
+        # 再 10 分钟 -> 0.40（两次 tick 累积，证明会持续回）
+        e._last_update = _time.time() - 600
+        e.tick()
+        _assert(
+            abs(e.energy - 0.4) < 0.01,
+            f"再 10 分钟应回到约 0.40，实际 {e.energy:.3f}",
+        )
+        # 封顶
+        e2 = EmotionState(energy=0.8)
+        e2.set_state_provider(lambda: QUIET)
+        e2._last_update = _time.time() - 600
+        e2.tick()
+        _assert(
+            abs(e2.energy - EmotionState.ENERGY_RECOVER_CAP) < 1e-6,
+            f"应封顶在 {EmotionState.ENERGY_RECOVER_CAP}，实际 {e2.energy:.3f}",
+        )
+        # 非安静照常衰减（不能"一直回血"，否则粘滞形同虚设）
+        e3 = EmotionState(energy=0.7)
+        e3.set_state_provider(lambda: BORED)
+        e3._last_update = _time.time() - 600
+        e3.tick()
+        _assert(
+            abs(e3.energy - 0.58) < 0.01,
+            f"无聊 10 分钟应衰减到 0.58，实际 {e3.energy:.3f}",
+        )
+
+        # ② 回满 -> 自动离开安静
+        eng, sm, box = make_rules(energy=EmotionState.ENERGY_RECOVER_CAP, initial=QUIET)
+        _assert(
+            any(r.kind == "quiet_rested" for r in eng.rules),
+            "缺少「休息够了转无聊」这条规则",
+        )
+        fired = run_rules(eng, sm, box)
+        _assert(sm.state == BORED, f"回满后应转无聊，实际 {sm.state}")
+        _assert("quiet_rested" in fired, f"应触发 quiet_rested，实际 {fired}")
+
+        # ③ 回血但没满 -> 仍留在安静（粘滞的语义保留）
+        eng2, sm2, box2 = make_rules(energy=0.5, initial=QUIET)
+        _assert(not run_rules(eng2, sm2, box2), "没回满不该离开安静")
+        _assert(sm2.state == QUIET, f"应仍在安静，实际 {sm2.state}")
+
+        # ④ 再掉回 0.4 以下 -> 又安静（循环闭合）
+        box2["energy"] = 0.35
+        run_rules(eng2, sm2, box2)
+        _assert(sm2.state == QUIET, f"应仍安静（本来就是），实际 {sm2.state}")
+
+        return (
+            f"安静 20 分钟回到 0.40；封顶 {EmotionState.ENERGY_RECOVER_CAP}；"
+            "回满转无聊；没满仍安静"
+        )
 
     @suite.check("好奇：注意力决定行为分叉（自己查 / 缠用户）")
     def _() -> str:

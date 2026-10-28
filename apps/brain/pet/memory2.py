@@ -233,6 +233,27 @@ class MemoryService:
                 return fallback.strip()
 
     @staticmethod
+    def _row_ts(row: Any) -> float:
+        """从数据库行里取时间戳（`ts` 或 `created_at`，都没有就 0）。
+
+        ⚠️ 抽成方法是因为 `raw_log` 的行可能只有其中一个 ——
+        2026-10-28 加日期前缀时，直接 `r["ts"]` 会在缺少该列时抛 KeyError，
+        而那时"历史注不进去"表现为**宠物重启后完全不记得刚才聊过什么**。
+        """
+        try:
+            getter = row.get if hasattr(row, "get") else (lambda k: row[k])
+            for key in ("ts", "created_at"):
+                try:
+                    value = getter(key)
+                except (KeyError, IndexError):
+                    continue
+                if value:
+                    return float(value)
+        except (TypeError, ValueError):
+            pass
+        return 0.0
+
+    @staticmethod
     def _when(ts: Any) -> str:
         """把时间戳格式化成**给 AI 看的**相对时间。
 
@@ -434,6 +455,7 @@ class MemoryService:
 
         # 最新在前 -> 反成时间正序
         ordered: list[dict[str, str]] = []
+        last_stamp = ""   # 上一条的日期前缀（同日不重复加）
         for r in reversed(rows):
             role = str(r.get("role") or "")
             text = str(r.get("text") or "")
@@ -441,6 +463,39 @@ class MemoryService:
                 continue
             if text.strip() in skip:
                 continue
+            # 给**跨天**的消息加日期前缀（2026-10-28）。
+            #
+            # ## 🔴 为什么必须加
+            #
+            # 用户报：「昨天宠物的时间观念还在很久以前我说的新版本上」。
+            #
+            # 根因：这段历史是**直接灌进 `messages`** 的（不是一个提示词片段），
+            # 所以里面**一个字的时间信息都没有**。模型看到几十条对话，
+            # 根本分不清哪条是昨天、哪条是三天前 —— 于是把几天前说的
+            # 「刚出了个新版本」当成现在的状态。
+            #
+            # 实测证据（真实库，2026-10-28）：
+            #
+            #     10-21 19:14  user: 如果模型思考时候的内部参数能达到…
+            #     10-27 23:07  assistant: 那个新版本明天开，希望你能玩得开心
+            #     10-27 23:08  user: 新版本早过了，现在是10月27号
+            #
+            # 中间隔了 6 天，但**历史里完全看不出来**。模型把 10-21 的
+            # 语境当成"昨天"，于是把上周的事说成"明天"。
+            #
+            # 时间提示词里虽然写了「历史里的时间都是过去」，但**历史里根本没写时间**，
+            # 那句话就落空了。所以要在这里真的标出来。
+            #
+            # ⚠️ 只给**跨天**的加：同一天内的几十条如果每条都带日期，
+            #    纯属噪音（而且会占掉不少 token）。同一天只用一次前缀。
+            #
+            # ⚠️ 用 `_when()` 的相对说法（"今天"/"3 天前"）而不是绝对日期：
+            #    模型对"距今多久"敏感，对"2026-10-21"不敏感
+            #    （详见 `_when` 的说明）。
+            stamp = self._when(self._row_ts(r))
+            if stamp and stamp != last_stamp:
+                last_stamp = stamp
+                text = f"〔{stamp}〕{text}"
             ordered.append({"role": role, "text": text})
 
         # 丢掉开头孤立的 assistant（上一轮被截断，模型看到"助手凭空开口"很怪）
@@ -2834,7 +2889,25 @@ def _merge_consecutive_same_role(turns: list[dict[str, str]]) -> list[dict[str, 
     """
     out: list[dict[str, str]] = []
     for item in turns:
-        if out and out[-1]["role"] == item["role"]:
+        # 🔴 带日期前缀的消息**不并进上一条**（2026-10-28）。
+        #
+        # ## 为什么
+        #
+        # 加了 `〔今天〕` 这类日期前缀之后，如果这条恰好和上一条同角色，
+        # 它会被并进去 —— 前缀就落到了字符串**中间**：
+        #
+        #     "...所以真给我眼睛那天，我估计还得你带着我认。 〔今天〕诶，都快十一点了。"
+        #                                                     ^^^^^^^ 埋在中间
+        #
+        # 模型对"开头的时间锚点"最敏感，埋在中间等于白标。
+        # 而且那两条本来就是**不同时间**说的，并成一条反而抹掉了时间边界。
+        #
+        # ⚠️ 代价是可能出现"连续同角色两条"（本来就是不同日期的两段话）。
+        #    这是**有意的取舍**：时间边界的清晰度 > 角色交替的整齐。
+        #    服务端对连续同角色只是"行为不确定"，不是报错；而时间错乱是
+        #    用户已经明确报过的问题。
+        stamped = item.get("text", "").startswith("〔")
+        if out and out[-1]["role"] == item["role"] and not stamped:
             out[-1]["text"] = f"{out[-1]['text']}\n{item['text']}"
         else:
             out.append(dict(item))

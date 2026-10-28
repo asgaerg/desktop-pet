@@ -279,6 +279,37 @@ class EmotionState:
     # 被打扰时心情的最大降幅（attention=1.0 时）。
     MOOD_INTERRUPT_MAX = 0.2
 
+    # ── 精力恢复（2026-10-26 修，真 bug）────────────────────────────────
+    #
+    # 🔴 **原来没有恢复机制，挂机 6 小时宠物就永久哑了。**
+    #
+    # 实测（`selftest` 里有这条）：
+    #
+    #     起始 0.700
+    #     1 小时 0.580    3 小时 0.340
+    #     6 小时 0.000    <- 归零
+    #     8 小时 0.000    <- 再也不动
+    #
+    # 而且归零之后会**永久卡死**：精力 0 < 0.4 -> 转安静 -> **粘滞** ->
+    # 永远出不来。用户看到的就是"安静状态下宠物不说话"，重启也没用
+    # （因为情绪不落盘，重启会回到 0.7 —— 但挂机一夜又归零）。
+    #
+    # 修法：**安静时缓慢回升**（用户 2026-10-26 选定）。
+    #
+    #     安静中     每分钟 +0.02  （1 小时回 1.2，实际 50 分钟回满）
+    #     其它状态   照常 -0.012/分钟
+    #
+    # 为什么"只在安静时回升"而不是一直回升：
+    # 用户的设计里"精力低 -> 安静 -> 粘滞"是一条**单向门**。
+    # 如果精力在任何状态都回升，那"粘滞"就变成了"等 50 分钟自己解除"，
+    # 单向门形同虚设。只在安静时回升，语义是"**休息才能恢复**"——
+    # 安静就是它的休息。
+    #
+    # ⚠️ 回升速率必须**大于**衰减速率（0.02 > 0.012），否则永远追不上。
+    ENERGY_RECOVER_PER_MIN = 0.02
+    # 回升到多少就停（不回到满，留一点"没睡够"的余味；也避免刚出安静又立刻掉回去）。
+    ENERGY_RECOVER_CAP = 0.85
+
     def __init__(
         self,
         energy: float = 0.7,
@@ -296,14 +327,46 @@ class EmotionState:
         # ⚠️ 用**计数**而不是时间：用户连发三条短消息和一条长消息应当等价
         #    （用户原话「多聊几句就好了」——"几句"是句数，不是时长）。
         self._interrupt_streak = 0
+        # 当前状态键的查询函数（"quiet" / "bored" / ...），2026-10-26 加。
+        #
+        # ⚠️ 用 provider 而不是让 EmotionState 持有状态：状态机在
+        #    `pet/state.py`，情绪在 `brains/base.py`，**两者不该互相依赖**
+        #    （那是循环依赖，而且会让 EmotionState 没法单独测试）。
+        self._state_provider: Optional[Callable[[], str]] = None
+
+    def set_state_provider(self, provider: Optional[Callable[[], str]]) -> None:
+        """注入"当前状态"的查询函数（见 `tick` 里精力回升的说明）。"""
+        self._state_provider = provider
+
+    def _is_quiet(self) -> bool:
+        """现在是不是安静状态。拿不到就当"不是"（保守：照常衰减）。"""
+        provider = self._state_provider
+        if provider is None:
+            return False
+        try:
+            return str(provider()) == "quiet"
+        except Exception:  # noqa: BLE001
+            return False
 
     def tick(self) -> None:
         """
-        时间流逝：精力衰减、心情回归中性、亲近度自然淡化。
+        时间流逝：精力增减、心情回归中性、亲近度自然淡化。
 
         ⚠️ 心情用 `(0.5 - mood) × 速率` 而不是 `mood × 速率`：
         前者是"回归中性"，后者是"向 0 衰减"。心情低于 0.5 时前者会**回升**，
         这正是想要的 —— 不爽过一阵子会自己缓过来，不用谁来哄。
+
+        ## 🔴 精力在安静时会**回升**（2026-10-26 修）
+
+        原来只有衰减，挂机 6 小时归零，然后因为"安静粘滞"永久卡死 ——
+        用户看到的就是"安静状态下宠物不说话"。
+
+        现在：
+
+            安静中     每分钟 +ENERGY_RECOVER_PER_MIN（封顶 ENERGY_RECOVER_CAP）
+            其它状态   每分钟 -0.012（照常）
+
+        ⚠️ 回升速率必须大于衰减速率（0.02 > 0.012），否则永远追不上。
         """
         now = time.time()
         elapsed = min(now - self._last_update, 600.0)
@@ -312,7 +375,18 @@ class EmotionState:
             self._last_update = now
             return
         minutes = elapsed / 60.0
-        self.energy = clamp01(self.energy - 0.012 * minutes, self.energy)
+        if self._is_quiet():
+            # 休息中：缓慢回血，封顶不回到满。
+            if self.energy < self.ENERGY_RECOVER_CAP:
+                self.energy = clamp01(
+                    min(
+                        self.ENERGY_RECOVER_CAP,
+                        self.energy + self.ENERGY_RECOVER_PER_MIN * minutes,
+                    ),
+                    self.energy,
+                )
+        else:
+            self.energy = clamp01(self.energy - 0.012 * minutes, self.energy)
         self.mood = clamp01(
             self.mood + (0.5 - self.mood) * min(self.MOOD_REGRESS_PER_MIN * minutes, 0.5),
             self.mood,

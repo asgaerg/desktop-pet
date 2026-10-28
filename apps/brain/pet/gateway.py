@@ -174,6 +174,39 @@ _IDLE_OCCASION_FALLBACK = (
 #
 # ⚠️ 措辞里明确**不要主动报时间**：平时顺嘴报时会非常出戏
 # （与 `emotion` 那段"不要报数字"是同一条取舍）。
+def part_of_day(hour: int) -> str:
+    """小时 -> 中文时段（2026-10-28 修）。
+
+    ## 为什么单独一个函数
+
+    用户报：「我说的是他下午说了句中午」。
+
+    实测 13:45 那条自主发言说「诶，中午了，光把桌面照得发」——
+    因为原来分支写着 `hour < 14 -> 中午`，**13:45 被判成中午**。
+
+    中文语感里"中午"是 **11:00–13:00 那一小段**（午饭前后），
+    13:00 之后说"中午"已经不自然了（13:45 更是离谱）。
+
+    ## 为什么抽到模块级
+
+    埋在一个大方法里的分支只能靠"跑整个 prompt"间接验证，
+    测不出具体边界。抽出来测试可以直接扫 0~23 的每一个小时。
+    """
+    if hour < 5:
+        return "凌晨"
+    if hour < 9:
+        return "早上"
+    if hour < 11:
+        return "上午"
+    if hour < 13:
+        return "中午"
+    if hour < 18:
+        return "下午"
+    if hour < 23:
+        return "晚上"
+    return "深夜"
+
+
 _CURRENT_TIME_FALLBACK = (
     "当前的真实时间：{time}（{weekday}，{part_of_day}）。"
     "这是**唯一权威**的时间 —— "
@@ -2171,21 +2204,7 @@ class Conversation:
         # 星期用中文：模型的输出是中文，中文星期比 "Saturday" 更不容易被抄错
         weekdays = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
         weekday = weekdays[now.weekday()]
-        hour = now.hour
-        if hour < 5:
-            part = "凌晨"
-        elif hour < 9:
-            part = "早上"
-        elif hour < 12:
-            part = "上午"
-        elif hour < 14:
-            part = "中午"
-        elif hour < 18:
-            part = "下午"
-        elif hour < 23:
-            part = "晚上"
-        else:
-            part = "深夜"
+        part = part_of_day(now.hour)
         return self._render_prompt(
             "current_time",
             _CURRENT_TIME_FALLBACK,
@@ -2506,6 +2525,12 @@ class Gateway:
         #    好奇可能已经搜完了、只是还没切状态 —— 那时它其实没事做，
         #    却豁免了精力判定。现在真正的判据是"事件占着槽"。
         self.state.set_busy_provider(lambda: self.events.busy)
+        # 情绪的"安静时回血"要知道当前状态（2026-10-26）。
+        #
+        # ⚠️ 为什么用 provider 而不是让 EmotionState 直接持有状态机：
+        #    情绪在 `brains/base.py`、状态机在 `state.py`，直接引用是**循环依赖**，
+        #    而且会让 EmotionState 没法单独测试（它是最该能单测的模块）。
+        self.conversation.emotion.set_state_provider(lambda: self.state.state)
         self._events_task: Optional[asyncio.Task[None]] = None
         # 自主截图循环（2026-10-18）。**必须在这里初始化为 None** ——
         # start_autonomy 里靠 is None 判断要不要起任务，漏了这句就是
@@ -2967,7 +2992,23 @@ class Gateway:
                 _SCREEN_SPEAK_HOLD_S - since_screen,
             )
             return
-        if self.scheduler.screenshot_due():
+        # 🔴 必须**解包元组**（2026-10-27 修，真 bug）
+        #
+        # `screenshot_due()` 返回 `(bool, str)` —— 而这里原来直接把调用结果
+        # 当条件用（没解包）。**非空元组在 Python 里永远是真值**，
+        # 所以这个分支**每次都会进**，于是每一次开口都被"让给截图"拦掉，
+        # 而截图那边又因为 `tier_no_screenshot`（安静/无聊档不截图）从不真正执行 ——
+        #
+        #     开口决定 -> 让给截图 -> 截图不截 -> 什么都没发生
+        #
+        # 表现就是用户报的「安静状态下宠物不说话」，而且**记忆里一条它说的话都没有**。
+        #
+        # 这个 bug 从 2026-10-18 加"截图优先"那天就在，一直没人发现：
+        # 因为日志里写着"让给截图（截图优先）"，看起来像是**设计如此**。
+        # 而 `screenshot_due()` 的返回值在别处（`_run_autosnap_forever`）
+        # 是正确解包的，只有这一处漏了。
+        shot_due, shot_why = self.scheduler.screenshot_due()
+        if shot_due:
             log.info("自主发言：截图也到点了，这一轮让给截图（截图优先）")
             return
 
@@ -4144,6 +4185,13 @@ class Gateway:
         而且规则判定是纯计算，很便宜。
         """
         log.info("条件事件循环启动（当前：%s）", STATE_NAMES.get(self.state.state, self.state.state))
+        # 启动时先同步一次（2026-10-27）。
+        #
+        # ⚠️ 必须在这里做：启动状态是"无聊"，而 `activity.overall` 是
+        #    `persona.yaml` 里存的值（可能是上次留下的 0.1）。
+        #    不同步的话，第一次自动切换之前她一直用**安静档的阈值 0.967**
+        #    在评估 —— 也就是"显示无聊、实际几乎不开口"。
+        self._sync_activity_to_state()
         while True:
             try:
                 await asyncio.sleep(30.0)
@@ -4159,8 +4207,59 @@ class Gateway:
             except Exception:  # noqa: BLE001 —— 单轮异常不能让这个循环死
                 log.exception("条件事件循环单轮异常（已忽略，继续）")
 
+    #: 状态 -> 活泼度数值（自主调度按它算开口阈值与间隔）。
+    #:
+    #: ⚠️ 必须与 `petMenuTemplate.ts` 的 `STATE_TIERS` 和
+    #:    `apps/desktop/src/main/index.ts` 的 `STATE_TO_ACTIVITY` 保持一致。
+    #:    三处不一致会出现"菜单显示好奇、实际按安静在调度"。
+    _STATE_ACTIVITY: dict[str, float] = {
+        "quiet": 0.1,
+        "bored": 0.5,
+        "curious": 0.8,
+        "monologue": 1.0,
+    }
+
+    def _sync_activity_to_state(self) -> None:
+        """把当前状态同步到 `activity.overall`（2026-10-27 加）。
+
+        ## 🔴 为什么需要它
+
+        状态机和"活泼度"是两套并行的东西：
+
+            状态机          她"想不想说话"（安静/无聊/好奇/自言自语）
+            activity.overall  她"多常说话"（开口阈值 + 间隔的量化参数）
+
+        用户要求「将活泼度替换成状态」，但**自主调度器还在读 `overall`**
+        （那是纯数值，不好直接改成读状态）。所以两边必须同步。
+
+        菜单手动切换时（桌面端 `setPetState`）会同时写这两个；
+        **但自动切换（精力低转安静、休息够转无聊）只改了状态** ——
+        于是出现"状态是无聊、阈值还是安静档的 0.967"，
+        表现就是**一直在无聊但一句话不说**（用户 2026-10-27 报的正是这个）。
+
+        ## 单向
+
+        只做 状态 -> overall，**不反向**。
+        反过来的话，用户拖活泼度滑杆会把状态也改掉 —— 而状态现在
+        由事件驱动，不该被一个数值滑杆推翻。
+        """
+        state_key = self.state.state
+        overall = self._STATE_ACTIVITY.get(state_key)
+        if overall is None:
+            return
+        try:
+            current = float(self.config.activity.get("overall", 0.0))
+        except (TypeError, ValueError):
+            current = -1.0
+        if abs(current - overall) < 1e-6:
+            return  # 已经一致，不重复写（避免每 30 秒一次无意义的配置变更）
+        try:
+            self.config.apply_patch({"activity": {"overall": overall}})
+            log.info("状态同步：%s -> activity.overall=%.1f", state_key, overall)
+        except Exception:  # noqa: BLE001 —— 同步失败不该影响状态切换
+            log.debug("状态同步失败（已忽略）", exc_info=True)
+
     async def _check_condition_rules(self) -> None:
-        """判一次条件事件。抽出来是为了能被测试直接调用（不用等 30 秒）。"""
         for _ in range(4):  # 一轮最多连锁切 4 次（防规则互相触发成死循环）
             ctx = {
                 "state": self.state.state,
@@ -4177,6 +4276,21 @@ class Gateway:
                 # 规则说"其实不用做" —— 直接返回，否则会死循环（条件仍成立）
                 return
             log.info("条件事件「%s」：%s", rule.label, detail)
+            # 🔴 状态变了要把 `activity.overall` 一起带过去（2026-10-27 修）
+            #
+            # ## 为什么必须同步
+            #
+            # 自主调度器的开口阈值是**按 `activity.overall` 线性算的**：
+            #
+            #     overall=0.1（安静） -> 阈值 0.967  <- 几乎永不可能达到
+            #     overall=0.5（无聊） -> 阈值 0.635
+            #
+            # 状态机自己切到"无聊"之后，如果 `overall` 还停在 0.1，
+            # 那她**永远攒不够开口意愿** —— 用户看到的就是"一直在无聊但一句话不说"。
+            #
+            # 这正是"两套系统并行、只同步了一半"的典型后果：
+            # 菜单手动切换时（`setPetState`）同步了，**自动切换时漏了**。
+            self._sync_activity_to_state()
             # 状态切换也要落库（2026-10-25）：用户该能查到"它今天为什么突然不说话了"。
             try:
                 if self.memory is not None and self.memory.db is not None:

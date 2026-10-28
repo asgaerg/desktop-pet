@@ -57,11 +57,19 @@ import logging
 from typing import Any
 
 from .events import Rule
+from .brains.base import EmotionState
 
 log = logging.getLogger(__name__)
 
 #: 精力低于这个值就转安静。用户原话：「低于0.4就转为安静状态」。
 ENERGY_LOW = 0.4
+
+#: 精力回满到这个值就算"休息够了"，可以离开安静（2026-10-26）。
+#
+# ⚠️ **直接引用 `EmotionState.ENERGY_RECOVER_CAP`**，不写第二份数字 ——
+#    回血封顶和"休息够了"的阈值必须是同一个数，否则会出现
+#    "回血到 0.85 停住、但判断要 0.9 才算休息够" -> 永远出不来。
+ENERGY_RECOVER_CAP = EmotionState.ENERGY_RECOVER_CAP
 
 #: 用户多久没聊天就进无聊（秒）。用户原话：「累计30分钟后自动进入无聊状态」。
 IDLE_TO_BORED_S = 30 * 60.0
@@ -148,6 +156,52 @@ def build_state_rules() -> list[Rule]:
         except (TypeError, ValueError):
             return False
 
+    async def _to_bored_from_quiet(ctx: dict[str, Any]) -> str | None:
+        """休息够了：安静 -> 无聊。
+
+        用户 2026-10-26 的决定：「精力回满后自动转无聊」。
+        """
+        energy = float(ctx.get("energy", 0.0))
+        switch = ctx.get("switch")
+        if switch is None:
+            return None
+        switch(BORED, f"休息够了（精力回到 {energy:.2f}）")
+        return f"精力回到 {energy:.2f}，休息够了，转无聊"
+
+    def _when_rested(ctx: dict[str, Any]) -> bool:
+        """规则：安静中且精力回满 -> 离开安静。
+
+        ## 🔴 这条是 2026-10-26 加的，它改变了"粘滞"的含义
+
+        用户原来的设计是**单向门**：「进入安静后精力高于0.4也仍旧是安静状态，
+        除非用户切换状态或者随机事件触发状态等等。」
+
+        但实测发现一个真 bug：**精力没有恢复机制**，挂机 6 小时归零，
+        然后因为粘滞**永久卡死** —— 用户看到"安静状态下宠物不说话"，
+        重启也没用（挂机一夜又归零）。
+
+        所以先加了"安静时回血"，但回血只救精力、救不回状态：
+        回满 0.85 之后仍然卡在安静，因为粘滞只认"用户手动 / 随机事件"。
+
+        用户 2026-10-26 的选择：**精力回满后自动转无聊**。
+
+        ## 语义上的好处
+
+        粘滞从"永久锁死"变成"**休息够了就自己出来**"：
+          · 精力低 -> 安静（想歇着）
+          · 安静里慢慢回血
+          · 回满 -> 无聊（歇够了，想找点事做）
+          · 精力再掉到 0.4 以下 -> 又安静
+
+        这既保留了"累过之后想安静待着"的直觉，又不会卡死。
+        """
+        if ctx.get("state") != QUIET:
+            return False
+        try:
+            return float(ctx.get("energy", 0.0)) >= ENERGY_RECOVER_CAP
+        except (TypeError, ValueError):
+            return False
+
     return [
         Rule(
             # priority 小的先判。
@@ -158,9 +212,23 @@ def build_state_rules() -> list[Rule]:
             priority=10,
             kind="energy_low_quiet",
             label="精力低转安静",
-            detail=f"精力 < {ENERGY_LOW} 时转为安静（进入后粘滞，不会自己出去）",
+            detail=f"精力 < {ENERGY_LOW} 时转为安静（进入后靠休息恢复）",
             when=_when_low_energy,
             then=_to_quiet,
+        ),
+        Rule(
+            # 休息够了 -> 离开安静。
+            #
+            # ⚠️ priority 放在"精力低转安静"**之后**：两条都涉及安静，
+            #    但"精力低"是进入条件、"精力回满"是退出条件，
+            #    两者互斥（energy 不可能同时 <0.4 和 >=0.85），
+            #    所以顺序其实不影响结果 —— 排在这里只是让日志读起来顺。
+            priority=15,
+            kind="quiet_rested",
+            label="休息够了转无聊",
+            detail=f"安静中精力回到 {ENERGY_RECOVER_CAP} 时转无聊",
+            when=_when_rested,
+            then=_to_bored_from_quiet,
         ),
         Rule(
             priority=20,
