@@ -87,6 +87,11 @@ build/_*.png
 build/_*.json
 build/_*.log
 build/_*.mjs
+# ⚠️ 2026-10-28 补：`_*.txt` 原来**漏了** —— 我生成 `build/_diff.txt`
+#    做密钥扫描时，它没被忽略，差点混进提交。
+#    `build/` 下只有 `_` 开头的才算临时产物，其余（图标、sidecar.ps1）
+#    是有意入库的，所以不能整目录忽略。
+build/_*.txt
 build/installer-screen.png
 
 

@@ -102,6 +102,14 @@ export class VoiceIO {
      * 这次的坑正是"名字看着对、实际不是同一个设备"，所以必须能看见。
      */
     this.deviceLabel = '';
+    /**
+     * 上次启动时**配置里那支麦克风已经不存在**的 id（2026-10-28）。
+     *
+     * 非空说明发生了回退：用户选的那支麦没了，这次用的是系统默认。
+     * 设置页据此提示"请重新选一次麦克风" —— 否则用户会一直以为
+     * 自己在用那支指定的麦，而实际录的是别的（本次故障正是这样）。
+     */
+    this.deviceMissing = '';
   }
 
   /**
@@ -164,7 +172,61 @@ export class VoiceIO {
       // 而用户以为自己在用指定的那支麦 —— 正是这次踩的坑。
       audio.deviceId = { exact: deviceId };
     }
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio });
+    /*
+     * 🔴 指定设备**失效时回退到系统默认**（2026-10-28 修）。
+     *
+     * ## 实测故障
+     *
+     * 用户报「全屏打游戏的时候语音无法触发」。查日志：
+     *
+     *     采集电平：energy=0.02631 threshold=0.04900 静音
+     *     ...370 帧全是静音，energy 只在 0.0208~0.0289 之间抖动
+     *
+     * energy 几乎没有波动 —— 那是**在录一个空设备**。
+     *
+     * 再枚举实际设备，配置里存的 `micDeviceId` 是
+     * `e77e6333...`，而当前系统只有：
+     *
+     *     Default / Communications / 麦克风(Steam Streaming) / 麦克风(Realtek)
+     *
+     * **那个 id 已经不存在了**（换过设备/驱动重装/Steam 虚拟麦克风排序变了）。
+     *
+     * ## 为什么原来不报错
+     *
+     * `exact` 在设备不存在时抛 `OverconstrainedError`。上层 `app.js` 用
+     * `withTimeout` 包着，异常被 catch 吞掉后只记一句"麦克风没开成"，
+     * 而**采集闸门已经开了** —— 于是表现为"看着在听、其实什么都没录到"。
+     *
+     * ## 修法
+     *
+     * `exact` 失败 -> 记一条明确的警告（要能让用户看见"你选的那支麦没了"）
+     * -> 退回系统默认重试一次。默认设备至少是"用户系统里当前有效的"，
+     * 比彻底不录音好得多。
+     *
+     * ⚠️ 回退时**不清空配置**：用户的偏好还在，下次设备回来就又能用。
+     */
+    const open = async (constraints) => {
+      this.stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+    };
+    try {
+      await open(audio);
+    } catch (error) {
+      const name = (error && error.name) || '';
+      // 只有"设备约束不满足"这类才回退；权限被拒（NotAllowedError）不该硬来
+      const retriable =
+        name === 'OverconstrainedError' ||
+        name === 'NotFoundError' ||
+        name === 'DevicesNotFoundError';
+      if (!deviceId || !retriable) throw error;
+      this.deviceMissing = deviceId;
+      console.warn(
+        `[voice] 指定的麦克风已不存在（deviceId=${deviceId.slice(0, 12)}…，${name}），` +
+          '回退到系统默认设备。请到设置里重新选一次麦克风。',
+      );
+      const fallback = { ...audio };
+      delete fallback.deviceId;
+      await open(fallback);
+    }
     // 记下实际拿到的设备名，供界面显示（用户要能确认"真的在用那支"）
     this.deviceLabel = this.stream.getAudioTracks()[0]?.label || '';
 
@@ -173,6 +235,49 @@ export class VoiceIO {
     if (this.context.state === 'suspended') await this.context.resume();
 
     this.source = this.context.createMediaStreamSource(this.stream);
+    /*
+     * 🔴 自动增益（2026-10-28 修「说了话它没反应」）。
+     *
+     * ## 为什么必须自己做
+     *
+     * 上面 `getUserMedia` 里显式关掉了 `autoGainControl` —— 那是**有意的**：
+     * 浏览器自带的 AGC 是为通话设计的，会把语音动态压平，让能量法端点检测
+     * 更难分辨"到底有没有在说话"。
+     *
+     * 但代价是：**麦克风增益低的机器上，人声进不来**。
+     *
+     * 实测（Realtek 板载麦，用户正常说话）：
+     *
+     *     环境底噪 energy ≈ 0.0247
+     *     说话时 energy   ≈ 0.028    <- 只比底噪高 13%
+     *     判定阈值         = 0.049     <- 底噪的 2 倍
+     *
+     * 也就是**说话声根本没有把能量抬起来**。原因不是"用户声音小"，
+     * 而是系统输入音量 / 麦克风增益太低，整条信号被压扁了。
+     *
+     * ## 做法：慢速归一化增益
+     *
+     * 跟踪**近期峰值**，把信号放大到目标电平。关键约束：
+     *
+     *   · 增益**只在静音段更新**（否则说话声会把自己压下去，和 VAD 的
+     *     噪声底自适应是同一个道理）
+     *   · 增益有上下限（0.5x ~ 12x）：太低没用，太高会把底噪放大成"说话"
+     *   · 变化**要慢**（每帧 2%）：突变会让 VAD 误判"突然出现语音"
+     *
+     * ⚠️ 这不是浏览器那个 AGC：它不压动态、不做降噪，只做**整体抬升**，
+     *    所以 VAD 的"说话/静音"对比度反而变大了。
+     */
+    this.gain = this.context.createGain();
+    this.gain.gain.value = 1.0;
+    // 自动增益的运行态
+    this._agcPeak = 0.02;   // 近期峰值估计（初值取一个偏低的经验值）
+    this._agcGain = 1.0;    // 当前增益（与 gain.gain.value 同步）
+    this._agcWant = 1.0;    // 目标增益（只在安静段更新）
+    this._agcTarget = 0.12; // 目标峰值：让说话声落在 VAD 阈值之上
+    this.agcEnabled = true; // 出问题时可关掉（排查"增益把噪声放大"时用）
+    this.lastRms = 0;       // 最近一块的 RMS（放大后），供诊断
+    this.lastGain = 1;      // 最近一块用的增益
+
     // ScriptProcessorNode 虽已标记废弃，但它在所有 Chromium 版本上都可用，
     // 而 AudioWorklet 需要额外的模块文件与加载时序。桌宠这种轻量采集用前者足够。
     const bufferSize = 2048;
@@ -182,11 +287,30 @@ export class VoiceIO {
     this.node.onaudioprocess = (event) => {
       if (!this.active) return;
       const channel = event.inputBuffer.getChannelData(0);
-      const resampled = resample(channel, inputRate, TARGET_SAMPLE_RATE);
+      // 🔴 自动增益：**在这里乘**，不用 GainNode（见 `this._agc*` 的说明）
+      //
+      // ⚠️ 为什么不用 GainNode：`gain.gain.value` 的改动是**异步生效**的，
+      //    而且它有平滑（setTargetAtTime），在 2048 样本的块上会出现
+      //    "这一块按旧增益、下一块按新增益"的台阶，反而制造突变。
+      //    直接乘是最可控的：每一块用当前 `_agcGain`，同时更新它。
+      const gain = this._applyAgc(channel);
+      let rms = 0;
+      const scaled = gain === 1 ? channel : new Float32Array(channel.length);
+      if (gain !== 1) {
+        for (let i = 0; i < channel.length; i += 1) scaled[i] = channel[i] * gain;
+      }
+      const use = gain === 1 ? channel : scaled;
+      for (let i = 0; i < use.length; i += 1) rms += use[i] * use[i];
+      rms = Math.sqrt(rms / (use.length || 1));
+      // 把放大后的 RMS 暴露出去（界面/日志能看见"增益救回来多少"）
+      this.lastRms = rms;
+      this.lastGain = gain;
+      const resampled = resample(use, inputRate, TARGET_SAMPLE_RATE);
       this.pushSamples(resampled);
     };
 
-    this.source.connect(this.node);
+    this.source.connect(this.gain);
+    this.gain.connect(this.node);
     // 必须接到 destination，否则部分实现不会触发 onaudioprocess。
     // 用一个静音增益节点，避免把自己的麦克风声音外放出去（会形成啸叫）。
     const mute = this.context.createGain();
@@ -198,9 +322,70 @@ export class VoiceIO {
     return { sampleRate: inputRate };
   }
 
+  /**
+   * 自动增益：算这一块该乘多少（2026-10-28）。
+   *
+   * ## 为什么需要它
+   *
+   * 用户报「全屏打游戏时说了话它没反应」。实测（Realtek 板载麦）：
+   *
+   *     环境底噪 energy ≈ 0.0247
+   *     说话时 energy   ≈ 0.028     <- 只比底噪高 13%
+   *     VAD 阈值         = 0.049     <- 底噪的 2 倍
+   *
+   * **说话声根本没把能量抬起来**。不是用户声音小，是系统输入音量 /
+   * 麦克风增益把整条信号压扁了。
+   *
+   * 而 `getUserMedia` 里**故意关掉了**浏览器的 `autoGainControl`
+   * （它会把语音动态压平、让能量法端点检测更难判断），
+   * 所以只能自己补一个**只抬整体、不压动态**的增益。
+   *
+   * ## 算法
+   *
+   * ```
+   * 每块算 RMS
+   *   若 RMS > 近期峰值 -> 峰值快速跟上（attack 0.5）
+   *   否则            -> 峰值缓慢回落（release 0.002，约几十秒）
+   * 目标增益 = _agcTarget / 峰值，夹在 [0.5, 12]
+   * 当前增益向目标靠拢，每块 2%（避免突变让 VAD 误判）
+   * ```
+   *
+   * ⚠️ **只在安静时更新目标**：说话声如果也参与"峰值"，它会把自己压下去
+   *    —— 这和 VAD 噪声底"只在静音时更新"是同一条道理。
+   *    这里用"当前 RMS 明显低于峰值"来近似判断"现在没人说话"。
+   *
+   * ⚠️ 增益**有上限 12x**：再高会把底噪也放大成"语音"，反而更糟。
+   *    如果 12x 还不够，说明问题在系统音量，界面会提示用户去调。
+   *
+   * @returns {number} 这一块要乘的增益
+   */
+  _applyAgc(channel) {
+    if (this.agcEnabled === false) return 1;
+    let sum = 0;
+    for (let i = 0; i < channel.length; i += 1) sum += channel[i] * channel[i];
+    const rms = Math.sqrt(sum / (channel.length || 1));
+
+    // 峰值跟踪
+    if (rms > this._agcPeak) {
+      this._agcPeak += (rms - this._agcPeak) * 0.5;   // attack：快
+    } else {
+      this._agcPeak += (rms - this._agcPeak) * 0.002; // release：慢
+    }
+    if (this._agcPeak < 1e-6) this._agcPeak = 1e-6;
+
+    // 只在"安静"时更新目标增益（rms 明显低于峰值 = 没人说话）
+    const quiet = rms < this._agcPeak * 0.6;
+    if (quiet) {
+      const want = this._agcTarget / this._agcPeak;
+      this._agcWant = Math.max(0.5, Math.min(12, want));
+    }
+    const target = this._agcWant ?? 1;
+    this._agcGain += (target - this._agcGain) * 0.02;  // 每块 2%，慢速靠拢
+    return this._agcGain;
+  }
+
   /** 把重采样后的浮点样本切成固定长度的 int16 帧发出去 */
-  pushSamples(samples) {
-    /*
+  pushSamples(samples) {    /*
      * 闸门关着 -> **一个字节都不发**（见构造里 `gate` 的说明）。
      *
      * ⚠️ 放在**最前面**：连 `pending` 都不要攒。

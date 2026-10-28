@@ -6295,6 +6295,34 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
     vioSrc.includes('buffer.duration * 1000') && vioSrc.includes('reported'));
   check('看门狗兜底覆盖说话中（voiceSpeaking）',
     /turnThinking \|\| searchDepth > 0 \|\| voiceSpeaking/.test(mainSrc));
+
+  /*
+   * 🔴 指定麦克风失效时必须回退到系统默认（2026-10-28 真故障）
+   *
+   * 用户报「全屏打游戏的时候语音无法触发」。查日志：
+   *
+   *     采集电平：energy=0.02631 threshold=0.04900 静音
+   *     ...370 帧全静音，energy 只在 0.0208~0.0289 抖动
+   *
+   * energy 几乎不波动 = **在录一个空设备**。枚举后发现配置里存的
+   * `micDeviceId` 已经不在设备列表里（换过设备/驱动重装）。
+   *
+   * 原来 `getUserMedia({ audio: { deviceId: { exact } } })` 在设备不存在时
+   * 抛 `OverconstrainedError`，异常被上层 catch 吞掉，但**采集闸门已经开了**
+   * —— 表现为"看着在听、其实什么都没录到"，全程没有明确报错。
+   *
+   * 断言：源码里必须有回退分支（catch 里去掉 deviceId 再 open 一次），
+   * 且要记警告、且**不清空用户配置**。
+   */
+  check('麦克风失效时回退到系统默认（不会静默录空设备）',
+    /OverconstrainedError/.test(vioSrc) &&
+    /delete fallback\.deviceId/.test(vioSrc) &&
+    /this\.deviceMissing = deviceId/.test(vioSrc));
+  check('麦克风回退要留警告（用户得知道选的那支麦没了）',
+    /指定的麦克风已不存在/.test(vioSrc));
+  check('麦克风回退只在"设备约束不满足"时触发（权限被拒不硬来）',
+    /name === 'OverconstrainedError'/.test(vioSrc) &&
+    /name === 'NotFoundError'/.test(vioSrc));
 }
 
 /* ------------------------------------------------------------------ 收尾 */
