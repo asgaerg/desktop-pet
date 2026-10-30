@@ -1216,6 +1216,22 @@ async function main(): Promise<void> {
       /* 读不到就当"开"—— 宁可多出声，也别一升级就哑巴 */
     }
     /*
+     * 语音触发方式（2026-10-30）—— 同样从 persona.yaml 读初值。
+     *
+     * ⚠️ 读不到就当 `'key'`：唤醒词模式会持续占用麦克风，
+     *    **绝不能**因为读配置失败就默认开它。
+     */
+    try {
+      const storedTrigger = String(
+        readDeepScalar(CONFIG_ROOT, ['providers', 'push_to_talk', 'trigger_mode'], true) ?? 'key',
+      )
+        .trim()
+        .toLowerCase();
+      voiceTriggerMode = storedTrigger === 'wake' ? 'wake' : 'key';
+    } catch {
+      voiceTriggerMode = 'key';
+    }
+    /*
      * 联网搜索模式（2026-10-16，三选一）—— 同样从 persona.yaml 读初值，
      * 等 sidecar ready 后再按回报校准（见 `webSearchModeFrom`）。
      */
@@ -3604,6 +3620,16 @@ async function openPetMenu(): Promise<void> {
      * 引擎/音色在「设置 → 语音」里配好，这里只管开不开。
      */
     toggleTtsSpeech: (enabled) => setTtsSpeech(enabled),
+    /*
+     * 语音触发方式（2026-10-30 用户要求）。
+     *
+     * 用户原话：「分两种，一种用唤醒词，一种用按键模式，
+     * 这两种模式在宠物控制里面切换」。
+     *
+     * ⚠️ 真正的实现在 `setVoiceTrigger()` 里 —— 与气泡同理，
+     * 右键菜单和**托盘菜单**都要能调它（托盘是宠物被隐藏时唯一的入口）。
+     */
+    setVoiceTrigger: (mode) => setVoiceTrigger(mode),
     toggleVision: (enabled) => void setVisionWatching(enabled),
     /*
      * 思考模式（用户要求 2026-10-07：「做成开关，在宠物菜单界面显示，
@@ -3669,6 +3695,8 @@ async function openPetMenu(): Promise<void> {
     webSearchMode,
     // 语音播报的勾（2026-10-14）—— 真源是 persona.yaml 的 providers.tts.enabled
     ttsSpeechEnabled,
+    // 语音触发方式的勾（2026-10-30）—— 真源是 providers.push_to_talk.trigger_mode
+    voiceTriggerMode,
     // 麦克风（用户要求「麦克风选项移到宠物菜单里面」）
     micDeviceId: currentMicDeviceId(),
     micDevices: micDeviceCache,
@@ -4061,6 +4089,16 @@ let webSearchMode: WebSearchMode = 'off';
  * （老配置没这个键，不能一升级就哑巴）。
  */
 let ttsSpeechEnabled = true;
+
+/**
+ * 语音触发方式（2026-10-30）：'key' 按键 / 'wake' 唤醒词。
+ *
+ * 真源是 `persona.yaml` 的 `providers.push_to_talk.trigger_mode`。
+ * 这里镜像一份，供菜单勾选状态显示（与 `ttsSpeechEnabled` 同一套做法）。
+ *
+ * ⚠️ 默认 `'key'`：唤醒词模式会**持续占用麦克风**，不能默认开。
+ */
+let voiceTriggerMode: 'key' | 'wake' = 'key';
 
 /**
  * 是否已经把"用户上次保存的看屏幕意愿"下发给 sidecar。
@@ -5362,6 +5400,73 @@ function setTtsSpeech(enabled: boolean): void {
       ? '语音播报：已开启（宠物的回复会用设置里的音色念出来）'
       : '语音播报：已关闭（只显示文字，不出声）',
   );
+}
+
+/**
+ * 语音触发方式切换（2026-10-30 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * 「分两种，一种用唤醒词，一种用按键模式，这两种模式在宠物控制里面切换」
+ *
+ * ## 🔴 为什么需要"唤醒词"这一档
+ *
+ * 实测查到的根因**不是代码问题**：
+ *
+ *   · 英雄联盟的 **ACE 反作弊内核驱动**（ACE-ADVT / ACE-CORE*）在运行时，
+ *     会**拦截所有键盘钩子** —— `SetWindowsHookEx(WH_KEYBOARD_LL)`
+ *     安装成功（返回非零、无错误），但**一次回调都收不到**
+ *     （连自己用 SendInput 模拟的按键都收不到）。
+ *   · Electron 的 `globalShortcut` 底层是 `RegisterHotKey`，
+ *     全屏独占时 WM_HOTKEY 也不派发。
+ *
+ * 所以**全屏游戏时任何按键触发都不可行**（这是反作弊的设计目的，不是 bug）。
+ * 麦克风不归反作弊管 —— 唤醒词是全屏时唯一能用的方式。
+ *
+ * ## 两种模式的代价（要如实告诉用户）
+ *
+ *   key   按键触发。**不常占麦克风**（只在按下时开），但全屏游戏时可能失效。
+ *   wake  一直听，说唤醒词才触发。全屏可用，但**持续占用麦克风**，
+ *         且每句话都要先跑一次 ASR 才知道有没有唤醒词（本地模型，有 GPU 开销）。
+ *
+ * ## 落盘 + 热更新（与 setThinking / setTtsSpeech 同一套）
+ *
+ * ① 写 `persona.yaml` 的 `providers.push_to_talk.trigger_mode` —— 重启后还在
+ * ② 发 `config.update` —— 立刻生效，不用重启
+ *
+ * ⚠️ 顺序**先写盘、再热更新**：反过来的话，热更新成功但写盘失败时
+ *    界面显示"已切换"而重启后变回去 —— 那种"设置没保存"最难查。
+ */
+function setVoiceTrigger(mode: string): void {
+  const value = mode === 'wake' ? 'wake' : 'key';
+  log(`语音触发方式：请求切换到 ${value === 'wake' ? '唤醒词' : '按键'}`);
+
+  voiceTriggerMode = value;
+
+  // ① 落盘（真相源）
+  const result = writeDeepScalar(
+    CONFIG_ROOT,
+    ['providers', 'push_to_talk', 'trigger_mode'],
+    value,
+  );
+  if (!result.ok) {
+    log(`语音触发方式落盘失败：${result.message}（路径 ${result.path}）`);
+  }
+
+  // ② 热更新（立刻生效）
+  send({
+    type: 'config.update',
+    patch: { providers: { push_to_talk: { trigger_mode: value } } },
+  });
+
+  if (value === 'wake') {
+    log(
+      '语音触发方式：已切到「唤醒词」—— 会一直听，说唤醒词才回应。' +
+        '⚠️ 持续占用麦克风，每句话都要跑一次本地识别。全屏游戏时也能用。',
+    );
+  } else {
+    log('语音触发方式：已切到「按键」—— 按一下说话。全屏游戏时可能被反作弊挡住。');
+  }
 }
 
 /**

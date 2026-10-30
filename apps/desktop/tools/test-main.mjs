@@ -2542,6 +2542,8 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
         'toggleChatMode',
         // 语音播报（2026-10-14）：菜单开关，真源是 persona.yaml 的 providers.tts.enabled
         'toggleTtsSpeech',
+        // 语音触发方式（2026-10-30）：二选一（按键 / 唤醒词），action 带值
+        'setVoiceTrigger',
       'toggleEdgePeek', 'peekSettings', 'setPetState', 'setPetScale', 'openLogs', 'settings',
       'memory', 'quit', 'quitAll',
       // 截图对话（2026-10-17 用户要求）：菜单项 + 快捷键共用一个动作
@@ -2568,6 +2570,8 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
         { deviceId: 'dev-a', label: '麦克风 (USB PnP Sound Device)' },
         { deviceId: 'dev-b', label: '麦克风 (Realtek(R) Audio)' },
       ],
+      // 语音触发方式（2026-10-30）：模板会读它决定哪个 radio 勾上
+      voiceTriggerMode: 'key',
     });
     const unresolved = [];
     for (const action of collectActions(menuItems)) {
@@ -2795,6 +2799,15 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
     'toggle-chat-mode',
     // 语音播报（2026-10-14）：菜单开关，真源是 persona.yaml 的 providers.tts.enabled
     'toggle-tts-speech',
+    /*
+     * 语音触发方式（2026-10-30 用户要求）。
+     *
+     * 用户原话：「分两种，一种用唤醒词，一种用按键模式，
+     * 这两种模式在宠物控制里面切换」。
+     *
+     * 带值分发：`voice-trigger:key` / `voice-trigger:wake`。
+     */
+    'voice-trigger',
     /*
      * 麦克风（用户要求 2026-10-08：「麦克风选项移到宠物菜单里面」）。
      *

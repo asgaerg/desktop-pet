@@ -3177,6 +3177,92 @@ def test_voice(suite: SelfTest) -> None:
         )
         return "history 不含本轮这句；messages 里只有一条（反例已复现过重复）"
 
+    @suite.check("唤醒词：命中才回应，同音容错，不误触")
+    def _() -> str:
+        """2026-10-30 用户要求：「分两种，一种用唤醒词，一种用按键模式，
+        这两种模式在宠物控制里面切换」。
+
+        ## 为什么需要唤醒词
+
+        实测：英雄联盟的 **ACE 反作弊内核驱动**会拦截所有键盘钩子
+        （`SetWindowsHookEx` 安装成功但零回调），`globalShortcut`
+        在全屏独占时也收不到 —— 全屏游戏时按键触发**必然失效**。
+        麦克风不归反作弊管，所以唤醒词是唯一能用的方式。
+
+        ## 这条测试守什么
+
+        ① 命中判断（含标点、词在句尾、同音字）
+        ② **不误触**（普通对话不该被当成唤醒）
+        ③ 剥离（唤醒词不能留在正文里，否则模型会回应"阿拾"这个名字本身）
+        ④ 老配置没有这个字段时不能崩（用 getattr 兜底）
+        """
+        from .bus import Bus
+        from .voice import VoiceSession
+
+        class _Cfg:
+            enabled = True
+            trigger_mode = "wake"
+            wake_words = ("阿拾", "小灵")
+            wake_require_prefix = False
+
+        session = VoiceSession.__new__(VoiceSession)
+        session.voice_config = _Cfg()
+
+        # ① 命中
+        for text in ("阿拾，今天天气怎么样", "今天天气怎么样阿拾", "小灵帮我查一下", "阿拾"):
+            _assert(
+                session._match_wake_word(text) is not None,
+                f"应当命中唤醒词：{text!r}",
+            )
+
+        # ② 不误触（这条最重要 —— 误触发比叫不醒更烦人）
+        for text in ("今天天气不错", "石头上有个蚂蚁", "你在干什么"):
+            _assert(
+                session._match_wake_word(text) is None,
+                f"不该误触：{text!r}",
+            )
+
+        # ③ 同音容错（ASR 对专有名词转写不稳定：阿拾/阿十/阿石）
+        _assert(
+            session._match_wake_word("阿十你在吗") is not None,
+            "同音字「阿十」应当容忍（ASR 常把「拾」转成「十」）",
+        )
+
+        # ④ 剥离：唤醒词不能留在正文里
+        word = session._match_wake_word("阿拾，今天天气怎么样")
+        _assert(word == "阿拾", f"应返回配置里的原词，实际 {word!r}")
+        stripped = session._strip_wake_word("阿拾，今天天气怎么样", word)
+        _assert(
+            "阿拾" not in stripped,
+            f"剥离后不该还有唤醒词：{stripped!r}",
+        )
+        _assert("今天天气怎么样" in stripped, f"正文丢了：{stripped!r}")
+
+        # ⑤ 句首要求
+        class _CfgPrefix(_Cfg):
+            wake_require_prefix = True
+
+        prefix_session = VoiceSession.__new__(VoiceSession)
+        prefix_session.voice_config = _CfgPrefix()
+        _assert(
+            prefix_session._match_wake_word("阿拾，今天天气") is not None,
+            "句首的唤醒词应当命中",
+        )
+        _assert(
+            prefix_session._match_wake_word("今天天气阿拾") is None,
+            "要求句首时，句尾的唤醒词不该命中",
+        )
+
+        # ⑥ 老配置（没有这些字段）不能崩
+        class _OldCfg:
+            enabled = True
+
+        old = VoiceSession.__new__(VoiceSession)
+        old.voice_config = _OldCfg()
+        _assert(old._match_wake_word("阿拾你好") is None, "没有 wake_words 时应返回 None")
+
+        return "命中/不误触/同音容错/剥离/句首要求/老配置兼容 都正确"
+
     @suite.check("语音顺序：两句并发识别时**按说话顺序发布**（慢句不能后到）")
     def _() -> str:
         """

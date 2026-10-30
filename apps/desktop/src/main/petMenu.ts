@@ -123,6 +123,18 @@ export interface PetMenuHandlers {
    */
   toggleTtsSpeech?: (enabled: boolean) => void;
   /**
+   * 切换语音触发方式（2026-10-30）。
+   *
+   * 用户原话：「分两种，一种用唤醒词，一种用按键模式，
+   * 这两种模式在宠物控制里面切换」。
+   *
+   * 值：`'key'` 按键 / `'wake'` 唤醒词。
+   *
+   * ⚠️ 与 `toggleTtsSpeech` 不同：它**不是布尔**，所以不能用 checkbox 的
+   * `checked` 语义直接映射。菜单里用 radio 子菜单（二选一）。
+   */
+  setVoiceTrigger?: (mode: string) => void;
+  /**
    * 切换联网搜索（2026-10-12）。
    *
    * 用户要求「联网功能**默认关闭**，在**菜单里面**打开之后如果我让宠物去
@@ -265,6 +277,17 @@ export const ACTIONS_WITH_VALUE: Record<string, string> = {
    * 整菜单灰过一次（见 `handlerNameFor` 的说明）。
    */
   mic: 'setMicDevice',
+  /*
+   * 语音触发方式（2026-10-30）。
+   *
+   * `voice-trigger:key` / `voice-trigger:wake` -> `setVoiceTrigger`。
+   *
+   * ⚠️ 必须登记：`handlerNameFor('voice-trigger')` 会转成 `voiceTrigger`，
+   *    而处理器实际叫 `setVoiceTrigger`。漏登记的话菜单项会被
+   *    **置灰成「未实现」** —— 这个项目已经因为 action↔处理器名对不上
+   *    整菜单灰过一次。
+   */
+  'voice-trigger': 'setVoiceTrigger',
 };
 
 /**

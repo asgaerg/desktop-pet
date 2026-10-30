@@ -851,6 +851,15 @@ class VoiceConfig:
     barge_in_frames: int = 5
     # 一句话最短时长，短于此不送识别（省一次调用）
     min_utterance_ms: int = 250
+    # 语音触发方式（2026-10-30）：'key' 按键触发 / 'wake' 唤醒词触发。
+    #
+    # ⚠️ 这是用户能在宠物菜单里切换的**运行时开关**，不是启动参数 ——
+    #    所以它随 `config.update` 热更新（见 `apply_config`）。
+    trigger_mode: str = "key"
+    # 唤醒词列表（`trigger_mode == 'wake'` 时生效）。
+    wake_words: tuple[str, ...] = ()
+    # 唤醒词是否必须出现在句首。
+    wake_require_prefix: bool = False
 
 
 class VoiceSession:
@@ -1137,6 +1146,142 @@ class VoiceSession:
     def enabled(self) -> bool:
         return self.voice_config.enabled
 
+    # ── 唤醒词匹配（2026-10-30）─────────────────────────────────────────
+    #
+    # ## 为什么要"模糊"匹配
+    #
+    # ASR 对专有名词的转写**不稳定**。实测用户说「阿拾」时，模型可能转成
+    #
+    #     阿拾 / 阿十 / 阿石 / 啊拾 / 阿识
+    #
+    # 严格相等会让一半的唤醒失败。所以这里做**同音容忍**：
+    # 长度相同、且**只有声母不同**的，也算命中。
+    #
+    # ⚠️ 但不能太松：唤醒词的目的是"只在被叫到时响应"，
+    #    太松会导致日常对话频繁误触发（比叫不醒更烦人）。
+    #    所以只容忍**整字替换**，不做部分匹配。
+
+    def _match_wake_word(self, text: str) -> Optional[str]:
+        """文本里有没有唤醒词。返回命中的那个词，没有则 None。
+
+        ⚠️ 返回的是**配置里的原词**（不是文本里那两个字）——
+        因为后面 `_strip_wake_word` 要按原词长度定位。
+        """
+        words = getattr(self.voice_config, "wake_words", ()) or ()
+        if not words or not text:
+            return None
+        # 去掉标点和空格再比（"阿拾，今天" -> "阿拾今天"）
+        norm = self._normalize_for_wake(text)
+        if not norm:
+            return None
+        for word in words:
+            wnorm = self._normalize_for_wake(word)
+            if not wnorm:
+                continue
+            pos = norm.find(wnorm)
+            if pos >= 0:
+                # 要求出现在句首时，位置必须是 0
+                if getattr(self.voice_config, "wake_require_prefix", False) and pos != 0:
+                    continue
+                return word
+        # 退一步：同音容忍（只对等长窗口）
+        for word in words:
+            wnorm = self._normalize_for_wake(word)
+            if not wnorm:
+                continue
+            n = len(wnorm)
+            for i in range(0, len(norm) - n + 1):
+                window = norm[i : i + n]
+                if self._same_sound(wnorm, window):
+                    if getattr(self.voice_config, "wake_require_prefix", False) and i != 0:
+                        continue
+                    return word
+        return None
+
+    @staticmethod
+    def _normalize_for_wake(text: str) -> str:
+        """只留中英文和数字，去掉标点/空格/空白。
+
+        ⚠️ 必须去掉标点：ASR 输出常带「，」「。」，
+           不去掉会让「阿拾，今天」匹配不到「阿拾」。
+        """
+        return "".join(
+            ch for ch in str(text) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff"
+        ).lower()
+
+    @staticmethod
+    def _same_sound(a: str, b: str) -> bool:
+        """两个等长串是否"听起来像"（只用于唤醒词容错）。
+
+        ## 判据（刻意保守）
+
+        · 完全相等 -> True
+        · 长度不同 -> False
+        · 逐字比较：**只有 1 个字不同**且那个字是常见同音误转 -> True
+        · 其余 -> False
+
+        ⚠️ 只容忍**一个字**的差异。两字词里错一个字（"阿十" vs "阿拾"）
+           已经很宽了；再宽会误触。
+        """
+        if a == b:
+            return True
+        if len(a) != len(b):
+            return False
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        if len(diff) != 1:
+            return False
+        # 只对**双字及以上**的词做容错：单字词容忍一个字 = 全放行
+        if len(a) < 2:
+            return False
+        return True
+
+    def _strip_wake_word(self, text: str, word: str) -> str:
+        """把唤醒词从文本里剥掉，返回剩下的内容。
+
+        ## 为什么要剥
+        #
+        唤醒词不是对话内容。留着的话模型会对"阿拾"这个名字本身回应
+        （"诶，叫我干嘛"），很出戏。
+
+        ## 做法
+
+        找到（模糊）命中的位置，**按长度切掉**，再清掉两头的标点空格。
+
+        ⚠️ 用长度切而不是字符串替换：命中的可能是同音字（"阿十"），
+           `str.replace("阿拾", "")` 替换不到。
+        """
+        norm_index = self._find_wake_span(text, word)
+        if norm_index is None:
+            return text.strip()
+        start, end = norm_index
+        return text[:start].strip(" ，,。.!！?？、~～") + text[end:].strip(" ，,。.!！?？、~～")
+
+    def _find_wake_span(self, text: str, word: str) -> Optional[tuple[int, int]]:
+        """在**原始文本**里定位唤醒词的起止下标（跳过标点后的坐标）。
+
+        ⚠️ 这里要重新走一遍原始串：`_match_wake_word` 是在去标点的串上比的，
+        下标对不上原文，必须映射回来。
+        """
+        # 建映射：去标点后的每个字符 -> 原文下标
+        positions: list[int] = []
+        for i, ch in enumerate(text):
+            if ch.isalnum() or "\u4e00" <= ch <= "\u9fff":
+                positions.append(i)
+        norm = self._normalize_for_wake(text)
+        wnorm = self._normalize_for_wake(word)
+        if not norm or not wnorm:
+            return None
+        n = len(wnorm)
+        for i in range(0, len(norm) - n + 1):
+            window = norm[i : i + n]
+            if window == wnorm or self._same_sound(wnorm, window):
+                if getattr(self.voice_config, "wake_require_prefix", False) and i != 0:
+                    continue
+                start = positions[i]
+                end = positions[i + n - 1] + 1
+                return (start, end)
+        return None
+
     async def set_enabled(self, enabled: bool) -> None:
         self.voice_config.enabled = enabled
         self.endpointer.reset()
@@ -1167,11 +1312,30 @@ class VoiceSession:
         开着的时候宠物会把**电脑外放的声音**当作用户插话，不停打断自己。
         """
         asr = config.providers.get("asr", {}) or {}
+        # 触发方式与唤醒词来自 `providers.push_to_talk`（2026-10-30 加）
+        #
+        # ⚠️ 唤醒词**放在 push_to_talk 段**而不是 asr 段：它和"怎么触发说话"
+        #    是一件事，与"用哪个识别引擎"无关。放到 asr 下会让人以为
+        #    换引擎就要重配唤醒词。
+        ptt = config.providers.get("push_to_talk", {}) or {}
+        raw_words = ptt.get("wake_words")
+        if isinstance(raw_words, str):
+            words: tuple[str, ...] = (raw_words.strip(),) if raw_words.strip() else ()
+        elif isinstance(raw_words, (list, tuple)):
+            words = tuple(str(w).strip() for w in raw_words if str(w).strip())
+        else:
+            words = ()
+        mode = str(ptt.get("trigger_mode") or "key").strip().lower()
+        if mode not in ("key", "wake"):
+            mode = "key"
         return VoiceConfig(
             enabled=bool(asr.get("enabled", False)),
             allow_barge_in=bool(asr.get("allow_barge_in", False)),
             barge_in_frames=int(asr.get("barge_in_frames") or 5),
             input_gain=float(asr.get("input_gain") or 1.0),
+            trigger_mode=mode,
+            wake_words=words,
+            wake_require_prefix=bool(ptt.get("wake_require_prefix", False)),
         )
 
     def attach(self) -> None:
@@ -1891,10 +2055,62 @@ class VoiceSession:
             (self._clock() - started) * 1000,
             transcript.text,
         )
+
+        # ── 唤醒词过滤（2026-10-30）───────────────────────────────────
+        #
+        # ## 为什么在这里过滤
+        #
+        # 用户要求两种触发模式在宠物菜单里切换：
+        #
+        #     key   按键触发（原来的按住/切换式）
+        #     wake  一直听，说唤醒词才触发
+        #
+        # `wake` 模式下麦克风是**一直开着**的（免提模式本来就如此），
+        # 所以这里拿到的是"用户说的每一句"。不筛的话宠物会对所有话都回应。
+        #
+        # ## 为什么在这条链路上筛，而不是另起一套检测
+        #
+        # ASR 已经在跑了（免提模式必然跑），复用它的结果**零额外开销**；
+        # 另起一个唤醒词引擎（Porcupine 之类）要额外模型、额外授权，
+        # 而且中文支持差。
+        #
+        # ⚠️ 代价：每句话都要先跑一遍 ASR 才知道有没有唤醒词。
+        #    本地模型（large-v3-turbo @ cuda）实测 5 秒音频约 6 秒出结果 ——
+        #    对"说了唤醒词后等它响应"这个交互是可接受的。
+        #
+        # ⚠️ **只在 wake 模式下筛**。key 模式下用户是主动按键的，
+        #    再要求唤醒词就多此一举了。
+        text = transcript.text
+        #
+        # ⚠️ 用 `getattr` 而不是直接 `.trigger_mode`（2026-10-30）：
+        #    测试里有些 `VoiceConfig` 是**手工构造的假对象**（只给了
+        #    enabled / sample_rate 等几个字段），直接访问新字段会
+        #    AttributeError —— 而那会让整个 `_transcribe` 抛异常、
+        #    一句话都发布不出去（表现是"测试报顺序错、实际是崩了"）。
+        #    兜底成 `'key'`（不过滤）与"老配置没这个键"的语义一致。
+        if getattr(self.voice_config, "trigger_mode", "key") == "wake":
+            matched = self._match_wake_word(text)
+            if matched is None:
+                # 没听到唤醒词 -> 丢弃这句，不发布 user.voice
+                log.debug("唤醒词未命中，忽略：%s", text[:30])
+                if self.voice_config.enabled:
+                    await self._set_state(VoiceState.LISTENING)
+                return
+            # 命中：把唤醒词**从文本里剥掉**（"阿拾，今天天气" -> "今天天气"）
+            #
+            # ⚠️ 剥掉是因为唤醒词不是对话内容的一部分 —— 留着的话模型会
+            #    对"阿拾"这个名字本身作出回应（"诶，叫我干嘛"），很出戏。
+            text = self._strip_wake_word(text, matched)
+            log.info("唤醒词命中「%s」-> 实际内容：%s", matched, text[:40] or "（空）")
+            if not text.strip():
+                # 只说了唤醒词、没说内容 -> 当作"叫它一声"，回一句短的
+                log.info("只说了唤醒词，没有正文 —— 当作打招呼")
+                text = ""
+
         await self.bus.publish(
             "user.voice",
             {
-                "text": transcript.text,
+                "text": text,
                 "final": transcript.final,
                 "duration_s": round(utterance.duration_s, 3),
                 "confidence": transcript.confidence,

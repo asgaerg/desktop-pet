@@ -200,6 +200,32 @@ export interface PetMenuState {
    */
   ttsSpeechEnabled: boolean;
   /**
+   * 语音触发方式（2026-10-30 用户要求）。
+   *
+   * ## 用户原话
+   *
+   * 「分两种，一种用唤醒词，一种用按键模式，这两种模式在宠物控制里面切换」
+   *
+   * ## 为什么需要两种
+   *
+   * 实测（2026-10-30）：英雄联盟的 **ACE 反作弊内核驱动**在运行时，
+   * 会拦截所有键盘钩子 —— `SetWindowsHookEx(WH_KEYBOARD_LL)` 安装成功
+   * 但一次回调都收不到；`globalShortcut`（底层 `RegisterHotKey`）
+   * 在全屏独占时 WM_HOTKEY 也不派发。
+   *
+   * 所以**全屏游戏时任何按键触发都不可行**（这是反作弊的设计目的）。
+   * 而麦克风不归反作弊管 —— 唤醒词是全屏时唯一能用的触发方式。
+   *
+   * ## 两种模式的代价
+   *
+   *   key   按键触发。不占麦克风（只在按下时开），但全屏游戏时可能失效。
+   *   wake  一直听，说唤醒词才触发。全屏可用，但**持续占用麦克风**，
+   *         且每句都要跑一次 ASR（本地模型，有 GPU 开销）。
+   *
+   * 真源是 `persona.yaml` 的 `providers.push_to_talk.trigger_mode`。
+   */
+  voiceTriggerMode: 'key' | 'wake';
+  /**
    * 当前选定的麦克风 `deviceId`（空 = 系统默认）。
    *
    * 用户要求 2026-10-08：「麦克风选项移到宠物菜单里面」。
@@ -440,6 +466,54 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
       checked: state.ttsSpeechEnabled,
       action: 'toggle-tts-speech',
       icon: 'speaker',
+    },
+    {
+      /*
+       * 语音触发方式（2026-10-30 用户要求）。
+       *
+       * ## 用户原话
+       *
+       * 「分两种，一种用唤醒词，一种用按键模式，这两种模式在宠物控制里面切换」
+       *
+       * ## 为什么要有"唤醒词"这一档
+       *
+       * 实测：英雄联盟的 **ACE 反作弊内核驱动**会拦截所有键盘钩子 ——
+       * `SetWindowsHookEx(WH_KEYBOARD_LL)` 安装成功但**一次回调都收不到**
+       * （连自己 SendInput 模拟的按键都收不到）。
+       * 而 `globalShortcut` 在全屏独占时 WM_HOTKEY 也不派发。
+       *
+       * 所以全屏游戏时按键触发**必然失效**，麦克风是唯一可用的通道。
+       *
+       * ⚠️ 用 submenu 而不是 checkbox：这是**二选一**，不是开关。
+       *    checkbox 会让用户以为"可以都开"，而实际上只能用一个。
+       */
+      label: '语音触发方式',
+      icon: 'mic',
+      /*
+       * ⚠️ 用 `radio` 而不是 `checkbox`（2026-10-30）：
+       *    这是**二选一**，radio 的语义才对。用 checkbox 会让人以为
+       *    "可以都开"，而实际上只能用一个。
+       *    另外 `HANDLERS_TAKING_CHECKED_STATE` 那条门禁断言只认
+       *    checkbox —— radio 不进那张表（它吃的是模式值，不是勾选状态），
+       *    与「联网搜索」三选一是同一套做法。
+       */
+      submenu: [
+        {
+          label: '按键（按一下说）',
+          type: 'radio' as const,
+          checked: state.voiceTriggerMode === 'key',
+          // ⚠️ 用 `voice-trigger:key` 这种**带值**格式（2026-10-30）：
+          //    与 `state:quiet` / `mic:<id>` / `web-search-mode:<模式>` 同一套约定，
+          //    处理器按冒号后的值分发。
+          action: 'voice-trigger:key',
+        },
+        {
+          label: '唤醒词（全屏游戏可用）',
+          type: 'radio' as const,
+          checked: state.voiceTriggerMode === 'wake',
+          action: 'voice-trigger:wake',
+        },
+      ],
     },
     {
       // 标签刻意短：菜单宽度由**最长的那个标签**决定，括号里的说明会白白把
