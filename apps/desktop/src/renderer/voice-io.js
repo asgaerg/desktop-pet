@@ -37,7 +37,21 @@ export class VoiceIO {
      * 在播放端乘一个系数，三条路线就都听话了，也不会出现"两处各调一次"。
      */
     this.playbackVolume = 1;
+    /** 采集链路的增益节点（`start()` 里创建，接 `this.node` 录音） */
     this.gain = null;
+    /**
+     * **播放**用的增益节点（2026-10-30 新增，与采集的 `this.gain` **分开**）。
+     *
+     * ## 🔴 为什么必须分开
+     *
+     * 原来两者共用一个字段，导致"开过麦克风之后，播放的音频被接到录音链路"，
+     * 表现为**没声音**。完整分析见 `play()` 里那段注释。
+     *
+     * 简言之：`play()` 里的 `if (!this.gain)` 在采集已创建时**跳过创建**，
+     * 于是 `source.connect(this.gain)` 接到了录音用的节点上 ——
+     * 声音进了麦克风链路，而不是扬声器。
+     */
+    this.playbackGain = null;
     /** 待发送的样本缓冲：凑满一帧再发，避免每几毫秒发一个小包 */
     this.pending = [];
     this.pendingCount = 0;
@@ -473,9 +487,10 @@ export class VoiceIO {
     const raw = Number(percent);
     const clamped = Math.max(0, Math.min(100, Number.isFinite(raw) ? raw : 100));
     this.playbackVolume = clamped / 100;
-    if (this.gain) {
+    // ⚠️ 改的是**播放**增益（`playbackGain`），不是采集那个 `gain`（2026-10-30）
+    if (this.playbackGain) {
       try {
-        this.gain.gain.value = this.playbackVolume;
+        this.playbackGain.gain.value = this.playbackVolume;
       } catch {
         /* 节点已经被 context 释放 */
       }
@@ -489,7 +504,23 @@ export class VoiceIO {
    * 配上 TTS 之后它才是主路径。
    */
   async play(payload, format) {
-    if (!this.context) this.context = new AudioContext();
+    /*
+     * 🔴 context 可能是**已关闭**的（2026-10-30 修）
+     *
+     * `stop()` 会 `this.context.close()` 并把 `this.context` 置 null ——
+     * 但 `stopPlayback()`（上一段语音结束时调）**不关 context**。
+     *
+     * 问题在于：`this.playbackGain` 属于**创建它的那个 context**。
+     * 如果 context 被换掉（新建），旧 `playbackGain` 还连着旧的 destination，
+     * 声音就出不来了 —— 而且**不报错**。
+     *
+     * 所以这里检测 context 是否可用，不可用就重建并**丢掉旧的 playbackGain**。
+     */
+    if (!this.context || this.context.state === 'closed') {
+      this.context = new AudioContext();
+      // 旧 gain 属于旧 context，必须丢掉（否则 play 会往死节点上接）
+      this.playbackGain = null;
+    }
     const context = this.context;
     if (context.state === 'suspended') await context.resume();
 
@@ -517,13 +548,44 @@ export class VoiceIO {
      * 正在播的那一段也会立刻跟着变 —— 用户拖动滑杆时能马上听出区别。
      * 直接接 destination 的话，音量只能在"下一段语音"生效。
      */
-    if (!this.gain) {
-      this.gain = context.createGain();
-      this.gain.gain.value = this.playbackVolume;
-      this.gain.connect(context.destination);
+    /*
+     * 🔴 必须用**独立字段 `playbackGain`**，不能复用 `this.gain`（2026-10-30 修）
+     *
+     * ## 这个 bug 的形态
+     *
+     * `this.gain` 原来被**两个完全不同的用途共用**：
+     *
+     *     麦克风采集（`start()`）  this.gain -> this.node（录音链路）
+     *     语音播放（`play()`）     this.gain -> context.destination（扬声器）
+     *
+     * 而这里写的是 `if (!this.gain)` —— **采集已经创建过它就跳过创建**。
+     * 于是播放时音频被接到了**麦克风采集链路**（`this.node`）里，
+     * 根本没连到 `destination`：
+     *
+     *     语音 -> gain(采集用的) -> node(录音用的) -> mute -> destination(0 增益)
+     *                                                          ^^^^^^^^^^^^
+     *                                                          这里是**静音**的
+     *
+     * ## 为什么"有时有声音、有时没有"
+     *
+     * 取决于**先开过麦克风没有**：
+     *
+     *     没开过麦克风 -> this.gain 是 null -> play() 新建并接 destination -> 有声 ✅
+     *     开过麦克风   -> this.gain 已存在 -> 复用 -> 接到录音链路 -> **没声** ❌
+     *
+     * 用户报的"现在又没声音了"正是这个：他那次开着语音（麦克风开着），
+     * 所以 `this.gain` 已经被采集链路占用了。
+     *
+     * ⚠️ 这条链路还经过 `mute`（采集时为防啸叫设的 **0 增益**节点），
+     *    所以就算接对了 gain，声音也会被那个 mute 吃掉。
+     */
+    if (!this.playbackGain) {
+      this.playbackGain = context.createGain();
+      this.playbackGain.gain.value = this.playbackVolume;
+      this.playbackGain.connect(context.destination);
     }
-    this.gain.gain.value = this.playbackVolume;
-    source.connect(this.gain);
+    this.playbackGain.gain.value = this.playbackVolume;
+    source.connect(this.playbackGain);
     source.start();
     this.playback = source;
     /*

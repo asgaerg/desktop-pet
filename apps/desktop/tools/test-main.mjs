@@ -6323,6 +6323,37 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
   check('麦克风回退只在"设备约束不满足"时触发（权限被拒不硬来）',
     /name === 'OverconstrainedError'/.test(vioSrc) &&
     /name === 'NotFoundError'/.test(vioSrc));
+
+  /*
+   * 🔴 采集增益与播放增益**必须是两个不同的节点**（2026-10-30 真故障）
+   *
+   * 用户报「现在又没声音了」，而 WPF MediaPlayer 播同一个 mp3 是**有声音的**
+   * —— 说明音频和输出设备都没问题，是宠物自己的播放路径坏了。
+   *
+   * ## 根因
+   *
+   * `this.gain` 被两个用途共用：
+   *
+   *     采集（start()）   this.gain -> this.node（录音链路）-> mute(0 增益)
+   *     播放（play()）    this.gain -> context.destination（扬声器）
+   *
+   * `play()` 里写的是 `if (!this.gain)` —— **采集建过就跳过创建**，
+   * 于是播放的音频被接到录音链路，声音进了麦克风而不是扬声器。
+   *
+   * ## 为什么"有时有声有时没声"
+   *
+   *     没开过麦克风 -> gain 是 null -> 新建接 destination -> 有声
+   *     开过麦克风   -> gain 已存在 -> 复用 -> 接到录音链路 -> **没声**
+   */
+  check('播放增益与采集增益分开（否则开过麦克风后语音没声）',
+    /this\.playbackGain = context\.createGain\(\)/.test(vioSrc) &&
+    /source\.connect\(this\.playbackGain\)/.test(vioSrc) &&
+    !/if \(!this\.gain\) \{\s*this\.gain = context\.createGain\(\)/.test(vioSrc));
+  check('setVolume 改的是播放增益（不是采集那个）',
+    /this\.playbackGain\.gain\.value = this\.playbackVolume/.test(vioSrc));
+  check('播放前检查 context 已关闭（避免往死节点上接）',
+    /this\.context\.state === 'closed'/.test(vioSrc) &&
+    /this\.playbackGain = null/.test(vioSrc));
 }
 
 /* ------------------------------------------------------------------ 收尾 */
