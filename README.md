@@ -18,7 +18,7 @@
 
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| **`DesktopPet-0.2.2-online-portable.zip`** | 355 MB | **绿色包，解压即用** |
+| **`DesktopPet-0.2.3-online-portable.zip`** | 355 MB | **绿色包，解压即用** |
 
 **为什么优先给绿色包**：zip 里没有安装器，解压出来直接双击 `DesktopPet.exe` 就能跑，
 不会触发安装程序那一轮签名检查。实测这是不买证书时**最不容易被拦**的分发方式。
@@ -29,9 +29,9 @@
 
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| `DesktopPet-0.2.2-online-setup.exe` | 278 MB | NSIS 安装包 |
+| `DesktopPet-0.2.3-online-setup.exe` | 278 MB | NSIS 安装包 |
 
-`0.2.2` 起安装包**用自己的自签名证书签过**（Authenticode，SHA256）。
+`0.2.3` 起安装包**用自己的自签名证书签过**（Authenticode，SHA256）。
 但自签名证书的根不在微软信任列表里，所以：
 
 · **装过证书的机器**（你自己的、以及照下面步骤操作过的朋友）→ 双击**不弹**任何提示
@@ -47,7 +47,7 @@
 
 > ⚠️ 杀软可能误报 `resources\pet\pet.exe`（PyInstaller 打的 Python）→ 加白名单。
 > **安装包要放纯英文路径**（如 `C:\Temp`）再运行，中文路径会让 NSIS 失败。
-> 校验：`Get-FileHash .\DesktopPet-0.2.2-online-setup.exe -Algorithm SHA256`，
+> 校验：`Get-FileHash .\DesktopPet-0.2.3-online-setup.exe -Algorithm SHA256`，
 > 对照 [SHA256SUMS.txt](docs/SHA256SUMS.txt)。
 
 ## 关于代码签名
