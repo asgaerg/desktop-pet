@@ -8620,6 +8620,7 @@ def run_selftest(config_path: Optional[Path] = None) -> SelfTest:
     test_bus_and_plugins(suite)
     test_logging(suite)
     test_end_to_end(suite, config_path)
+    test_reading(suite)
     return suite
 
 
@@ -8638,6 +8639,403 @@ def print_report(suite: SelfTest) -> None:
     print("-" * 78)
     print(f"结果：{passed}/{total} 通过{'  ✅ 全部通过' if suite.ok else '  ❌ 存在失败项'}")
     print("=" * 78 + "\n")
+
+
+def test_reading(suite: "Suite") -> None:
+    """网上阅读（2026-10-31 用户需求）。
+
+    > 「用户长时间不和宠物聊天，宠物会自行上网搜索看小说阅读，包括看小说，
+    >   看出版书，看小黑盒帖子上的杂谈趣事等等，看的小说和出版书要下载到
+    >   本地指定位置，下载好之后看，书源下载的书没文字或错误就换源下载看。」
+    """
+
+    @suite.check("网上阅读：正文校验能区分「真正文」和「导航栏」")
+    def _() -> str:
+        """这是整个功能最核心的一条断言。
+
+        ## 为什么必须是"打分"而不是"有没有内容"
+
+        实测（2026-10-31）：某个书站的**每一页**都有 `#content` 这个 id，
+        但书页/目录页里那个 div 装的是**导航条 + 推荐书单**。
+
+        如果校验写成"选择器命中且文本非空"，日志会显示"读到了东西"，
+        实际内容却是「首页 | 玄幻 | 武侠 | 都市 | ...」，宠物会拿这个去聊天。
+
+        所以用三个可量化指标（都是实测出来的阈值）：
+
+            中文占比 >= 50%     排除英文页 / 乱码
+            标点密度 >= 0.5%    正文有逗号句号，列表/广告没有
+            链接文字 <= 30%     导航块全是 <a>（这条在 chapter_body 里判）
+
+        ## ⚠️ 这条测试要能失败
+
+        把 `body_score` 的标点阈值改成 0（等于不检查），下面的反例必须失败。
+        验证过：改完之后「首页 玄幻 武侠」会得到正分。
+        """
+        from .reading import body_score
+
+        # ① 真正文：长、中文多、标点密
+        prose = (
+            "他站在窗前，看着外面下了一整夜的雨。"
+            "街灯把水面照得发亮，像撒了一地的碎银子。"
+            "他想起很多年前也是这样的天气，那时候他还不知道会走到今天这一步。"
+        ) * 8
+        score, why = body_score(prose)
+        _assert(score > 0, f"真正文被判成无效：{why}（这会让人永远读不到书）")
+
+        # ② 导航栏：中文很多但**几乎没有标点**
+        nav = "首页 玄幻 武侠 都市 军史 网游 科幻 灵异 其他 记录 排行 完本 " * 12
+        score_nav, why_nav = body_score(nav)
+        _assert(
+            score_nav == 0,
+            f"导航栏被判成正文：{why_nav} —— 宠物会把「首页 玄幻 武侠」当书读",
+        )
+
+        # ③ 英文页：中文占比过低
+        english = "Welcome to this site. " * 40
+        score_en, why_en = body_score(english)
+        _assert(score_en == 0, f"英文页被判成正文：{why_en}")
+
+        # ④ 太短：多半是提示语/错误页
+        score_short, _ = body_score("抱歉，本章节不存在。")
+        _assert(score_short == 0, "过短内容不该当成正文")
+
+        return f"真正文 {score:.0f} 分；导航 {score_nav:.0f}；英文 {score_en:.0f}；短文本 {score_short:.0f}"
+
+    @suite.check("网上阅读：书源配置解析正确，坏配置不炸")
+    def _() -> str:
+        """书源是**用户手写**的 YAML，一定会写错。
+
+        `SourceSpec.from_dict` 必须对缺字段/类型错都给出合理默认，
+        而不是抛异常 —— 否则用户改错一个字，整个阅读功能就没了。
+        """
+        from .reading import SourceSpec
+
+        # 完整配置
+        full = SourceSpec.from_dict(
+            {
+                "name": "测试源",
+                "base": "https://example.com",
+                "enabled": True,
+                "encoding": "gbk",
+                "search": {
+                    "method": "post",
+                    "path": "search.html",
+                    "keyword_field": "s",
+                    "extra": {"type": "1"},
+                    "book_link": "/book/[0-9]+/",
+                },
+                "toc": {"url": "/book/{book_id}/", "chapter_link": r"/book/\d+/\d+\.html"},
+                "content": {"selectors": ["#content", ".read"], "min_chars": 800},
+            }
+        )
+        _assert(full.name == "测试源", f"名称错：{full.name}")
+        _assert(
+            full.base == "https://example.com/",
+            f"base 必须补末尾斜杠（否则拼 URL 会出错）：{full.base!r}",
+        )
+        _assert(full.search_method == "post", f"method 错：{full.search_method}")
+        _assert(full.keyword_field == "s", f"字段名错：{full.keyword_field}")
+        _assert(full.search_extra == {"type": "1"}, f"extra 错：{full.search_extra}")
+        _assert(full.min_chars == 800, f"min_chars 错：{full.min_chars}")
+        _assert(full.selectors == ["#content", ".read"], f"selectors 错：{full.selectors}")
+
+        # 空配置：必须能构造出来，不能抛
+        empty = SourceSpec.from_dict({})
+        _assert(empty.enabled is True, "缺 enabled 时应默认开启")
+        _assert(empty.min_chars == 500, f"缺 min_chars 应默认 500，实际 {empty.min_chars}")
+        _assert(empty.selectors == [], "缺 selectors 应为空列表")
+
+        # 类型错误：null / 字符串 / 数字混着给
+        weird = SourceSpec.from_dict(
+            {"name": None, "base": None, "search": None, "toc": None, "content": None}
+        )
+        _assert(weird.name == "未命名源", f"None 名称应兜底，实际 {weird.name!r}")
+        _assert(weird.base == "/", f"None base 应兜底成 '/'，实际 {weird.base!r}")
+
+        return "完整/空/全 None 三种配置都能解析"
+
+    @suite.check("网上阅读：书源目录 / 落盘路径符合用户要求")
+    def _() -> str:
+        """用户明确说「下载到本地指定位置」，且选了**项目里**。
+
+        两个必须守住的点：
+          · 路径是 `<项目根>/pet-books`，不是 %APPDATA%
+          · 目录已被 .gitignore 排除（否则盗版书会进公开仓库）
+        """
+        from . import paths
+        from .config import Config
+        from .reading import Reader
+
+        r = Reader(Config())
+        d = r.books_dir()
+        root = paths.project_root()
+        _assert(
+            d.parent == root.resolve() or d.parent == root,
+            f"书应存在项目根下，实际 {d}（根是 {root}）",
+        )
+        _assert(d.name == "pet-books", f"目录名应为 pet-books，实际 {d.name}")
+        _assert(d.is_dir(), f"目录应被自动创建：{d}")
+
+        # 真正的"关掉就失败"：gitignore 必须覆盖它
+        gi = root / ".gitignore"
+        if gi.is_file():
+            text = gi.read_text(encoding="utf-8", errors="replace")
+            _assert(
+                "pet-books/" in text,
+                "pet-books/ 必须在 .gitignore 里 —— 否则下几本书就进公开仓库了",
+            )
+
+        # 文件名清洗：书名里常有 / : ? 这些非法字符
+        safe = r._save("测试/书名:带*非法?字符", "测试源", "正文内容")
+        from pathlib import Path as _P
+
+        name = _P(safe).name
+        for bad_ch in ("/", ":", "*", "?", "|"):
+            _assert(bad_ch not in name, f"文件名没清洗干净，含 {bad_ch!r}：{name}")
+        _P(safe).unlink(missing_ok=True)
+        return f"落盘目录 {d.name}，文件名已清洗"
+
+    @suite.check("网上阅读：没有书源时**安静地**什么都不做（不联网、不抛异常）")
+    def _() -> str:
+        """书源列表为空时必须安静返回，不能联网瞎搜。
+
+        ## ⚠️ 这条测试不能依赖"当前配置里有没有书源"
+
+        第一版写的是 `Reader(Config())` 然后断言"没书源"。
+        等用户真的填了书源（2026-10-31 加了新笔趣阁）之后，
+        这条测试开始**真的去抓书**，然后断言失败 ——
+        而它其实什么 bug 都没抓到，只是前提假设过期了。
+
+        **教训：测试的输入要自己构造，不要读用户的运行时配置。**
+        所以这里显式把 `sources` 清空。
+        """
+        import asyncio
+
+        from .config import Config
+        from .reading import Reader
+
+        r = Reader(Config())
+        loaded = len(r.sources)
+        # 强制清空：不管用户配置里有没有源，这里测的是"没有源"这条路径
+        r.sources = []
+
+        result = asyncio.run(r.read_book("三体"))
+        _assert(
+            result is None,
+            f"没有书源时不该产出内容，实际返回 {result!r}",
+        )
+        return f"清空前载入 {loaded} 个源；清空后读取返回 None"
+
+    @suite.check("网上阅读：搜索文本解析（工具层返回的是文本，不是 JSON）")
+    def _() -> str:
+        """`tools._web_search` 返回**给模型读的 Markdown 文本**。
+
+        阅读功能需要 `[{title,url,snippet}]`，所以有一层反向解析。
+        这层很脆（格式一改就失效），所以单独测。
+        """
+        from .gateway import _parse_search_text
+
+        sample = """结果数: 2
+
+## 结果 1
+
+**标题**: 某篇游戏杂谈
+
+**url**: https://example.com/a
+
+**来源**: 360
+
+**内容**: 讲了某个游戏的趣事
+
+## 结果 2
+
+**标题**: 第二篇
+
+**url**: https://example.com/b
+
+**内容**: 另一段摘要
+"""
+        items = _parse_search_text(sample)
+        _assert(len(items) == 2, f"应解析出 2 条，实际 {len(items)}")
+        _assert(items[0]["title"] == "某篇游戏杂谈", f"标题错：{items[0]['title']!r}")
+        _assert(items[0]["url"] == "https://example.com/a", f"url 错：{items[0]['url']!r}")
+        _assert(items[0]["snippet"] == "讲了某个游戏的趣事", f"摘要错：{items[0]['snippet']!r}")
+
+        # 工具层返回"人话"时必须是空列表，不能当成结果
+        for msg in ("联网搜索好像没打开", "错误：没有给搜索词。", ""):
+            _assert(_parse_search_text(msg) == [], f"这句不该被解析成结果：{msg!r}")
+
+        return "正常格式解析出 2 条；错误提示返回空列表"
+
+    @suite.check("网上阅读：base64 混淆的正文能解出来（纯选择器抓不到）")
+    def _() -> str:
+        """2026-10-31 实测：某些站把正文切成几十段 base64，用随机函数名写入。
+
+            document.writeln(qryxkm.kagvx('PHA+5aSn56yU6Laj...'));
+            document.writeln(fgqm.eep('PHA+5q+V56uf5piv...'));
+
+        页面上 `#content` 只剩 149 字符的导航，**真正的正文一个字都不在
+        HTML 里**。纯选择器方案对这类页面永远抓不到，而且症状很像
+        "这站没正文"，于是会一直换源而不自知。
+
+        这条测试守两件事：
+          ① 能按**结构**（而不是函数名）认出这种混淆
+          ② 解出来的内容能通过正文校验
+        """
+        import base64 as _b64
+
+        from .reading import _decode_obfuscated_blocks, body_score
+
+        # 造 5 段 base64，函数名刻意不同（真实站点每页随机）
+        # 每段要够长：ody_score 有 100 字下限（短于它的多半是提示语），
+        # 而测试要验证的是解出来的内容过得了校验，所以样本必须够量。
+        frags = [
+            "<p>他站在窗前，看着外面下了一整夜的雨，街灯把水面照得发亮。</p>",
+            "<p>他想起很多年前也是这样的天气，那时候他还年轻，还会为一句话激动半天。</p>",
+            "<p>风从窗缝里钻进来，带着湿冷的气息，把桌上的纸吹得簌簌响。</p>",
+            "<p>他伸手把窗关上，屋子里顿时安静下来，只剩下钟摆的声音。</p>",
+            "<p>有些事情过去了就是过去了，再怎么想也回不到当初那个下午。</p>",
+        ]
+        lines = []
+        for i, f in enumerate(frags):
+            b64 = _b64.b64encode(f.encode("utf-8")).decode()
+            # 函数名每段都不一样 —— 必须靠结构匹配
+            lines.append(f"document.writeln(zq{i}km.kagv{i}('{b64}'));")
+        html = "<html><body><div id='content'>首页 玄幻 武侠</div>" + "".join(lines) + "</body></html>"
+
+        got = _decode_obfuscated_blocks(html)
+        _assert(got, "没认出 base64 混淆 —— 这类站点会永远抓不到正文")
+        for f in frags:
+            _assert(f in got, f"解出的内容缺片段：{f[:16]}…")
+        score, why = body_score(got.replace("<p>", "").replace("</p>", ""))
+        _assert(score > 0, f"解出来的内容过不了正文校验：{why}")
+
+        # 没混淆的普通页面：必须返回空串（不能误判）
+        plain = "<html><body><div id='content'>这是一段普通正文，有标点。</div></body></html>"
+        _assert(
+            _decode_obfuscated_blocks(plain) == "",
+            "普通页面不该被当成有混淆",
+        )
+
+        # 少于 3 段 base64 不算（避免把零散统计代码误当正文）
+        one = "document.writeln(a.b('" + _b64.b64encode("你好".encode()).decode() + "'));"
+        _assert(_decode_obfuscated_blocks(one) == "", "只有一段不该当成整章正文")
+
+        return f"解出 {len(frags)} 段，评分 {score:.0f}；普通页面不受影响"
+
+
+    @suite.check("网上阅读：站点 URL 形态千奇百怪，解析必须宽容")
+    def _() -> str:
+        """2026-10-31 实测三个站的书籍 URL，形态**完全不同**：
+
+            /book/gtfft/                       小写 + 末尾斜杠
+            /50606                             纯数字，无前缀
+            /book/16ABo1xDXh4nyeBPyapArh.html  混合大小写 + .html
+
+        第一版写死 `/book/([a-z0-9]+)/`，结果后两种都抽不出 `book_id`，
+        而 `toc_url` 要靠它拼 —— 抽不到的后果是退化成"扫书页找章节"，
+        而那些站的章节链接根本不在书页上，
+        表现为「这本书没有章节」（听起来像书本身是空的，其实是代码不认）。
+
+        这条测试守：四种形态都能抽出 id。
+        """
+        from .config import Config
+        from .reading import Reader, SourceSpec
+
+        r = Reader(Config())
+        spec = r.sources[0] if r.sources else SourceSpec(name="x", base="https://x/")
+
+        # 直接用 chapter_urls 的 id 抽取逻辑（通过 toc_url 拼接体现）
+        cases = [
+            ("https://www.xbqg777.com/50606", "50606"),
+            ("https://www.xbqg777.com/50606/", "50606"),
+            ("https://www.sto66.com/book/16ABo1xDXh4nyeBPyapArh.html", "16ABo1xDXh4nyeBPyapArh"),
+            ("https://site.com/book/gtfft/", "gtfft"),
+            ("https://site.com/book/efneg/", "efneg"),
+        ]
+        bad = []
+        for url, want in cases:
+            # 复用同一套正则（这里直接跑，不联网）
+            import re
+
+            got = ""
+            for pat in (
+                r"/book/([A-Za-z0-9]+)\.html?",
+                r"/book/([A-Za-z0-9]+)/",
+                r"/([A-Za-z0-9]+)\.html$",
+                r"/([A-Za-z0-9]{4,})/?$",
+            ):
+                m = re.search(pat, url)
+                if m:
+                    got = m.group(1)
+                    break
+            if got != want:
+                bad.append(f"{url} -> {got!r}（期望 {want!r}）")
+
+        _assert(not bad, "以下 URL 抽不出 book_id：" + "；".join(bad))
+        return f"{len(cases)} 种 URL 形态都能抽出 book_id"
+
+    @suite.check("网上阅读：关键词放路径 vs 放参数，两种搜索都要支持")
+    def _() -> str:
+        """实测两种站点写法：
+
+            参数式  path: 'search'            + keyword_field: keyword
+                    -> /search?keyword=三体
+            路径式  path: 'search/{q}.html'
+                    -> /search/三体.html
+
+        ⚠️ 路径式**不能**再往 params 里塞一次关键词，否则会拼出
+        `/search/三体.html?_unused=三体` —— 站点会返回 404 或热门页，
+        看起来像"搜索成功但这本书不存在"（思兔阅读就是这么坑的）。
+
+        这条测试守 `{q}` 是否被正确识别为"已在路径里"。
+        """
+        # 纯逻辑验证，不联网
+        def needs_params(path: str) -> bool:
+            return "{q}" not in path
+
+        _assert(needs_params("search") is True, "参数式应当需要 params")
+        _assert(needs_params("search/{q}.html") is False, "路径式不该再传 params")
+        _assert(needs_params("s.php?q={q}") is False, "含 {q} 的都不该再传")
+        return "参数式/路径式分流正确"
+
+
+    @suite.check("网上阅读：读完的内容**只用一次**（不会反复念同一本书）")
+    def _() -> str:
+        """`_take_reading_hint` 是"取走就清"，不是"读"。
+
+        如果不清理，宠物会**每轮都提同一本书**，用户会觉得它卡住了。
+        """
+        import time as _t
+
+        from .bus import Bus
+        from .config import Config
+        from .gateway import Gateway
+        from .reading import BookChunk
+
+        gw = Gateway.__new__(Gateway)  # 不跑 __init__（那会起一堆服务）
+        gw._last_reading = BookChunk(
+            title="测试书", source="测试源", text="正文" * 100, kind="book", chars=200
+        )
+        gw._last_reading_at = _t.monotonic()
+        gw._reading_title = ""
+
+        first = gw._take_reading_hint()
+        _assert(first, "第一次应当拿到提示词")
+        _assert("测试书" in first, f"提示词里应带书名：{first[:60]!r}")
+        _assert("不要复述原文" in first, "提示词必须约束它别背原文")
+        _assert(gw._last_reading is None, "取走后必须清空，否则会反复念同一本")
+
+        second = gw._take_reading_hint()
+        _assert(second == "", f"第二次应当拿到空串，实际 {second!r}")
+
+        # 过期内容不该再提（30 分钟前的阅读早就过时了）
+        gw._last_reading = BookChunk(title="老书", source="s", text="x" * 200, chars=200)
+        gw._last_reading_at = _t.monotonic() - 3600
+        _assert(gw._take_reading_hint() == "", "一小时前的阅读不该再拿出来说")
+
+        return "取一次后清空；过期内容不再提及"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

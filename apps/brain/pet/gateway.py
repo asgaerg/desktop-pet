@@ -46,6 +46,8 @@ from .curiosity import (
 from .events import CAPABILITIES, EventEngine
 from .segments import SegmentTracker
 from . import quotes as quotes_mod
+from . import reading as reading_mod
+from . import reading_tools
 from .screen_chat import (
     capture_and_describe,
     describe_for_prompt,
@@ -1564,6 +1566,32 @@ class Conversation:
                     allow_web=self._web_enabled(),
                     allow_browser=self._browser_enabled(),
                 )
+                # 🔴 阅读工具（2026-10-31 用户要求）
+                #
+                # 用户原话：「我的意思是自己选一本书读，有时候会换着读，
+                # 有时候会读很多章，比如一次几十章几万字。」
+                #
+                # 所以阅读**不是定时任务**，而是给模型两个工具让它自己决定：
+                #   · read_book   读哪本、读几章
+                #   · list_books  看读到哪了
+                #
+                # 只有在有书源时才挂 —— 没源的时候挂上去模型会调，
+                # 然后拿到"读不到"，白费一轮。
+                #
+                # ⚠️ `on_read` 用 `getattr` 取，不写死 `self._reading_note_from_tool`：
+                #    那个方法是 **Gateway** 的，本类（Conversation）没有。
+                #    直接写会 AttributeError，而且**照样被外层 except 吞掉**，
+                #    表现是所有工具一起消失。由 Gateway 在建对象时注入。
+                if self.reader is not None and self.reader.has_book_sources() and self._web_enabled():
+                    try:
+                        self._tools.extend(
+                            reading_tools.build_reading_tools(
+                                self.reader,
+                                on_read=getattr(self, "_reading_on_read", None),
+                            )
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.warning("阅读工具挂载失败（已忽略）", exc_info=True)
                 log.info(
                     "已启用 %d 个工具：%s",
                     len(self._tools),
@@ -2526,6 +2554,26 @@ class Gateway:
         )
         self.conversation.attach()
 
+        # 🔴 阅读器要在**建 Conversation 之前**就存在，并挂到它身上（2026-10-31）
+        #
+        # ## 为什么必须挂在 Conversation 上，而不是只放 Gateway
+        #
+        # 阅读工具（`read_book` / `list_books`）是在 `Conversation._tool_list`
+        # 里挂进工具清单的 —— 而**工具清单属于 Conversation**（`self._tools`
+        # 是它的属性，见 `attach()` 里那段"订阅要挂在拥有那份状态的类上"）。
+        #
+        # 所以 Conversation 必须能拿到同一个 `Reader` 实例。只放 Gateway 的话，
+        # `_tool_list` 里 `self.reader` 直接 AttributeError，被外层
+        # `except` 吞掉 -> `self._tools = []` -> **所有工具全没了**
+        # （连 `web_search` 都没了，而日志只说一句"构建工具失败"）。
+        #
+        # 这正是 `attach()` 注释里警告过的同一个坑：状态在谁身上，方法就得在谁身上。
+        self.reader = reading_mod.Reader(config)
+        self.conversation.reader = self.reader
+        # 工具读完后的回调也一起注入 —— `_tool_list` 在 Conversation 上，
+        # 它拿不到 Gateway 的方法，只能靠这里把函数对象递过去。
+        self.conversation._reading_on_read = self._reading_note_from_tool
+
         # 状态机的真源在 `Conversation`（它和情绪、注意力住在一起），
         # 但循环挂在 Gateway（它才持有 task 生命周期）。
         # 用一个 property 转发，避免两处各存一份 —— 那种"镜像"必然漂移。
@@ -2725,6 +2773,39 @@ class Gateway:
         #   3 分钟内超过 3 轮 -> 拉回用户、暂停念经 3 分钟
         #   之后 3 分钟不搭话 -> 注意力回自己、继续念
         self._user_turns: list[float] = []
+
+        # ---------------------------------------------------------------
+        # 网上阅读（2026-10-31）
+        #
+        # 用户需求：「用户长时间不和宠物聊天，宠物会自行上网搜索看小说阅读，
+        # 包括看小说，看出版书，看小黑盒帖子上的杂谈趣事等等」。
+        #
+        # 两个"挂一次、取走就清"的槽：
+        #   `_last_reading`     刚读完的内容（等下一次自主发言用掉）
+        #   `_last_reading_at`  读完的时刻（超时就不提了，见 _take_reading_hint）
+        #
+        # ⚠️ 用**实例属性**而不是 bus 事件：阅读结果是"这次要说的话"的一部分，
+        # 不是广播给全系统的状态。走 bus 的话前端也会收到，没必要。
+        # ---------------------------------------------------------------
+        self._last_reading: Any = None
+        self._last_reading_at: float = 0.0
+        self._reading_title: str = ""
+        # 模型调 `read_book` 之后，工具把"读了什么"记在这里，
+        # 由 `_reading_via_model` 取走（取走即清）
+        self._reading_from_tool: Any = None
+        # 阅读循环的 task 引用（和 `_autosnap_task` 同一套约定）
+        self._reading_task: Any = None
+        # ⚠️ `self.reader` **不在这里建** —— 它在 `__init__` 靠前的位置
+        #    （建 Conversation 时）就已经建好并挂到 conversation 上了。
+        #    这里再 `Reader(...)` 一次会得到**第二个实例**：工具的进度
+        #    （`_read_titles` / `_last_read`）和循环用的那一份就分家了。
+        if not self.reader.has_book_sources():
+            logging.getLogger("pet.reading").info(
+                "网上阅读：没有可用书源（%s 不存在或全被 enabled: false 关掉），"
+                "只能看社区帖子",
+                "config/book-sources.yaml",
+            )
+
         self._monologue_hold_until: float = 0.0
         # 「自言自语」下用户聊得多就把注意力拉回来（2026-10-18 用户要求）
         self.bus.subscribe("user.text", self._on_user_text_for_monologue)
@@ -3063,6 +3144,21 @@ class Gateway:
             if hint:
                 payload["context_hint"] = hint
 
+        # 🔴 「刚读了什么」也要带进去（2026-10-31）
+        #
+        # 用户需求：「长时间不聊天，宠物会自己上网看小说/帖子」。
+        # 光"去读了"没有意义 —— 用户要的是**它读完之后说点什么**。
+        #
+        # 挂在同一个 `context_hint` 通道上，是因为 `_compose_context_hint`
+        # 只认这个键（见那里注释）。阅读内容与屏幕观察**可以共存**：
+        # 一个说"眼前在干嘛"，一个说"我刚看了什么书"。
+        reading = self._take_reading_hint()
+        if reading:
+            extra = str(payload.get("context_hint") or "").strip()
+            payload["context_hint"] = f"{reading} {extra}".strip()
+            payload["source"] = "reading"
+            log.info("自主发言：带上刚读的内容（%s）", payload.get("reading_title") or "?")
+
         # 「截图说话」优先于「搭话」（2026-10-18 用户要求）：
         #   ① 两者相隔不到 1 分钟时，先让截图说话；
         #   ② 截图说完后 1 分钟内不许再自主搭话。
@@ -3254,6 +3350,40 @@ class Gateway:
         if len(self._recent_quotes) > 8:
             del self._recent_quotes[:-8]
         return quote
+
+    def _take_reading_hint(self) -> str:
+        """取出"刚读完的内容"并转成提示词。取一次就清空。
+
+        ## 为什么是"取走"而不是"读"
+
+        阅读内容是**一次性的上下文**：这段对话说完了，下一轮再说就重复了。
+        留着的后果是宠物反复提同一本书（用户会觉得它卡住了）。
+        所以这里读一次就置空，与 `_pending_image` 那套"挂一次、取走就清"
+        是同一个思路。
+
+        ## 为什么要带"别背原文"的约束
+
+        正文有 1500 字，直接丢给模型它容易**原文复述**（用户已经看过屏幕，
+        不需要听它读一遍书）。这条提示要求它**说自己被打动的那一点**，
+        就像人看完书跟朋友随口提一句。
+        """
+        chunk = self._last_reading
+        if chunk is None:
+            return ""
+        self._last_reading = None
+        # 30 分钟前的阅读不该再提（可能用户早就聊过别的了）
+        age = time.monotonic() - self._last_reading_at
+        if age > 1800:
+            return ""
+        self._reading_title = chunk.title
+        kind = "书" if chunk.kind == "book" else "帖子"
+        return (
+            f"你刚才自己看了一段{kind}（用户不知道，是你闲着时看的）："
+            f"《{chunk.title}》。内容大意是：{chunk.text[:280]}\n"
+            "如果想聊就挑**一个**你最有感觉的点说，像随口提起，"
+            "**不要复述原文，不要报书名和字数**，也别说'我刚刚读了'这种话。"
+            "一到两句。"
+        )
 
     @staticmethod
     def _observation_hint(observation: Any) -> str:
@@ -4232,6 +4362,20 @@ class Gateway:
                 self._run_autosnap_forever(), name="autosnap"
             )
 
+        # 网上阅读循环（2026-10-31）：又一个独立任务。
+        #
+        # ⚠️ 为什么也要独立：抓一本书是串行十几个 HTTP 请求（可能十几秒），
+        #    挂在说话/截图循环里会让那些该准时的动作**被网络拖住**。
+        #
+        # 没有书源、也没开社区帖子时**不启动** —— 空转的循环只会白烧 CPU。
+        if self.reader.has_book_sources() or self.reader.config.community_enabled:
+            if self._reading_task is None or self._reading_task.done():
+                self._reading_task = asyncio.get_running_loop().create_task(
+                    self._run_reading_forever(), name="reading"
+                )
+        else:
+            log.info("网上阅读：没有书源、社区帖子也关着，不启动阅读循环")
+
         # 状态机循环（2026-10-23）。
         #
         # ⚠️ **必须独立一个任务**，不能挂在别的循环里：
@@ -4395,6 +4539,273 @@ class Gateway:
                     pet_state=self.state.as_dict(),
                 ),
             )
+
+    # ---------------------------------------------------------------- 网上阅读
+
+    async def _run_reading_forever(self) -> None:
+        """空闲就去读点东西（2026-10-31 用户需求）。
+
+        ## 触发条件
+
+        **用户长时间不理它**——不是定时。用户的原话是「长时间不和宠物聊天」，
+        所以判据是 `scheduler.decision.signals["idle"]` 那类空闲信号。
+
+        实际用 `scheduler.evaluate()` 里已有的空闲计算：它把
+        「距上次互动多久」映射成 0~1 的 idle 信号，档位决定多快拉满
+        （安静档 30 分钟 = 用户说的"和之前设置的一样"）。
+
+        ## 为什么单独一个循环，而不是塞进 `_on_autonomy_speak`
+
+        抓一本书要串行发十几个 HTTP 请求（搜索 -> 目录 -> 章节），
+        可能耗时十几秒。塞进"说话"那条路径会让宠物**卡着不说话**。
+
+        所以：循环里**先抓**（`asyncio.to_thread`，不阻塞），
+        抓到了把结果挂进 `_last_reading`，然后**再**触发一次自主发言 ——
+        那时 `_take_reading_hint` 会把它取走当成话题。
+
+        ## 失败必须静默
+
+        书源失效是常态（免费站寿命短）。抓不到就跳过，**绝不打扰用户** ——
+        用户不会想看到"宠物：我没找到书"。
+        """
+        rd_cfg = self.reader.config
+        log.info(
+            "网上阅读循环启动：空闲 %.0f 秒后触发，书源 %d 个，社区帖子 %s",
+            rd_cfg.idle_after_s,
+            len(self.reader.sources),
+            "开" if rd_cfg.community_enabled else "关",
+        )
+        # 启动先等一会：刚开机就抓书没必要，而且会和 sidecar 初始化抢带宽
+        await asyncio.sleep(60)
+
+        while True:
+            try:
+                # 🔴 用**自己的**空闲阈值，不要借用自主发言的 idle_signal
+                #
+                # ## 这里踩过一个坑（2026-10-31 调试抓到）
+                #
+                # 第一版写的是：
+                #
+                #     if idle_seconds < rd_cfg.idle_after_s or idle_signal < 0.5:
+                #
+                # 但 `idle_signal` 的爬升速度由**活泼度档位**决定
+                # （见 autonomy.py：`idle_after` 取 `tier.idle_after_s`，
+                # 安静档是 30 分钟）。所以：
+                #
+                #   · 把阅读阈值调成 120 秒 -> `idle_seconds` 够了
+                #   · 但 `idle_signal` 在 30 分钟前一直是 0.00
+                #   · 两个条件 AND 起来 -> **永远不会触发**
+                #
+                # 而且日志里只显示「空闲 120 秒后触发」，看不出是被
+                # idle_signal 卡住的 —— 典型的"配置看起来生效了，实际没有"。
+                #
+                # 正确做法：阅读是**独立行为**，它的触发条件就是
+                # "用户多久没说话"，不该被"想不想主动搭话"的意愿分绑架。
+                last = self.scheduler.last_interaction_at
+                idle_seconds = max(0.0, time.monotonic() - last) if last else 0.0
+                if idle_seconds < rd_cfg.idle_after_s:
+                    await asyncio.sleep(min(60.0, rd_cfg.idle_after_s / 2))
+                    continue
+
+                # 免打扰 / 静音时不读（用户睡了就不该有动静）
+                if self.scheduler.suppression_reason(include_disabled=False):
+                    await asyncio.sleep(300)
+                    continue
+
+                # 🔴 让**模型自己决定**读什么、读多少（2026-10-31 用户要求）
+                #
+                # 用户原话：「我的意思是自己选一本书读，有时候会换着读，
+                # 有时候会读很多章，比如一次几十章几万字。」
+                #
+                # 所以这里**不再直接调 `read_book()`** —— 那样是程序替它决定。
+                # 改成：给它一段"你闲着，想看书吗"的提示，让它自己调
+                # `read_book` / `list_books` 工具。
+                #
+                # 模型不调工具 = 这次不想读，那就什么都不做（不强迫）。
+                chunk = await self._reading_via_model()
+                if chunk is None:
+                    # 模型没读（或者读完没留摘要）。这不是错误 ——
+                    # 用户要的是"它自己决定"，不想读也是决定。
+                    log.info("网上阅读：这一轮模型没去读（由它自己决定）")
+                    await asyncio.sleep(max(600.0, rd_cfg.idle_after_s))
+                    continue
+
+                self._last_reading = chunk
+                self._last_reading_at = time.monotonic()
+                log.info(
+                    "网上阅读：读完《%s》（%s，%d 字）—— 准备找机会聊聊",
+                    chunk.title,
+                    chunk.source,
+                    chunk.chars,
+                )
+                await self.scheduler.maybe_speak()
+
+                # 读完歇久一点：不要刚说完又去读下一本
+                await asyncio.sleep(max(600.0, rd_cfg.idle_after_s))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 —— 这个循环绝不能死
+                log.exception("网上阅读循环出错（已忽略，继续下一轮）")
+                await asyncio.sleep(300)
+
+    async def _reading_via_model(self) -> Any:
+        """让模型自己决定要不要读、读什么。返回它读到的东西（可能 None）。
+
+        ## 为什么不是"程序抓一章然后告诉模型"
+
+        那是**程序主导**。用户要的是**宠物主导**：
+
+        > 「自己选一本书读，有时候会换着读，有时候会读很多章」
+
+        程序没法知道"今天想读三章还是三十章"，只有模型能判断。
+
+        ## 做法
+
+        发一轮**只给阅读工具**的对话，提示它「你闲着，想看书吗」。
+        模型要么调 `read_book`，要么什么都不调（= 这次不读）。
+
+        ## 🔴 为什么不复用 `_generate`（2026-10-31 踩坑）
+
+        第一版写的是 `await self.ask(prompt)` —— 直接抛：
+
+            AttributeError: 'Gateway' object has no attribute 'ask'
+
+        因为 `ask` 是 **`Conversation`** 的方法（见上面 762 行），不是
+        `Gateway` 的。而异常被 `except` 吞掉、退化成"模型没去读"，
+        日志上看起来像是**模型自己决定不读** —— 实际是代码根本没跑通。
+        这类"错误伪装成正常决策"的坑最难查：行为看着合理，只是永远不发生。
+
+        ## 为什么不复用 `_generate` 的 agent loop
+
+        `_generate` 是**面向用户说话**的：它会发 `pet.say.*`、写 history、
+        跑收尾的 `conversation.finished`。而这次是**内部动作** ——
+        用户不在场，不该看到气泡，也不该让"我闲着看书"进对话历史。
+
+        所以这里自己跑一个小 loop：只挂阅读工具，最多两轮
+        （一轮决定读什么，一轮看完给个反应 —— 反应我们不收，只为让它
+        在调用链里闭合），然后把工具回调记下的 `BookChunk` 取出来。
+
+        返回值的来源：模型调工具后，`reading_tools` 会回调
+        `_reading_note_from_tool`，把内容记进 `self._reading_from_tool`。
+        """
+        prompt = (
+            "你现在闲着，用户很久没跟你说话了。\n"
+            "你可以自己去看点书——想读什么、读多少都由你决定。\n"
+            "如果想读，就调 read_book（title 给书名，chapters 给这次读几章，"
+            f"1~{reading_tools.MAX_CHAPTERS_PER_CALL} 章都行）。\n"
+            "不想读也可以什么都不做，没人逼你。\n"
+            "想先看看自己读过什么，可以调 list_books。"
+        )
+        # 每轮开始前清掉上一次的残留：否则上一轮读了、这一轮没读，
+        # 会把这轮报成"读过了"（进度错位）。
+        self._reading_from_tool = None
+
+        try:
+            from . import tools as tools_module
+
+            reading_only = reading_tools.build_reading_tools(
+                self.reader, on_read=self._reading_note_from_tool
+            )
+            brain_cfg = self.config.providers.get("brain", {})
+            req = LLMRequest(
+                system=(
+                    "你是一只桌面宠物，此刻用户不在，你自己找事做。\n"
+                    "你有一组阅读工具，可以自己决定要不要看书。\n"
+                    "⚠️ 这是**内部动作**：不要跟任何人说话，不要输出寒暄、"
+                    "不要描述你在做什么。要读就直接调工具；不想读就一个字都别说。"
+                ),
+                history=[],
+                user_text=prompt,
+                temperature=0.8,
+                # 只够它说"我看看"或直接发工具调用。这里不需要长文 ——
+                # 真正的内容是工具返回的，不是它写的。
+                max_tokens=300,
+                timeout_s=float(brain_cfg.get("timeout_s") or 30.0),
+                # ⚠️ `_thinking_flag` 是 **Conversation** 的方法，不是 Gateway 的。
+                #    这里连着踩了两次同一个坑（先是 `self.ask`），
+                #    都是"看着像本类的方法、其实是另一个类的"。
+                #    写这类内部调用前先确认归属，别凭印象。
+                thinking=self.conversation._thinking_flag(brain_cfg),
+                tools=tools_module.schemas(reading_only),
+            )
+
+            for _round in range(2):
+                calls: list[dict[str, Any]] = []
+                reasoning = ""
+                async for item in self.brain.stream(req):
+                    kind = item.get("kind")
+                    if kind == "tool_calls":
+                        raw = item.get("calls")
+                        if isinstance(raw, list) and raw:
+                            calls = [c for c in raw if isinstance(c, dict)]
+                            reasoning = str(item.get("reasoning") or "")
+                    elif kind == "error":
+                        log.warning("网上阅读：模型返回错误 %s", item.get("message"))
+                if not calls:
+                    break
+
+                # 执行并回填（和 `_execute_tool_calls` 同样的契约：
+                # 每个 call_id 都要有一条结果，一条都不能少）。
+                from .brains.base import ToolExchange
+
+                results: list[ToolExchange] = []
+                for call in calls:
+                    content = await tools_module.run_tool(
+                        reading_only,
+                        str(call.get("name") or ""),
+                        str(call.get("arguments") or ""),
+                        None,   # ⚠️ 不传 bus：内部动作不该在状态条上显示"搜索中"
+                    )
+                    results.append(
+                        ToolExchange(
+                            call_id=str(call.get("id") or ""),
+                            name=str(call.get("name") or ""),
+                            arguments=str(call.get("arguments") or ""),
+                            content=content,
+                            reasoning=reasoning,
+                        )
+                    )
+                req.tool_results = results
+                # 工具结果已经拿到了 —— 本轮的目的达成。
+                # 第二轮只是让调用链闭合（有些模型不带结果会报 400），
+                # 但**读到的内容已经由回调记下了**，所以拿到就够。
+                if self._reading_from_tool is not None:
+                    break
+        except Exception:  # noqa: BLE001 —— 读不到不该让循环死
+            log.warning("网上阅读：让模型决定时出错（已忽略）", exc_info=True)
+            return None
+
+        chunk = self._reading_from_tool
+        self._reading_from_tool = None
+        return chunk
+
+    def _reading_note_from_tool(self, chunk: Any) -> None:
+        """阅读工具读完后的回调：记下"读了什么"。
+
+        ⚠️ 只**记下**，不立刻说话 —— 说什么、什么时候说由
+        `_reading_via_model` + `maybe_speak` 决定。
+        在工具回调里直接开口会导致"模型还在思考就插话"。
+        """
+        self._reading_from_tool = chunk
+
+    async def _reading_search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        """给 `Reader.read_post` 注入的搜索函数。
+
+        ⚠️ 复用现成的工具层（`tools._web_search`），不另写一套。
+        另写的话搜索策略/反爬处理全都要再维护一遍。
+        """
+        try:
+            raw = await tools._web_search({"query": query, "limit": limit})
+        except Exception:  # noqa: BLE001
+            return []
+        return _parse_search_text(raw)
+
+    async def _reading_fetch(self, url: str) -> str:
+        """给 `Reader.read_post` 注入的抓取函数。"""
+        try:
+            return await tools._web_fetch({"url": url})
+        except Exception:  # noqa: BLE001
+            return ""
 
     async def _run_autosnap_forever(self) -> None:
         """
@@ -5054,3 +5465,58 @@ class Gateway:
     def new_say_id(self) -> str:
         """给插件用的发言 id 分配器。"""
         return self.conversation.new_say_id()
+
+
+def _parse_search_text(raw: str) -> list[dict[str, str]]:
+    """把 `tools._web_search` 的**格式化文本**解析成结构化结果。
+
+    ## 为什么要反向解析文本
+
+    `_web_search` 返回的是给模型读的 Markdown 风格文本（实测格式）：
+
+        结果数: 2
+
+        ## 结果 1
+
+        **标题**: 某篇文章
+
+        **url**: https://example.com/a
+
+        **来源**: 360
+
+        **内容**: 摘要正文…
+
+    工具层不需要返回 JSON（模型读文本更准），但 `reading.py` 需要
+    `[{title, url, snippet}]`，所以这里做一次反向解析。
+
+    ## ⚠️ 解析失败必须返回空列表，不能抛
+
+    调用方（阅读循环）拿不到结果只是"这轮不读"，不该让整个循环挂掉。
+    免费站 / 搜索后端失效是常态，抛异常会让阅读功能整体瘫痪。
+    """
+    import re as _re
+
+    if not raw:
+        return []
+    # 搜索被关掉 / 出错时，工具层返回的是一句人话，不是结果列表
+    head = raw[:30]
+    if "没打开" in head or head.startswith("错误"):
+        return []
+
+    out: list[dict[str, str]] = []
+    # 按 "## 结果 N" 切块
+    blocks = _re.split(r"^#+ *结果 *\d+ *$", raw, flags=_re.MULTILINE)
+    for b in blocks:
+        url = _re.search(r"\*\*url\*\*[:：] *(\S+)", b, _re.IGNORECASE)
+        if not url:
+            continue
+        title = _re.search(r"\*\*标题\*\*[:：] *(.+)", b)
+        snippet = _re.search(r"\*\*内容\*\*[:：] *(.+)", b)
+        out.append(
+            {
+                "title": (title.group(1).strip() if title else ""),
+                "url": url.group(1).strip(),
+                "snippet": (snippet.group(1).strip() if snippet else ""),
+            }
+        )
+    return out

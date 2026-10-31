@@ -61,6 +61,15 @@ ALLOW: dict[str, dict[str, str]] = {
     },
     "Conversation": {
         "config": "构造参数，__init__ 里赋值",
+        # 阅读器由 `Gateway.__init__` 注入：`self.conversation.reader = self.reader`。
+        #
+        # 为什么必须注入、而不是在 Conversation 里自己 new 一个：
+        # `read_book` / `list_books` 是在 **Conversation._tool_list** 里挂进
+        # 工具清单的（缓存 `self._tools` 属于 Conversation），所以它得拿得到 Reader。
+        # 但 Reader 必须和 Gateway 的自主阅读循环**共用同一份进度**——
+        # 两边各 new 一个的话，工具读到的章号和循环记的进度会分家，
+        # 表现是「它反复读同一章」。
+        "reader": "Gateway.__init__ 注入（与自主阅读循环共用同一个 Reader）",
     },
 }
 
