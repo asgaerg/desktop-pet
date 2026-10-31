@@ -395,17 +395,54 @@ class BookSource:
 
         ## 取法（按可靠性排序）
 
-        1. 卡片内的标题节点（`.title` / `h1`~`h4` / `h2>a`）
+        1. 卡片内的标题节点（`.title` / `h1`~`h4` / `.c_subject` 等）
         2. `<a>` 自己的 title 属性
         3. 退回到 `<a>` 的文本，但**截断到第一个换行或 30 字**
+
+        ## 🔴 书名可能在**兄弟节点**里，不在 `<a>` 内部（2026-10-31 补）
+
+        实测（阅读库 yeudusk）：搜索结果的一张卡片长这样：
+
+            <div class="c_row">
+              <div class="fl"><a href="/book/510881/"><img .../></a></div>
+              <div>
+                <div><span class="c_subject"><a href="/book/510881/">夜玄</a></span> /
+                     <a href="/html/510/510881/">目录</a></div>
+                ...
+
+        于是：
+          · 第一个 `<a>` 只包着**封面图**，`get_text()` 是**空串**
+          · 书名在 `<span class="c_subject">` 里，是它的**兄弟**
+          · 而 `/book/{id}/` 和 `/html/{a}/{id}/` 两个链接**都指向这本书**
+
+        如果只在 `<a>` 自己内部找标题，拿到的是空串 -> 这本书被跳过
+        -> 表现为「搜到了 100 条，但一本都没解析出来」。
+
+        所以：先在 `<a>` 内部找，找不到就**往上走几层卡片**再找。
+        往上走有风险（可能抓到整个列表的标题），所以只走 3 层，
+        并且要求找到的文本**够短**（书名不会超过 60 字）。
         """
-        # ① 卡片里的标题节点
-        for sel in (".title", "h1", "h2", "h3", "h4", ".bookname", ".name"):
+        # ① 卡片里的标题节点 —— 先在自己内部找
+        for sel in (".title", "h1", "h2", "h3", "h4", ".bookname", ".name", ".c_subject"):
             node = a.select_one(sel)
             if node is not None:
                 txt = node.get_text(strip=True)
                 if txt:
                     return txt[:60]
+        # ①-b 再往上走 3 层找（书名常在与 <a> 同级的 span 里）
+        node = a
+        for _ in range(3):
+            node = node.parent
+            if node is None:
+                break
+            for sel in (".c_subject", ".title", ".bookname"):
+                found = node.select_one(sel)
+                if found is not None:
+                    txt = found.get_text(strip=True)
+                    # ⚠️ 必须够短：往上走可能抓到整个列表的标题，
+                    #    那种是"书名 作者 类别 …"拼起来的一大串
+                    if txt and len(txt) <= 60:
+                        return txt
         # ② title 属性
         attr = a.get("title")
         if attr and str(attr).strip():
@@ -752,7 +789,38 @@ class Reader:
                 if not books:
                     log.info("网上阅读：%s 搜不到「%s」", src_name, query)
                     continue
-                title, url = next((b for b in books if query in b[0]), books[0])
+                """
+                🔴 必须**真的匹配上书名**，不能退回 `books[0]`（2026-10-31 修，真 bug）
+
+                原实现：
+
+                    title, url = next((b for b in books if query in b[0]), books[0])
+                                                                        ^^^^^^^^^
+
+                那个兜底看起来无害（"实在没有就随便拿一本"），实测后果是：
+
+                    用户让它读《夜玄》
+                    -> 新笔趣阁搜「夜玄」返回一堆**带"玄"字的无关书**
+                    -> 一本都不含「夜玄」
+                    -> 兜底取了 books[0]
+                    -> 落盘的是《让你御兽，你融合斩魄刀？》
+
+                而日志会显示「网上阅读：✅《让你御兽…》读了 3 章」——
+                看起来一切正常，**只是读错了书**。
+
+                用户说的是「我让他搜搜看，他就能去搜索」，读到一本完全不相干的
+                小说比读不到糟糕得多：它会拿那本书的情节跟用户聊。
+
+                所以：**匹配不上就换下一个源**，宁可读不到。
+                """
+                matched = next((b for b in books if query in b[0]), None)
+                if matched is None:
+                    log.info(
+                        "网上阅读：%s 搜到 %d 本，但没有一本书名含「%s」—— 换源",
+                        src_name, len(books), query,
+                    )
+                    continue
+                title, url = matched
                 chaps = src.chapter_urls(url)
                 if not chaps:
                     log.info("网上阅读：%s 的《%s》没有章节", src_name, title)
@@ -904,7 +972,16 @@ class Reader:
                 if not books:
                     log.info("网上阅读：%s 搜不到「%s」", src_name, query)
                     continue
-                title, url = next((b for b in books if query in b[0]), books[0])
+                # ⚠️ 同样**不能**退回 `books[0]`（见 `read_book` 里那段说明）：
+                #    匹配不上就换源，宁可读不到，也别读错书。
+                matched = next((b for b in books if query in b[0]), None)
+                if matched is None:
+                    log.info(
+                        "网上阅读：%s 搜到 %d 本，但没有一本书名含「%s」—— 换源",
+                        src_name, len(books), query,
+                    )
+                    continue
+                title, url = matched
                 chaps = src.chapter_urls(url)
                 if not chaps:
                     log.info("网上阅读：%s 的《%s》没有章节", src_name, title)
