@@ -984,6 +984,78 @@ class Reader:
                 continue
         return None
 
+    def search_books(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """搜书，返回 `[{title, url, source, chapters}]`。给 `search_book` 工具用。
+
+        ## 为什么单独开一个公开方法，而不是让工具直接调 `BookSource.search`
+
+        工具层不该知道 `SourceSpec` / `BookSource` 这些内部结构 ——
+        它只需要"给我一批书，告诉我每本有多少章"。这样以后换书源实现、
+        加缓存、加去重，都不用动工具代码。
+
+        ## ⚠️ 章数要**真的去问一次目录**
+
+        用户说「搜搜看这本书」时，最想知道的是"能不能看、有多少章"。
+        只回书名的话，模型还得再调一次 `read_book` 才知道这本书行不行 ——
+        而 `read_book` 会**直接下载**，等于用户只是问问就先落了盘。
+
+        所以这里对**前几本**顺手查一下目录（`limit` 控制，默认最多 8 本，
+        但查目录只查前 3 本 —— 每本都是一个额外 HTTP 请求，
+        全查一遍在慢站上会拖到十几秒）。
+
+        ## 失败要能区分"搜不到"和"书源挂了"
+
+        返回空列表 = 这本书在所有书源都搜不到。
+        但如果是**所有书源都连不上**，也返回空 —— 这时模型会说"没找到"，
+        而真实原因是网络/站点挂了。调用方看日志能分辨（每个源都有记录），
+        但工具返回的文本里应该带一句提示（见 `reading_tools._search_book`）。
+        """
+        if not self.sources:
+            return []
+
+        seen: set[str] = set()
+        out: list[dict[str, Any]] = []
+        tried = 0
+        for spec in self.sources:
+            if tried >= self.config.max_source_retries:
+                break
+            tried += 1
+            try:
+                src = BookSource(spec)
+                books = src.search(query)
+            except Exception as exc:  # noqa: BLE001
+                log.info(
+                    "搜书：%s 出错（%s: %s）",
+                    spec.name, type(exc).__name__, str(exc)[:60],
+                )
+                continue
+            if not books:
+                log.info("搜书：%s 搜不到「%s」", spec.name, query)
+                continue
+            for title, url in books:
+                key = title.strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                item: dict[str, Any] = {
+                    "title": key,
+                    "url": url,
+                    "source": spec.name,
+                    "chapters": 0,
+                }
+                # 只给前 3 本查目录（每本一次请求，全查会很慢）
+                if len(out) < 3:
+                    try:
+                        item["chapters"] = len(src.chapter_urls(url))
+                    except Exception:  # noqa: BLE001
+                        item["chapters"] = 0
+                out.append(item)
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
+        return out
+
     def list_downloaded(self) -> list[dict[str, Any]]:
         """列出本地已下载的书和进度。给 `list_books` 工具用。"""
         out: list[dict[str, Any]] = []

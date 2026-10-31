@@ -64,6 +64,44 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
     """
     from .tools import Tool
 
+    async def _search_book(args: dict[str, Any]) -> str:
+        query = str(args.get("title") or "").strip()
+        if not query:
+            return "错误：要给一个书名（title 参数）。"
+        try:
+            limit = int(args.get("limit") or 8)
+        except (TypeError, ValueError):
+            limit = 8
+        limit = max(1, min(20, limit))
+
+        import asyncio
+
+        try:
+            found = await asyncio.to_thread(reader.search_books, query, limit)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("search_book 失败：%s: %s", type(exc).__name__, exc)
+            return f"搜「{query}」时出错了（{type(exc).__name__}）。稍后再试。"
+
+        if not found:
+            return (
+                f"在现有书源里没搜到「{query}」。\n"
+                "可能是：书名不完全对（试试更短的关键词）、这本书这些站没有、"
+                "或者书源临时连不上。\n"
+                "⚠️ 别直接说「这本书不存在」—— 你只知道**这几个免费书源里没有**。"
+            )
+
+        lines = [f"搜到 {len(found)} 本（来自免费书源）："]
+        for i, b in enumerate(found, 1):
+            ch = b.get("chapters") or 0
+            ch_txt = f"{ch} 章" if ch else "章数未知"
+            lines.append(f"  {i}. 《{b['title']}》 —— {ch_txt}（{b['source']}）")
+        lines.append("")
+        lines.append(
+            "想读哪本就调 read_book（title 用书名，chapters 给这次读几章）。"
+            "只是想聊聊的话，看这个列表就够了。"
+        )
+        return "\n".join(lines)
+
     async def _read_book(args: dict[str, Any]) -> str:
         query = str(args.get("title") or "").strip()
         if not query:
@@ -137,21 +175,76 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
 
     return [
         Tool(
+            name="search_book",
+            description=(
+                "在**小说书源**里搜一本书（只搜，不下载）。\n"
+                "\n"
+                "## 什么时候用（重点）\n"
+                "\n"
+                "用户提到某本**小说/网文**、想知道有没有、好不好看、能不能看时，"
+                "用这个 —— **不要用 `web_search`**。\n"
+                "\n"
+                "`web_search` 搜的是网页摘要（百科、书评、盗版站列表），"
+                "它**不会把书读进来**。用户说「你去搜搜这本书」通常不是要看书评，"
+                "而是要你**真的去看内容**。\n"
+                "\n"
+                "## 什么时候不用\n"
+                "\n"
+                "· 用户问的是**这本书的评价/作者/出版信息** -> 用 `web_search`\n"
+                "· 用户问的是**非小说**（技术文档、新闻、论文）-> 用 `web_search`\n"
+                "\n"
+                "## 返回什么\n"
+                "\n"
+                "书名列表 + 每本多少章 + 来自哪个源。只搜不下载，很轻。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "书名或关键词，不用很精确（会搜索匹配）",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回几本，默认 8",
+                    },
+                },
+                "required": ["title"],
+            },
+            handler=_search_book,
+        ),
+        Tool(
             name="read_book",
             description=(
-                "去网上读一本书，下载到本地。**你自己决定读什么、读多少**。\n"
+                "去网上读一本**小说**，把正文下载到本地。\n"
                 "\n"
-                "什么时候用：用户很久没说话、你闲着、想找点事做的时候。\n"
-                "也可以主动去读某本书（用户提到过、你感兴趣、或者想换个话题）。\n"
+                "## 什么时候用（重点）\n"
                 "\n"
-                "怎么用：\n"
-                "· `title` 给书名。不用很精确，程序会搜索匹配。\n"
-                "· `chapters` 是**这次读几章**。可以是 1，也可以是几十。\n"
-                "  想慢慢看就传 1~3；想一口气看很多就传 20~50。\n"
-                "  程序会**接着上次的进度往下读**，不会重复读同一章。\n"
+                "**用户让你看书 / 提到某本小说 / 让你去搜某本书的内容时，用这个。**\n"
+                "对话里用户说「你去搜搜 XX」「XX 这本书好看」「你读过 XX 吗」——\n"
+                "他通常是要你**真的去看**，而不是搜一段网页摘要回来。\n"
                 "\n"
-                "读到的内容会存成 txt，你可以引用其中片段跟用户聊，\n"
-                "但**不要整段复述**——像看完书随口提一句那样。"
+                "⚠️ **不要用 `web_search` 代替它**。`web_search` 搜到的是书评、"
+                "百科、盗版站列表 —— 你依然没看过这本书，聊起来只能空泛地附和。\n"
+                "而 `read_book` 会真的把章节正文下载下来，你能聊具体情节。\n"
+                "\n"
+                "用户很久没说话、你自己闲着的时候也可以读 —— 那是你自己的事。\n"
+                "\n"
+                "## 怎么用\n"
+                "\n"
+                "· `title` 给书名，不用很精确（程序会搜索匹配）。\n"
+                "· `chapters` 是**这次读几章**。\n"
+                "  用户在跟你聊 -> 读 1~3 章就够聊了，别让他干等。\n"
+                "  你自己闲着 -> 想读多少读多少，几十章也行。\n"
+                "· 程序会**接着上次的进度往下读**，不会重复读同一章。\n"
+                "\n"
+                "## ⚠️ 它很慢\n"
+                "\n"
+                "每章一个 HTTP 请求。读 5 章大概 10 秒，读 50 章要几分钟。\n"
+                "对话中读之前**先跟用户说一句**（「我去看看」），别让他以为你卡住了。\n"
+                "\n"
+                "读到的内容会存成 txt。聊的时候**挑一个具体的点**说，"
+                "不要整段复述原文。"
             ),
             parameters={
                 "type": "object",
@@ -164,7 +257,7 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
                         "type": "integer",
                         "description": (
                             f"这次读几章，默认 1，最多 {MAX_CHAPTERS_PER_CALL}。"
-                            "想慢慢看就少传，想一口气看很多就多传。"
+                            "对话里读 1~3 章就够；自己闲着可以读几十章。"
                         ),
                     },
                 },

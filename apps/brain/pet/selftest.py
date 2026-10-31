@@ -9020,6 +9020,9 @@ def test_reading(suite: "Suite") -> None:
         )
         gw._last_reading_at = _t.monotonic()
         gw._reading_title = ""
+        # ⚠️ 2026-10-31 加：`_take_reading_hint` 现在要读这个标记
+        #    （区分"用户要求读的"和"自己闲着读的"）。不设的话直接 AttributeError。
+        gw._reading_from_dialog = False
 
         first = gw._take_reading_hint()
         _assert(first, "第一次应当拿到提示词")
@@ -9036,6 +9039,99 @@ def test_reading(suite: "Suite") -> None:
         _assert(gw._take_reading_hint() == "", "一小时前的阅读不该再拿出来说")
 
         return "取一次后清空；过期内容不再提及"
+
+    @suite.check("网上阅读：对话里读的书，话术与「自己闲着读」不同")
+    def _() -> str:
+        """两种来源必须给不同的提示词（2026-10-31）。
+
+        ## 为什么这条要有
+
+        用户说「你搜搜希伯尼战记」-> 模型调 `read_book` -> 读到正文。
+        如果这时还用「用户不知道，是你闲着时看的」那套话术，模型会
+        把**用户自己要求的事**说成"我自己偷偷看的"，而且只会"随口提一句"。
+
+        但用户正等着回答 —— 他要的是**具体内容**（人物、情节），
+        不是「我读到了，这本书不错」这种空话。
+
+        ## 断言什么
+
+        · 对话中：说「按用户的要求」，要求讲具体内容
+        · 自己闲着：说「用户不知道」，要求随口提一句
+        """
+        import time as _t
+
+        from .gateway import Gateway
+        from .reading import BookChunk
+
+        def _mk(from_dialog: bool) -> str:
+            gw = Gateway.__new__(Gateway)
+            gw._last_reading = BookChunk(
+                title="希伯尼战记",
+                source="read_book",
+                text="主角在雪地里捡到一把断剑，剑柄上刻着看不懂的符文。" * 5,
+                kind="book",
+                chars=600,
+            )
+            gw._last_reading_at = _t.monotonic()
+            gw._reading_title = ""
+            gw._reading_from_dialog = from_dialog
+            return gw._take_reading_hint()
+
+        in_dialog = _mk(True)
+        _assert(in_dialog, "对话中读完书，必须给出提示词")
+        _assert("按用户的要求" in in_dialog, f"对话中应说明是用户要求的：{in_dialog[:80]!r}")
+        _assert("不要只说" in in_dialog, "对话中必须要求它讲具体内容，而不是空泛附和")
+        _assert(
+            "用户不知道" not in in_dialog,
+            "对话中不能说「用户不知道」—— 是用户让它读的",
+        )
+
+        idle_read = _mk(False)
+        _assert(idle_read, "自己闲着读完，也要给出提示词")
+        _assert("用户不知道" in idle_read, f"自己闲着读的应说明用户不知情：{idle_read[:80]!r}")
+        _assert("不要复述原文" in idle_read, "自己闲着读的仍要约束别背原文")
+        _assert(
+            "按用户的要求" not in idle_read,
+            "自己闲着读的不能说成用户要求的",
+        )
+
+        return "对话中讲具体内容；自己闲着随口提一句"
+
+    @suite.check("网上阅读：只看不取（consume=False）不会吃掉内容")
+    def _() -> str:
+        """`consume=False` 必须**原样保留**，否则自主发言永远拿不到。
+
+        ## 背景
+
+        `_compose_context_hint` 每轮都跑。如果它无条件"取走"，会在
+        自主发言之前把内容吃掉 —— 表现是「读完了但从不提」。
+
+        所以 `consume=False` 只看不取：内容还在，等真正要用的人来拿。
+        """
+        import time as _t
+
+        from .gateway import Gateway
+        from .reading import BookChunk
+
+        gw = Gateway.__new__(Gateway)
+        chunk = BookChunk(title="留着", source="s", text="x" * 200, chars=200)
+        gw._last_reading = chunk
+        gw._last_reading_at = _t.monotonic()
+        gw._reading_title = ""
+        gw._reading_from_dialog = True
+
+        peek = gw._take_reading_hint(consume=False)
+        _assert(peek == "", f"只看不取应返回空串，实际 {peek!r}")
+        _assert(gw._last_reading is chunk, "只看不取时内容必须原样保留")
+        _assert(gw._reading_from_dialog is True, "只看不取时标记也要保留")
+
+        # 真正取的时候才清
+        real = gw._take_reading_hint(consume=True)
+        _assert(real, "真取的时候应当拿到内容")
+        _assert(gw._last_reading is None, "真取之后必须清空")
+        _assert(gw._reading_from_dialog is False, "真取之后标记也要清")
+
+        return "consume=False 保留；consume=True 取走并清标记"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

@@ -70,6 +70,15 @@ ALLOW: dict[str, dict[str, str]] = {
         # 两边各 new 一个的话，工具读到的章号和循环记的进度会分家，
         # 表现是「它反复读同一章」。
         "reader": "Gateway.__init__ 注入（与自主阅读循环共用同一个 Reader）",
+        # 同上，由 Gateway 注入的取用函数：`self._take_reading_hint`。
+        #
+        # `_compose_context_hint`（Conversation）要把「刚读了什么」拼进提示词，
+        # 而阅读状态（`_last_reading` / `_reading_from_dialog`）住在 Gateway 上。
+        # 直接写 `self._take_reading_hint()` 会 AttributeError，且会被
+        # `_generate` 的 except 吞掉 —— 表现为整轮回复失败。
+        "_reading_hint_provider": "Gateway.__init__ 注入（取「刚读了什么」）",
+        # `_tool_list` 里挂阅读工具时的回调，同样是 Gateway 注入。
+        "_reading_on_read": "Gateway.__init__ 注入（阅读工具读完的回调）",
     },
 }
 

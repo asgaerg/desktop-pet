@@ -2028,6 +2028,26 @@ class Conversation:
         # 而且 `user_text=None` 会让模型以为该自己起话头，可能跑偏。
         # （`user_text` 本身在 req 里保持原样 —— 它就是本轮用户说的话。）
 
+        # 🔴 标记「这次阅读是**对话中**发生的」（2026-10-31 补）
+        #
+        # ## 为什么在这里标记，而不是在工具回调里
+        #
+        # `_reading_note_from_tool` 是**同步回调**，它拿不到"当前在哪条路径上"。
+        # 而 `_execute_tool_calls` **只在对话路径被调用** ——
+        # 自主阅读循环（`_reading_via_model`）用的是它自己的小循环，
+        # 不走这里。所以"进了这个方法"本身就等于"这是对话中"。
+        #
+        # ## 这个标记决定什么
+        #
+        # `_take_reading_hint` 据此换一套话术：
+        #   · 对话中 -> 「用户让你读的，挑具体内容说，别只说『我读到了』」
+        #   · 自己闲着读 -> 「用户不知道，随口提一句，别报书名」
+        #
+        # 混用的后果很怪：用户明明让它读书，它却说成"我自己偷偷看的"。
+        if any(str(c.get("name") or "") == "read_book" for c in calls):
+            self._reading_from_dialog = True
+            log.info("网上阅读：这轮是**用户要求**读的（会讲具体内容）")
+
     # ------------------------------------------------------------------ Prompt
 
     def build_system_prompt(self, idle: bool = False) -> str:
@@ -2344,6 +2364,44 @@ class Conversation:
         if observation:
             pieces.append(observation)
 
+        # 🔴 「刚才读了什么」也要进来（2026-10-31 补，对话路径）
+        #
+        # ## 为什么这条必须加在**这里**，而不是只加在自主发言那条路上
+        #
+        # 上一轮只把阅读内容挂进了 `_maybe_speak` 的 payload（自主发言路径）。
+        # 于是：
+        #   · 宠物自己闲着读书 -> 读完了会提一句      ✅
+        #   · **用户让它读书** -> 读完了聊不了          ❌
+        #
+        # 后者才是用户这次要的：「我让他搜搜看，他就能去搜索」。
+        # 用户说「你搜搜希伯尼战记」，模型调 `read_book` 拿到正文，
+        # 但那轮回复是**紧接着工具结果**生成的 —— 正文只存在于工具的
+        # 返回值里，`context_hint` 里一个字都没有。模型只能泛泛地说
+        # 「我看到了」，说不出具体情节。
+        #
+        # ## ⚠️ `_take_reading_hint` 是 **Gateway** 的方法
+        #
+        # 本方法（`_compose_context_hint`）属于 **Conversation**。
+        # 直接写 `self._take_reading_hint()` 会 AttributeError ——
+        # 而且**被 `_generate` 的 except 吞掉后，整轮回复都会失败**。
+        #
+        # 这是今天第三次踩「方法在另一个类上」（前两次是 `self.ask`
+        # 和 `self._thinking_flag`）。门禁 `check-self-refs.py` 每次都抓到了 ——
+        # 但**抓到之前我已经写完并在脑子里"验证"过了**。
+        # 结论：写跨类调用前必须先用 AST 查归属，不能凭印象。
+        #
+        # ## ⚠️ 只在**对话路径**取，自己闲着读的留给自主发言
+        #
+        # 本方法每轮都跑（回复用户、自主发言都经过它）。如果无条件取走，
+        # 会在自主发言之前把内容吃掉 —— 表现是「读完了但从不提」。
+        #
+        # `_reading_from_dialog` 为真 = 这轮是用户要求读的，那就该在这里
+        # 注入（用户正等着回答）；否则留给 `_maybe_speak` 那条路。
+        taker = getattr(self, "_reading_hint_provider", None)
+        reading_hint = taker() if callable(taker) else ""
+        if reading_hint:
+            pieces.append(reading_hint)
+
         # 截图对话的"描述有没有进提示词"要在这一层再确认一次 ——
         # 上一层的 hint 非空、但这里如果 observation 为空（键名写错/被覆盖），
         # 模型就会以为屏幕是空的（实测它真的会说"白茫茫一片"）。
@@ -2573,6 +2631,18 @@ class Gateway:
         # 工具读完后的回调也一起注入 —— `_tool_list` 在 Conversation 上，
         # 它拿不到 Gateway 的方法，只能靠这里把函数对象递过去。
         self.conversation._reading_on_read = self._reading_note_from_tool
+        # 同理：`_compose_context_hint` 也在 Conversation 上，它要取
+        # 「刚读了什么」塞进提示词。把取用函数递过去（取走即清）。
+        #
+        # ⚠️ 递的是**包装过的**，不是 `self._take_reading_hint` 本身：
+        #    本方法每轮都跑，无条件取会在自主发言之前把内容吃掉。
+        #    只在「用户要求读的」时才取，其余留给 `_maybe_speak`。
+        def _reading_hint_for_dialog() -> str:
+            if not self._reading_from_dialog:
+                return ""
+            return self._take_reading_hint(consume=True)
+
+        self.conversation._reading_hint_provider = _reading_hint_for_dialog
 
         # 状态机的真源在 `Conversation`（它和情绪、注意力住在一起），
         # 但循环挂在 Gateway（它才持有 task 生命周期）。
@@ -2793,6 +2863,8 @@ class Gateway:
         # 模型调 `read_book` 之后，工具把"读了什么"记在这里，
         # 由 `_reading_via_model` 取走（取走即清）
         self._reading_from_tool: Any = None
+        # 这次阅读是不是**用户要求的**（见 `_execute_tool_calls` 里的标记）
+        self._reading_from_dialog: bool = False
         # 阅读循环的 task 引用（和 `_autosnap_task` 同一套约定）
         self._reading_task: Any = None
         # ⚠️ `self.reader` **不在这里建** —— 它在 `__init__` 靠前的位置
@@ -3351,8 +3423,8 @@ class Gateway:
             del self._recent_quotes[:-8]
         return quote
 
-    def _take_reading_hint(self) -> str:
-        """取出"刚读完的内容"并转成提示词。取一次就清空。
+    def _take_reading_hint(self, consume: bool = True) -> str:
+        """取出"刚读完的内容"并转成提示词。默认取一次就清空。
 
         ## 为什么是"取走"而不是"读"
 
@@ -3360,6 +3432,21 @@ class Gateway:
         留着的后果是宠物反复提同一本书（用户会觉得它卡住了）。
         所以这里读一次就置空，与 `_pending_image` 那套"挂一次、取走就清"
         是同一个思路。
+
+        ## 🔴 `consume=False`：只看不取（2026-10-31 补）
+
+        这个方法现在有**两个调用点**：
+
+            ① `_compose_context_hint`（Conversation，每轮都跑）
+            ② `_maybe_speak` 的自主发言路径（只在主动开口时跑）
+
+        ①每轮都跑，如果它也"取走"，那么它会在②之前把内容吃掉 ——
+        自主发言永远拿不到，表现为"读完了但从不提"。
+
+        所以①用 `consume=False`：只在**这一轮真的要带上它**时才取走。
+        但①没法预知"带上它之后这轮会不会成功"，所以改成：
+        ①只在**对话路径**（`_reading_from_dialog` 为真）时才取，
+        自己闲着读的内容留给②。
 
         ## 为什么要带"别背原文"的约束
 
@@ -3370,13 +3457,41 @@ class Gateway:
         chunk = self._last_reading
         if chunk is None:
             return ""
-        self._last_reading = None
         # 30 分钟前的阅读不该再提（可能用户早就聊过别的了）
         age = time.monotonic() - self._last_reading_at
         if age > 1800:
+            # 过期了就清掉，别一直挂着
+            self._last_reading = None
+            self._reading_from_dialog = False
             return ""
+        # 只看不取：把判断留给调用方，它决定要不要 consume
+        if not consume:
+            return ""
+        self._last_reading = None
+        # ⚠️ 标记也要一起清：不清的话下一轮「自己闲着读」会被误判成
+        #    「用户要求的」，话术就反了（详见 `_execute_tool_calls` 里的说明）。
+        from_dialog = self._reading_from_dialog
+        self._reading_from_dialog = False
         self._reading_title = chunk.title
         kind = "书" if chunk.kind == "book" else "帖子"
+
+        # 🔴 两种来源，两套话术（2026-10-31 补）
+        #
+        # `source == "read_book"` 表示这是**对话中用户让它读的**：
+        #   · 用户知道它去读了（他刚让它读的）
+        #   · 所以不能说"用户不知道，是你闲着时看的"——那会让模型
+        #     把用户自己要求的事说成"我自己偷偷看的"，很怪
+        #   · 而且这时用户**正在等回答**，该做的是讲内容，不是"随口提一句"
+        #
+        # 其它 source 是自己闲着读的，沿用原来那套"别背原文"的约束。
+        if chunk.source == "read_book" and from_dialog:
+            return (
+                f"你刚按用户的要求读了{kind}《{chunk.title}》，"
+                f"内容大意是：{chunk.text[:400]}\n"
+                "用户正在等你回应。挑**具体的内容**说（人物、情节、你注意到的一点），"
+                "不要只说「我读到了」「这本书不错」这种空话 —— "
+                "他会觉得你根本没看。也不要整段复述原文。"
+            )
         return (
             f"你刚才自己看了一段{kind}（用户不知道，是你闲着时看的）："
             f"《{chunk.title}》。内容大意是：{chunk.text[:280]}\n"
