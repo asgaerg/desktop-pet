@@ -12,21 +12,60 @@
 
 ## 下载
 
-[Releases](https://github.com/asgaerg/desktop-pet/releases) 里两个文件：
+[Releases](https://github.com/asgaerg/desktop-pet/releases)。
+
+### 推荐：绿色包（不弹安全提示）
 
 | 文件 | 大小 | 说明 |
 |---|---|---|
-| `DesktopPet-0.2.2-online-setup.exe` | 278 MB | 安装包 |
-| `DesktopPet-0.2.2-online-portable.zip` | 355 MB | 绿色包，解压即用 |
+| **`DesktopPet-0.2.2-online-portable.zip`** | 355 MB | **绿色包，解压即用** |
+
+**为什么优先给绿色包**：zip 里没有安装器，解压出来直接双击 `DesktopPet.exe` 就能跑，
+不会触发安装程序那一轮签名检查。实测这是不买证书时**最不容易被拦**的分发方式。
+
+配置和数据仍在 `%APPDATA%\DesktopPet`（和安装版共用，换包不用重配）。
+
+### 安装包（会弹「未知发布者」）
+
+| 文件 | 大小 | 说明 |
+|---|---|---|
+| `DesktopPet-0.2.2-online-setup.exe` | 278 MB | NSIS 安装包 |
+
+`0.2.2` 起安装包**用自己的自签名证书签过**（Authenticode，SHA256）。
+但自签名证书的根不在微软信任列表里，所以：
+
+· **装过证书的机器**（你自己的、以及照下面步骤操作过的朋友）→ 双击**不弹**任何提示
+· **没装证书的机器** → 仍会弹「未知发布者」，和没签名一样
+
+> **一次安装，永久生效**：证书 5 年有效，之后所有版本都不用再装。
+> 步骤见 [`build/signing/发给朋友/说明.txt`](build/signing/发给朋友/说明.txt)：
+> 右键 `install-cert.ps1` →「使用 PowerShell 运行」→ 点「是」。
+> 只写**当前用户**的证书存储，不需要管理员权限。
 
 **不发离线版**：1.55 GB 的语音模型不跟着包走。要离线语音，
 设置 → 语音 里有下载地址（国内镜像 `hf-mirror.com`），下完放进提示的目录即可。
 
-> ⚠️ **一定会遇到安全提示**：exe 没有代码签名，SmartScreen 会报「未知发布者」→
-> 点「更多信息」→「仍要运行」；杀软可能误报 `resources\pet\pet.exe`（PyInstaller 打的 Python）→ 加白名单。
+> ⚠️ 杀软可能误报 `resources\pet\pet.exe`（PyInstaller 打的 Python）→ 加白名单。
 > **安装包要放纯英文路径**（如 `C:\Temp`）再运行，中文路径会让 NSIS 失败。
 > 校验：`Get-FileHash .\DesktopPet-0.2.2-online-setup.exe -Algorithm SHA256`，
 > 对照 [SHA256SUMS.txt](docs/SHA256SUMS.txt)。
+
+## 关于代码签名
+
+**现状**：自签名（`CN=Tianyi DesktopPet (Self-Signed)`），不是商业证书。
+
+| 场景 | 结果 |
+|---|---|
+| 你这台机器装过证书 | ✅ 无任何提示 |
+| 朋友装过一次证书 | ✅ 无任何提示 |
+| 陌生人第一次下载 | ❌ 仍弹「未知发布者」 |
+
+想让**陌生人也不弹**，只有买 **EV 代码签名证书**（约 2500~4000 元/年，
+需要企业资质 + 硬件 U 盾）能立即解决；OV 证书（约 1500~3000 元/年）
+买完还要积累下载量，新证书照样报警几个月。
+
+自己用 / 少数朋友用，自签名 + 绿色包就够了，没必要花这个钱。
+
 
 ## API 与隐私
 

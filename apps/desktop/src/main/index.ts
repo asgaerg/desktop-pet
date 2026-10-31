@@ -3162,7 +3162,11 @@ function registerRendererIpc(): void {
       const pttEnabled = Boolean(
         readDeepScalar(CONFIG_ROOT, ['providers', 'push_to_talk', 'enabled'], true),
       );
-      petWindow?.sendToRenderer('pet:ptt-config', { enabled: pttEnabled });
+      petWindow?.sendToRenderer('pet:ptt-config', {
+        enabled: pttEnabled,
+        // 语音触发方式（2026-10-30）：唤醒词模式下渲染层要一直开闸
+        triggerMode: voiceTriggerMode,
+      });
       startupNote(
         `[按住说话] 渲染层已就绪，把开关状态推过去：${
           pttEnabled ? '开（只有按住时才听）' : '关（免提常听）'
@@ -4444,7 +4448,11 @@ function restartPushToTalk(): void {
    * ⚠️ 无条件推还有一层原因：这个函数在启动时、以及设置页改动后都会调，
    * 是**唯一的收敛点**。放在 `if (!enabled) return` 后面就会漏掉"关掉"那一半。
    */
-  petWindow?.sendToRenderer('pet:ptt-config', { enabled });
+  petWindow?.sendToRenderer('pet:ptt-config', {
+    enabled,
+    // 语音触发方式（2026-10-30）：唤醒词模式下渲染层要一直开闸
+    triggerMode: voiceTriggerMode,
+  });
 
   if (!enabled) {
     startupNote('[按住说话] 配置里是关的，未启动（已通知宠物窗口：免提常听）');
@@ -5458,6 +5466,26 @@ function setVoiceTrigger(mode: string): void {
     type: 'config.update',
     patch: { providers: { push_to_talk: { trigger_mode: value } } },
   });
+
+  /*
+   * ③ **立刻重推给渲染层**（2026-10-30）
+   *
+   * ⚠️ 不重推的话：渲染层的 `voiceTriggerMode` 还是旧值，闸门规则算错 ——
+   *    切到唤醒词后闸门仍按"按键模式"关着，**说了没反应**。
+   *
+   * 读一下 `push_to_talk.enabled` 一起带上，保持与 `setPtt` 那条路一致。
+   */
+  try {
+    const pttEnabled = Boolean(
+      readDeepScalar(CONFIG_ROOT, ['providers', 'push_to_talk', 'enabled'], true),
+    );
+    petWindow?.sendToRenderer('pet:ptt-config', {
+      enabled: pttEnabled,
+      triggerMode: value,
+    });
+  } catch {
+    /* 推不动就算了 —— sidecar 那边还有一道强制开闸的兜底 */
+  }
 
   if (value === 'wake') {
     log(

@@ -1191,6 +1191,24 @@ let pttActive = false;
 let pushToTalkEnabled = false;
 
 /**
+ * 语音触发方式（2026-10-30）：`'key'` 按键 / `'wake'` 唤醒词。
+ *
+ * ## 为什么渲染层也要知道
+ *
+ * 闸门规则不同：
+ *
+ *     key   没按着就不听（`!pushToTalkEnabled || pttActive`）
+ *     wake  **一直听**（不然听不到唤醒词）
+ *
+ * ⚠️ sidecar 那边也有一道同样的保护，但**两道都要有**：
+ *    前端这道是**从源头停掉推帧**（不推就没有队列积压），
+ *    sidecar 那道是兜底（前端版本旧/标记没同步时仍然能工作）。
+ *
+ * 由主进程经 `pet:ptt-config` 推送（见 `pet:ptt-config` 的订阅）。
+ */
+let voiceTriggerMode = 'key';
+
+/**
  * 按"闸门该不该开"的规则同步一次。
  *
  *     闸门 = 没开按住说话（免提，常开）
@@ -1205,7 +1223,22 @@ let pushToTalkEnabled = false;
  * 散着写必然漏一处，而漏掉的表现就是"开关不生效"。
  */
 function applyCaptureGate() {
-  const shouldListen = !pushToTalkEnabled || pttActive;
+  /*
+   * 🔴 唤醒词模式**必须一直听**（2026-10-30）
+   *
+   * `shouldListen` 原来是 `!pushToTalkEnabled || pttActive` —— 那是"按住说话"
+   * 的语义：没按着就不听。
+   *
+   * 而唤醒词模式**恰恰要一直听**（不然怎么听到唤醒词）。
+   * 用户切到唤醒词后，如果这里还按 `pushToTalkEnabled` 关闸门，
+   * 表现就是"麦克风开着、但一个字节都不处理" —— 说唤醒词完全没反应。
+   *
+   * ⚠️ sidecar 那边也有一道同样的保护（`set_capture` 在 wake 模式下
+   *    强制 `enabled=True`）。**两道都要有**：前端这道是从源头停掉推帧，
+   *    sidecar 那道是兜底（前端版本旧/标记没同步时仍然能工作）。
+   */
+  const wakeMode = voiceTriggerMode === 'wake';
+  const shouldListen = wakeMode || !pushToTalkEnabled || pttActive;
   /*
    * 🔍 诊断（2026-10-10 排查「推了配置但闸门没关」时加的）。
    *
@@ -1217,11 +1250,12 @@ function applyCaptureGate() {
     shouldListen,
     pushToTalkEnabled,
     pttActive,
+    wakeMode,
     at: Date.now(),
   };
   console.info(
     `[voice] 闸门 -> ${shouldListen ? 'listening' : 'gated'}` +
-      `（按住说话=${pushToTalkEnabled}，正按着=${pttActive}）`,
+      `（按住说话=${pushToTalkEnabled}，正按着=${pttActive}，唤醒词模式=${wakeMode}）`,
   );
   /*
    * 🔴 **从源头停掉推帧**（2026-10-10 修，见 `voice-io.js` 里 `gate` 的说明）。
@@ -1248,9 +1282,27 @@ function applyCaptureGate() {
  */
 pet.on('pet:ptt-config', (payload) => {
   pushToTalkEnabled = Boolean(payload && payload.enabled);
+  /*
+   * 语音触发方式（2026-10-30）：`'key'` / `'wake'`。
+   *
+   * ⚠️ 缺字段时**保持当前值**，不要重置成 'key' ——
+   *    主进程的推送可能来自旧版本（没有这个字段），
+   *    重置会让唤醒词模式被意外关掉。
+   */
+  if (payload && (payload.triggerMode === 'key' || payload.triggerMode === 'wake')) {
+    voiceTriggerMode = payload.triggerMode;
+  }
   // 🔍 诊断：证明"配置真的到了渲染层"（见 applyCaptureGate 的说明）
-  window.__pttConfigGot = { enabled: pushToTalkEnabled, payload, at: Date.now() };
-  console.info(`[voice] 按住说话：${pushToTalkEnabled ? '开（只有按住时才听）' : '关（免提，一直在听）'}`);
+  window.__pttConfigGot = {
+    enabled: pushToTalkEnabled,
+    triggerMode: voiceTriggerMode,
+    payload,
+    at: Date.now(),
+  };
+  console.info(
+    `[voice] 按住说话：${pushToTalkEnabled ? '开（只有按住时才听）' : '关（免提，一直在听）'}` +
+      `，触发方式=${voiceTriggerMode === 'wake' ? '唤醒词（一直听）' : '按键'}`,
+  );
   // 开关一变就要重算闸门：开了 -> 立刻关上（不再偷听）；关了 -> 立刻打开（恢复免提）
   applyCaptureGate();
 });

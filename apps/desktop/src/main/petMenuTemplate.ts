@@ -468,6 +468,23 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
       icon: 'speaker',
     },
     {
+      // 标签刻意短：菜单宽度由**最长的那个标签**决定，括号里的说明会白白把
+      // 整个菜单撑宽（Windows 原生菜单不换行、也不按内容自适应收窄）。
+      // 完整含义放在托盘菜单的同名项里，那里空间够。
+      //
+      // 这一项是 checkbox，勾选状态 = 用户意愿（`settingsStore.visionEnabled`），
+      // 与设置页的「允许偶尔截图」开关**同一个真源**，两边联动。
+      //
+      // ⚠️ 名字改过（2026-10-17）：老文案「允许看屏幕」听起来像"它能一直看"，
+      // 实际语义是**允许它偶尔自己截一帧**（§115 第 1 条拍板的名字）。
+      label: '允许偶尔截图',
+      type: 'checkbox',
+      checked: state.visionWatching,
+      action: 'toggle-vision',
+      icon: 'eye',
+    },
+
+    {
       /*
        * 语音触发方式（2026-10-30 用户要求）。
        *
@@ -508,28 +525,39 @@ export function buildPetMenuTemplate(state: PetMenuState): PetMenuItem[] {
           action: 'voice-trigger:key',
         },
         {
-          label: '唤醒词（全屏游戏可用）',
+          // 🔒 暂时禁用（2026-10-30 用户决定）
+          //
+          // ## 用户原话
+          //
+          // 「算了，还是不做这个语音识别功能了，太依赖识别率了，先灰色禁用吧」
+          //
+          // ## 为什么（实测记录，不是猜的）
+          //
+          // 链路本身是通的 —— 真机日志里确实命中过并成功发起对话：
+          //
+          //     语音识别（1.70s）：来说说话吧阿识
+          //     唤醒词命中「来说说话吧」-> 实际内容：阿识
+          //     以语音输入发起对话：阿识
+          //
+          // 但**可靠性完全取决于 ASR 的识别率**，而在这台机器上它不够：
+          // 风扇噪声 + 外放声音 + 麦克风距离，导致同一个唤醒词被听成
+          // 「阿诗 / 阿石 / 阿时 / 阿十 / 八十 / 阿蛇 / 阿辞」七八种写法，
+          // 换成长的「来说说话吧」之后，正文部分又经常被听错。
+          //
+          // 结论：**在识别率提上来之前，这个功能不该暴露给用户**。
+          // 保留代码（链路和测试都完整，见 `docs/进度交接.md` §二百零三），
+          // 只把入口置灰，等以后换更好的 ASR / 加降噪再说。
+          //
+          // ⚠️ `enabled: false` 是 Electron 菜单项的标准置灰方式，
+          //    点击不会有任何反应，也不影响 `implemented` 门禁
+          //    （那条门禁只检查 action 有没有对应处理器，不检查 enabled）。
+          label: '唤醒词 ·未实现（识别率不够）',
           type: 'radio' as const,
+          enabled: false,
           checked: state.voiceTriggerMode === 'wake',
           action: 'voice-trigger:wake',
         },
       ],
-    },
-    {
-      // 标签刻意短：菜单宽度由**最长的那个标签**决定，括号里的说明会白白把
-      // 整个菜单撑宽（Windows 原生菜单不换行、也不按内容自适应收窄）。
-      // 完整含义放在托盘菜单的同名项里，那里空间够。
-      //
-      // 这一项是 checkbox，勾选状态 = 用户意愿（`settingsStore.visionEnabled`），
-      // 与设置页的「允许偶尔截图」开关**同一个真源**，两边联动。
-      //
-      // ⚠️ 名字改过（2026-10-17）：老文案「允许看屏幕」听起来像"它能一直看"，
-      // 实际语义是**允许它偶尔自己截一帧**（§115 第 1 条拍板的名字）。
-      label: '允许偶尔截图',
-      type: 'checkbox',
-      checked: state.visionWatching,
-      action: 'toggle-vision',
-      icon: 'eye',
     },
 
     {

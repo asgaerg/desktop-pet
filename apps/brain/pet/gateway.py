@@ -2873,8 +2873,57 @@ class Gateway:
         # 单机单调时钟与 VisionLoop 内部用的时钟必须一致，否则新鲜度会算错。
         self._last_observation_at = time.monotonic()
 
+    async def _reload_voice_config(self) -> None:
+        """把 `providers.push_to_talk` 的最新值刷进 `voice.voice_config`（2026-10-30）。
+
+        ## 只刷"运行时可变"的那几项
+
+        触发方式 / 唤醒词 / 唤醒词句首要求 —— 这三项改了要**立刻生效**，
+        但它们不影响引擎，所以不该触发 `_on_config_voice_engines` 的重建
+        （重建本地 Whisper 要 4 秒，用户只是切个模式不该等那么久）。
+
+        ⚠️ **不要整体替换 `voice_config`**：里面还有 `enabled` 等由别处
+        （`set_enabled`）维护的状态，整体替换会把它们冲掉。
+        只改这三个字段。
+        """
+        try:
+            fresh = type(self.voice.voice_config)._voice_config_from(self.config)
+        except Exception:  # noqa: BLE001 —— 配置读不到不该让语音瘫痪
+            log.debug("语音配置刷新失败（已忽略）", exc_info=True)
+            return
+        vc = self.voice.voice_config
+        before = getattr(vc, "trigger_mode", "key")
+        vc.trigger_mode = fresh.trigger_mode
+        vc.wake_words = fresh.wake_words
+        vc.wake_require_prefix = fresh.wake_require_prefix
+        after = vc.trigger_mode
+        # ⚠️ 无论模式有没有变都要重算端点参数（2026-10-30）：
+        #    别的配置项（如 end_silence_ms）也可能变，而且 `_apply_trigger_mode`
+        #    是幂等的。只在"变了"时调的话，热更新路径会漏掉一次校准。
+        self.voice._apply_trigger_mode()
+        if before != after:
+            log.info("语音触发方式已热更新：%s -> %s", before, after)
+            # 切到唤醒词时**必须立刻开闸** —— 否则闸门还是关的，
+            # 麦克风开着但一个字节都不处理（用户表现为"说了没反应"）。
+            if after == "wake":
+                await self.voice.set_capture(True)
+
     async def _scheduler_on_config(self, event: Event) -> None:
         self.scheduler.reload()
+        # 🔴 语音配置也要跟着热更新（2026-10-30）
+        #
+        # ## 为什么需要
+        #
+        # `_on_config_voice_engines` 只在**引擎指纹**变了时重建 asr/tts，
+        # 但它**不碰 `voice_config`**（触发方式 / 唤醒词都在那里）。
+        #
+        # 于是用户在菜单里切「按键 -> 唤醒词」后：
+        #   · 配置已热更新（日志里能看到）
+        #   · 但 `voice.voice_config.trigger_mode` 还是旧的 `'key'`
+        #   · 结果唤醒词过滤不生效，而且闸门还关着 —— **完全没反应**
+        #
+        # 这个坑很隐蔽：日志显示"配置已热更新"，看起来一切正常。
+        await self._reload_voice_config()
         # 活泼度变了要同步进主观层（2026-10-17）。
         # ⚠️ 不同步的话：用户拖完滑杆，`activity.overall` 变了、调度器阈值也变了，
         # 但主观层还拿着旧的 vitality —— 注意力漂移的倾向不同步，

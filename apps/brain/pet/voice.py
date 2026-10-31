@@ -38,6 +38,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -219,6 +220,54 @@ class VadConfig:
     max_utterance_ms: int = 30_000
     # 过零率上限：高到离谱的多半是稳态噪声而不是语音
     max_zcr: float = 0.6
+    # 🔴 噪声底估计的**统计窗口**（毫秒）。见 `VoiceActivityDetector` 的
+    # `_estimate_noise_floor`（2026-10-30 从"高过零率脱困"改成最小统计）。
+    #
+    # ## 为什么换掉旧方案
+    #
+    # 旧方案是"连续 N 帧判语音 **且** zcr ≥ 0.22 就强制抬噪声底"。
+    # 它假设稳态噪声是**白噪声**（zcr 0.27~0.33）。但用户这台机器的主要
+    # 噪声源是**笔记本风扇** —— 低频为主，实测 `zcr ≈ 0.15`，低于 0.22，
+    # 于是脱困机制**一次都不触发**，死锁原样存在。
+    #
+    # 表现为 Whisper 在风扇噪声上疯狂幻听（真机日志）：
+    #
+    #     语音识别（1.30s）：下班 拜拜
+    #     语音识别（0.96s）：我爱你
+    #     语音识别（1.34s）：应该是我妈妈
+    #     语音识别（1.08s）：好不好 打了
+    #
+    # ## 最小统计为什么不会死锁
+    #
+    # 噪声底的物理含义是"**最近最安静那一刻有多吵**"。直接按这个定义算：
+    #
+    #     noise_floor ≈ min(最近窗口内所有帧的能量)
+    #
+    # 这个定义**没有死锁的可能** —— 不管当前被判成语音还是静音，
+    # 最小值都会如实反映环境。而且它天然正确：风扇再响，最小值也就是
+    # 风扇水平，阈值 = 2× 风扇 > 风扇，噪声就不会被判成语音。
+    noise_window_ms: int = 6_000
+    # 🔴 **预录缓冲**长度（毫秒）：判到"开始说话"时，把这之前的一小段音频
+    # 一起带上（2026-10-30 加，修"句首被切掉"）。
+    #
+    # ## 为什么必须有
+    #
+    # 端点要连续 `start_frames`（3 帧 ≈ 60ms）确认是语音才进入 SPEAKING，
+    # 而**这 60ms 加上更前面的起音全被丢掉了**。
+    #
+    # 实测证据（唤醒词测试，音箱念「阿拾，今天天气怎么样」）：
+    #
+    #     语音识别（1.72s）：今天天气怎么样
+    #     唤醒词未命中，忽略：今天天气怎么样      ← 「阿拾」不见了！
+    #
+    # 这不是识别问题，是**音频里根本没有「阿拾」** —— 它落在端点开始录制之前。
+    #
+    # 对唤醒词模式是**致命**的：唤醒词永远在句首，永远被切掉，
+    # 于是永远匹配不上。对普通对话也有影响（"你好"变成"好"）。
+    #
+    # 300ms 足够覆盖起音（中文声母的浊化/气声起点），又不会拖进太多静音
+    # （静音太多反而让 Whisper 更容易产生幻觉）。
+    preroll_ms: int = 300
 
 
 class VadState(str, Enum):
@@ -236,6 +285,9 @@ class VadResult:
     threshold: float
     zcr: float
     reason: str = ""
+    # silero 给出的语音概率（0~1）。能量法恒为 0 —— 日志里能一眼看出
+    # 现在用的是哪个引擎，以及"没反应"到底是"没声音"还是"认不出人声"。
+    prob: float = 0.0
 
 
 class VoiceActivityDetector:
@@ -257,9 +309,72 @@ class VoiceActivityDetector:
         self.noise_floor = 0.005
         self._speech_streak = 0
         self._last_result: Optional[VadResult] = None
+        # 最小统计窗口（2026-10-30）—— 见 `_estimate_noise_floor`
+        #
+        # 用**两个**窗口，因为"抬高"和"降低"需要的耐心完全不同：
+        #
+        #   `_recent_short`（200ms）：只在**降低**时用。环境突然变安静，
+        #       噪声底要立刻跟上，否则阈值虚高、说话触发不了。
+        #
+        #   `_recent_long`（6 秒）：只在**抬高**时用，而且**必须填满**才作数。
+        #       必须长于任何一句正常话 —— 否则用户一口气说 3 秒，
+        #       窗口里全是人声，最小值就是人声，噪声底被抬到人声水平，
+        #       阈值翻倍，说到一半就"消失"了。
+        #
+        # ⚠️ 曾经试过"启动时用前 1 秒校准噪声底"，**行不通**：
+        #    如果开机那一秒用户正在说话，噪声底直接被抬到人声水平，
+        #    而之后一直在说话 -> 短窗口永远看不到更安静的帧 -> 永久卡住。
+        #    必须要求"整个长窗口里都这么吵"才算环境变了。
+        self._recent_short: deque[float] = deque(maxlen=10)
+        self._recent_long: deque[float] = deque(
+            maxlen=max(50, int(self.config.noise_window_ms / FRAME_MS))
+        )
 
     def threshold(self) -> float:
         return max(self.config.min_energy, self.noise_floor * self.config.energy_ratio)
+
+    def _estimate_noise_floor(self, energy: float) -> None:
+        """用**双窗口最小统计**更新噪声底（2026-10-30 重写）。
+
+        ## 定义
+
+            噪声底 := 环境本身有多吵 ≈ 最近"最安静那一刻"的能量
+
+        ## 为什么这个定义不会死锁
+
+        旧实现"只在判为静音时更新"有个死锁：阈值一旦低于噪声，
+        噪声就永远是"语音"，噪声底也就永远不更新 —— 自锁。
+        最小统计**根本不看判定结果**，所以没有这个回路。
+
+        ## 两条规则
+
+        **抬高**：`min(_recent_long) > noise_floor`，且长窗口**已填满**。
+
+        填满这个条件很关键。它等价于"整整 6 秒里没有一帧比现在更安静" ——
+        正常的句子（带换气）永远达不到，风扇这种稳态噪声几秒就达到。
+        去掉这个条件的话，用户说一句话就会把噪声底抬上去。
+
+        **降低**：`min(_recent_short) < noise_floor` 时平滑下降。
+
+        只等 200ms 就降，因为环境一安静就要立刻跟上。等 6 秒的话
+        阈值会虚高一整段时间，用户说话触发不了。
+        """
+        self._recent_short.append(energy)
+        self._recent_long.append(energy)
+
+        # ① 抬高（必须长窗口填满）
+        if len(self._recent_long) == self._recent_long.maxlen:
+            recent_min_long = min(self._recent_long)
+            if recent_min_long > self.noise_floor:
+                self.noise_floor = recent_min_long
+                return
+
+        # ② 降低（短窗口，平滑）
+        recent_min_short = min(self._recent_short)
+        if recent_min_short < self.noise_floor:
+            self.noise_floor += (
+                recent_min_short - self.noise_floor
+            ) * self.config.noise_adapt
 
     def process(self, frame: AudioFrame) -> VadResult:
         energy = frame.rms()
@@ -277,11 +392,12 @@ class VoiceActivityDetector:
         else:
             self._speech_streak = 0
             reason = "quiet" if not loud_enough else "noise_like"
-            # 只在判为静音时更新噪声底：否则说话声会把底噪一起抬上去，
-            # 越说越难触发（这是能量法最经典的坑）
-            self.noise_floor = (1 - self.config.noise_adapt) * self.noise_floor + (
-                self.config.noise_adapt * energy
-            )
+
+        # 🔴 噪声底用最小统计更新，**不看**判定结果（2026-10-30 重写）
+        #
+        # 旧实现只在"判为静音"时更新，于是阈值一旦低于环境噪声就死锁：
+        # 噪声永远是"语音" -> 噪声底永远不更新 -> 阈值永远低 -> 噪声永远"语音"。
+        self._estimate_noise_floor(energy)
 
         # start_frames 的消抖在这里体现：报给上层的 is_speech 只在连续超阈值后为真
         confirmed = is_speech and self._speech_streak >= self.config.start_frames
@@ -299,6 +415,10 @@ class VoiceActivityDetector:
     def reset(self) -> None:
         self._speech_streak = 0
         self._last_result = None
+        # ⚠️ 最小统计窗口**刻意不清空**：噪声底描述的是环境，而环境在
+        #    "重新开始听"的过程中并没有变。清空会退回初值 0.005，
+        #    下一次说话前又得当一次风扇噪声。
+        #    校准计数同样保留 —— 它只该在进程启动时跑一次。
 
     @property
     def last(self) -> Optional[VadResult]:
@@ -331,10 +451,156 @@ class Utterance:
         return len(self.pcm)
 
 
+class SileroVoiceActivityDetector:
+    """神经网络 VAD（silero v6），接口与 `VoiceActivityDetector` 完全一致。
+
+    ## 🔴 为什么要换掉能量法（2026-10-30，用户的真实环境）
+
+    能量法在这台机器上**反复被证明不可靠**，而且是"按下葫芦浮起瓢"：
+
+    · 阈值调高 -> 听不见用户说话（噪声底被风扇抬到 0.085，阈值 0.17，
+      而用户人声只有 0.09~0.13，被判成静音）
+    · 阈值调低 -> 风扇噪声被当成说话，Whisper 在噪声上疯狂幻听：
+      「下班 拜拜」「我爱你」「应该是我妈妈」「大家好,我叫做麦包」
+
+    根因是**能量和过零率这两个特征根本不足以区分"人在说话"和"风扇在转"**
+    —— 都是低频、都有能量起伏。再怎么调参也只是在两种失败之间来回。
+
+    ## 实测对比（同一批音频，silero 概率）
+
+        真实语音（TTS「阿拾，今天天气怎么样」）  max=0.987  判语音 58.7%
+        风扇式噪声 amp=0.030                    max=0.192  判语音  0.0%
+        风扇式噪声 amp=0.080                    max=0.192  判语音  0.0%
+        安静                                   max=0.094  判语音  0.0%
+
+    区分度甩开能量法一个数量级，而且**不需要任何阈值调参**。
+
+    ## 依赖与开销
+
+    `onnxruntime` + `faster_whisper/assets/silero_vad_v6.onnx` —— 两者
+    **都已经随 faster-whisper 装好了**，没有引入任何新依赖。
+
+    CPU 实测 0.36ms/块（4 块上下文），约 31 块/秒 -> 约 1% 单核。
+    """
+
+    # silero v6 要求每次输入是 512 样本（32ms）的整数倍
+    BLOCK_SAMPLES = 512
+    # 上下文块数。实测 1 块也能用（语音 0.93 / 噪声 0.27），
+    # 4 块明显更稳（语音 0.987 / 噪声 0.192），8 块提升很小但贵一倍。
+    CONTEXT_BLOCKS = 4
+
+    def __init__(
+        self,
+        config: Optional[VadConfig] = None,
+        model_path: Optional[str] = None,
+        speech_on: float = 0.5,
+        speech_off: float = 0.35,
+    ) -> None:
+        self.config = config or VadConfig()
+        self._speech_on = speech_on
+        self._speech_off = speech_off
+        # 能量法实例**只用于日志字段**（energy/noise_floor/threshold/zcr）。
+        # 决策完全由 silero 给，但日志格式保持原样，方便和以前的日志对比。
+        self._energy = VoiceActivityDetector(self.config)
+        self._buf = bytearray()
+        self._context: list[Any] = []
+        self._prob = 0.0
+        self._active = False
+        self._model = None
+        self._load_error: Optional[str] = None
+        self._numpy = None
+        self._load(model_path)
+
+    def _load(self, model_path: Optional[str]) -> None:
+        try:
+            import numpy as np
+            from faster_whisper.utils import get_assets_path
+            from faster_whisper.vad import SileroVADModel
+
+            self._numpy = np
+            path = model_path or os.path.join(get_assets_path(), "silero_vad_v6.onnx")
+            if not os.path.exists(path):
+                raise FileNotFoundError(path)
+            self._model = SileroVADModel(path)
+        except Exception as exc:  # noqa: BLE001
+            self._load_error = str(exc)
+            self._model = None
+
+    @property
+    def available(self) -> bool:
+        return self._model is not None
+
+    # -------------------------------------------------------------- 兼容接口
+
+    @property
+    def noise_floor(self) -> float:
+        return self._energy.noise_floor
+
+    def threshold(self) -> float:
+        return self._energy.threshold()
+
+    @property
+    def last(self) -> Optional[VadResult]:
+        return self._energy.last
+
+    def reset(self) -> None:
+        self._energy.reset()
+        self._buf = bytearray()
+        self._context = []
+        self._prob = 0.0
+        self._active = False
+
+    # ------------------------------------------------------------------ 主逻辑
+
+    def process(self, frame: AudioFrame) -> VadResult:
+        # 先让能量法跑一遍：它的 energy/floor/threshold/zcr 要进日志
+        base = self._energy.process(frame)
+
+        if self._model is None:  # 退化：完全按能量法走
+            return base
+
+        assert self._numpy is not None
+        np = self._numpy
+        self._buf.extend(frame.pcm)
+        block_bytes = self.BLOCK_SAMPLES * SAMPLE_WIDTH
+        # 攒够一块就算一次 —— 一帧 20ms 是 320 样本，一块 512 样本，
+        # 所以大约每 1.6 帧更新一次概率，中间复用上一次的值。
+        while len(self._buf) >= block_bytes:
+            raw = bytes(self._buf[:block_bytes])
+            del self._buf[:block_bytes]
+            samples = np.frombuffer(raw, dtype="<i2").astype("float32") / 32768.0
+            self._context.append(samples)
+            if len(self._context) > self.CONTEXT_BLOCKS:
+                del self._context[: len(self._context) - self.CONTEXT_BLOCKS]
+            chunk = np.concatenate(self._context)
+            try:
+                out = self._model(chunk)
+                self._prob = float(np.asarray(out).ravel()[-1])
+            except Exception:  # noqa: BLE001 —— 推理失败就不要卡住整条链路
+                self._prob = 0.0
+
+        # 迟滞：进入用高门槛、退出用低门槛，避免在门限附近抖动切成碎片
+        if self._active:
+            if self._prob < self._speech_off:
+                self._active = False
+        else:
+            if self._prob >= self._speech_on:
+                self._active = True
+
+        return VadResult(
+            is_speech=self._active,
+            energy=base.energy,
+            noise_floor=base.noise_floor,
+            threshold=base.threshold,
+            zcr=base.zcr,
+            reason="speech" if self._active else "quiet",
+            prob=self._prob,
+        )
+
+
 class Endpointer:
     """
     逐帧喂入，吐出"整句话"。
-
     状态机很简单，但每个转换条件都对应一个具体的失败模式：
       IDLE -> SPEAKING：需要 start_frames 连续确认为语音（防瞬时噪声）
       SPEAKING -> ENDED：需要 end_silence_ms 连续静音（防换气被当成说完）
@@ -354,18 +620,44 @@ class Endpointer:
         self._last_speech_len = 0
         self.dropped = 0
         self.truncated = 0
+        # 预录缓冲（2026-10-30）：见 `VadConfig.preroll_ms` 的说明。
+        # 只在 IDLE 时滚动累积，进入 SPEAKING 时一次性并进 `_buffer`。
+        self._preroll = bytearray()
 
     def process(self, frame: AudioFrame, vad: VadResult) -> Optional[Utterance]:
         """喂一帧。返回 Utterance 表示刚说完一句；返回 None 表示还在进行中。"""
         if self.state is UtteranceState.IDLE:
             if not vad.is_speech:
+                # 🔴 静音期间**持续滚动预录**（2026-10-30）
+                #
+                # 为什么在"静音"时攒：起音恰恰落在这段被判为静音的音频里。
+                # 不攒的话，那句的第一个字永远缺一截。
+                #
+                # ⚠️ `preroll_ms <= 0` 时必须**完全不攒**。
+                #    第一版写成"limit=0 就不裁剪"，结果是缓冲无限增长
+                #    （内存泄漏），而且照样被并进句子（等于没关掉）。
+                #    这个错误还让回归测试失效了一次：把 preroll_ms 改成 0
+                #    测试仍然通过，掩盖了"测试根本没测到东西"。
+                if self.config.preroll_ms > 0:
+                    self._preroll.extend(frame.pcm)
+                    limit = int(
+                        SAMPLE_RATE * SAMPLE_WIDTH * (self.config.preroll_ms / 1000.0)
+                    )
+                    if len(self._preroll) > limit:
+                        del self._preroll[: len(self._preroll) - limit]
                 return None
             self.state = UtteranceState.SPEAKING
-            self._buffer = bytearray(frame.pcm)
+            # ⚠️ 顺序：预录在前、当前帧在后
+            pre = bytes(self._preroll)
+            self._preroll = bytearray()
+            self._buffer = bytearray(pre) + bytearray(frame.pcm)
             self._speech_ms = FRAME_MS
             self._silence_ms = 0
             self._started_at = frame.captured_at
-            self._frames_in_utterance = 1
+            # 预录的帧也要计入总长（否则保险丝会比实际宽松一整段）
+            self._frames_in_utterance = 1 + (
+                len(pre) // max(1, len(frame.pcm)) if frame.pcm else 0
+            )
             self._last_speech_len = len(self._buffer)
             return None
 
@@ -441,6 +733,8 @@ class Endpointer:
         self._silence_ms = 0
         self._frames_in_utterance = 0
         self._last_speech_len = 0
+        # 预录也清掉：reset 的语义是"从头来过"，留着旧音频会串到下一句开头
+        self._preroll = bytearray()
 
 
 # --------------------------------------------------------------------------- #
@@ -858,8 +1152,56 @@ class VoiceConfig:
     trigger_mode: str = "key"
     # 唤醒词列表（`trigger_mode == 'wake'` 时生效）。
     wake_words: tuple[str, ...] = ()
-    # 唤醒词是否必须出现在句首。
+    # 唤醒词是否必须出现在**句首**。
     wake_require_prefix: bool = False
+    # 是否按**拼音**匹配唤醒词（默认开，强烈建议保持）。
+    #
+    # ## 🔴 为什么必须有它（2026-10-30 实测，决定性证据）
+    #
+    # 用 TTS 合成出**清晰**的唤醒词，再喂给本地 ASR，结果：
+    #
+    #     期望「阿拾」            -> 实际「阿诗」
+    #     期望「阿拾，今天天气怎么样」 -> 实际「阿石,今天天气怎么样」
+    #     期望「阿拾你在吗」        -> 实际「阿石你在吗」
+    #     期望「小灵」            -> 实际「笑铃」
+    #
+    # **ASR 从来不会把专名转成你写的那些字**，永远是同音字。所以按字面匹配
+    # 100% 命中不了 —— 用户喊破喉咙也不会有反应。
+    #
+    # ## 为什么用拼音而不是"错一个字也算"
+    #
+    # 第一版用的是"两个字错一个就命中"，结果看视频时立刻误触发
+    # （`唤醒词命中「小灵」-> 一张五下个我会跑拿个机器`）—— 中文里
+    # 「小」开头、「灵」结尾的词太多，那个规则等于放行一大片。
+    #
+    # 拼音匹配**精确得多**（实测）：
+    #
+    #     阿拾/阿诗/阿石/阿十/阿时/阿识  -> ['a','shi']   ✅ 全部命中
+    #     小时                        -> ['xiao','shi']  ❌ 不命中（正确）
+    #     机灵                        -> ['ji','ling']   ❌ 不命中（正确）
+    #
+    # ⚠️ 依赖 `pypinyin`（纯 Python、无编译）。没装时自动退回
+    #    "字面精确匹配 + `wake_aliases`"，功能可用但会漏掉同音写法。
+    wake_pinyin: bool = True
+    # 是否宽容"零声母前多出一个辅音"（默认开）。
+    #
+    # ## 为什么需要（2026-10-30 实测）
+    #
+    # 用户说「阿拾」，ASR 稳定输出成「**八十**」：
+    #
+    #     阿拾 -> 声母 ['', 'sh']   韵母 ['a', 'i']
+    #     八十 -> 声母 ['b', 'sh']  韵母 ['a', 'i']    ← 只多了个 b
+    #
+    # 零声母音节（阿/啊/诶）前面常被插入一个浊化起音，ASR 就听成了
+    # 一个正常汉字。不开这一档，唤醒词永远命中不了。
+    #
+    # `false` = 只允许拼音完全相等（更严格，但会漏掉「八十」这类）。
+    wake_initial_tolerance: bool = True
+    # 唤醒词的**别名**（字面备选写法）。
+    #
+    # 没有 pypinyin 时才需要它；装了 pypinyin 之后同音字会自动覆盖，
+    # 这里主要留给"读音不同但你就是会那么叫"的情况。
+    wake_aliases: tuple[str, ...] = ()
 
 
 class VoiceSession:
@@ -903,10 +1245,10 @@ class VoiceSession:
         # 说话用的自增序号（`pet.mouth` 的 id 字段，前端不读它，只为日志可读）
         self._speak_seq = 0
 
-    # ------------------------------------------------------------ 热切换引擎
+        # ------------------------------------------------------------ 热切换引擎
 
         asr_cfg_now = config.providers.get("asr", {})
-        self.vad = VoiceActivityDetector(
+        _vad_cfg = (
             VadConfig(
                 end_silence_ms=int(asr_cfg_now.get("end_silence_ms", 500)),
                 # 注意这里传的是 min_speech_ms，不要顺手写成 end_silence_ms ——
@@ -934,8 +1276,19 @@ class VoiceSession:
                 noise_adapt=float(asr_cfg_now.get("noise_adapt", 0.02)),
                 start_frames=int(asr_cfg_now.get("start_frames", 3)),
                 max_zcr=float(asr_cfg_now.get("max_zcr", 0.6)),
+                # 噪声底最小统计窗口（2026-10-30）。**必须接线** —— 只写 dataclass
+                # 默认值的话，YAML 里改了不会生效（这个项目因此出过多次假开关）。
+                noise_window_ms=int(asr_cfg_now.get("noise_window_ms", 6_000)),
             )
         )
+        # 🔴 VAD 引擎选择（2026-10-30）
+        #
+        # `auto`（默认）：有 onnxruntime + silero 模型就用神经网络，否则退回能量法。
+        # 用户这台机器上能量法**已被实测证明不可靠**（风扇噪声和说话都是
+        # 低频、都有能量起伏，靠 energy/zcr 无法区分，只能在"听不见人"和
+        # "把噪声当人"之间来回）。详见 `SileroVoiceActivityDetector` 的说明。
+        self._vad_engine_requested = str(asr_cfg_now.get("vad_engine", "auto")).lower()
+        self.vad: Any = self._build_vad(_vad_cfg)
         # ⚠️ `endpointer` 紧跟 `vad` —— 别把别的东西插到这两者之间。
         # （2026-10-08：我把引擎指纹插在这里，编辑时又误删了这行，导致
         #   `AttributeError: 'VoiceSession' object has no attribute 'endpointer'`，
@@ -996,6 +1349,16 @@ class VoiceSession:
         self._ptt_mode = False
         # 记下配置里的静音阈值 —— PTT 会临时改成无穷大，松手时按它恢复
         self._silence_ms_default = int(getattr(self.endpointer.config, 'end_silence_ms', 500))
+        # 记下保险丝（最长一句话）—— 唤醒词模式会临时改短，见 `set_capture`
+        self._max_utterance_ms_default = int(
+            getattr(self.endpointer.config, "max_utterance_ms", 30_000)
+        )
+        # 🔴 **必须在这里就按模式调一次**（2026-10-30）
+        #
+        # 只在 `set_capture()` 里调是不够的：那条路由前端的 `voice.ptt` 消息
+        # 驱动，而前端启动时只发一次，可能因为 WebSocket 还没连上而丢失。
+        # 丢了的话 `max_utterance_ms` 会一直是 30 秒（日志里 `音频 30.00s`）。
+        self._apply_trigger_mode()
 
         # ⚠️ 引擎指纹**必须放在 `__init__` 的最后一行**（2026-10-08 踩过）。
         #
@@ -1009,8 +1372,56 @@ class VoiceSession:
         # 它是个纯读取 + 纯赋值，放最后既无依赖问题，也不会再打断任何东西。
         self._engine_signature = self.engine_signature()
 
-    # ------------------------------------------------------------------ 状态
+    # ------------------------------------------------------------------ VAD 引擎
 
+    def _build_vad(self, vad_config: VadConfig) -> Any:
+        """按 `asr.vad_engine` 造 VAD。
+
+        · `silero` —— 强制神经网络。加载失败就**退化为能量法并记错**，
+          不能让整条语音链路因为一个可选依赖挂掉。
+        · `energy` —— 强制能量法（测试用；离线自检不该依赖 onnx 模型）。
+        · `auto`   —— 有就用 silero，没有就能量法。
+
+        ⚠️ 这个方法**必须定义在 `__init__` 之后**。
+        2026-10-30 我第一次把它插在 `__init__` 中间（挨着 `# 热切换引擎`
+        那条注释），结果它把 `__init__` 提前结束，后面那一整段 VAD
+        构造代码变成了**这个方法的函数体** —— 症状是
+        `AttributeError: 'VoiceSession' object has no attribute 'vad'`，
+        而且看起来完全不像是"缩进放错位置"引起的。
+        """
+        want = self._vad_engine_requested
+        # 环境变量优先级最高（`PET_VAD_ENGINE=energy|silero|auto`）。
+        #
+        # 自检用它把自己钉死在能量法上：自检喂的是**合成正弦波**，
+        # silero 是在真人语音上训练的，对纯音不一定判成语音 ——
+        # 用 silero 跑自检会得到一堆和真实行为无关的红灯。
+        # 生产环境不设这个变量，走配置里的 `asr.vad_engine`。
+        override = os.environ.get("PET_VAD_ENGINE", "").strip().lower()
+        if override in ("energy", "silero", "auto"):
+            want = override
+        if want in ("energy", "key"):
+            self._vad_kind = "energy"
+            return VoiceActivityDetector(vad_config)
+        silero = SileroVoiceActivityDetector(vad_config)
+        if silero.available:
+            self._vad_kind = "silero"
+            log.info(
+                "VAD 引擎：silero（神经网络）—— 抗风扇/音乐等稳态噪声；"
+                "能量法参数仍用于日志显示"
+            )
+            return silero
+        self._vad_kind = "energy"
+        if want == "silero":
+            log.warning(
+                "VAD 引擎：要 silero 但加载失败（%s），已退回能量法 —— "
+                "风扇噪声环境下可能误判",
+                silero._load_error,
+            )
+        else:
+            log.info("VAD 引擎：energy（没找到 silero/onnxruntime，退回能量法）")
+        return VoiceActivityDetector(vad_config)
+
+    # ------------------------------------------------------------------ 状态
 
     def engine_signature(self) -> tuple[str, str, str, str]:
         """
@@ -1146,6 +1557,49 @@ class VoiceSession:
     def enabled(self) -> bool:
         return self.voice_config.enabled
 
+    def _apply_trigger_mode(self) -> None:
+        """按 `trigger_mode` 把端点参数调成该模式该有的样子（2026-10-30）。
+
+        ## 🔴 为什么要在**构造时**就调一次
+
+        第一版只在 `set_capture()` 里调。但 `set_capture` 由**前端的
+        `voice.ptt` 消息**驱动，而前端在启动时只发一次 `start` ——
+        那时 sidecar 的 WebSocket **可能还没连上**，消息就丢了。
+
+        实测证据（`startup.log` vs `main.log`）：
+
+            startup.log  11:59:21.256Z [按住说话] 渲染层发来 start   ← 主进程收到了
+            main.log     （没有任何 `收到 phase='start'` / `采集闸门`）← 后端没收到
+
+        后果：`max_utterance_ms` 一直是 30 秒，日志里出现
+        `开始识别：音频 30.00s`，用户说唤醒词要等半分钟。
+
+        **教训：由配置决定的初始状态，必须在构造/配置更新时就算好，
+        不能依赖某条可能丢失的运行时消息。**
+
+        ## 两种模式的差别
+
+        | | key（按住说话） | wake（唤醒词） |
+        |---|---|---|
+        | `end_silence_ms` | 无穷大（靠松手收尾） | 正常 500ms（靠静音断句） |
+        | `max_utterance_ms` | 30 秒 | **6 秒**（见下） |
+
+        `wake` 用 6 秒窗口的原因：麦克风一直开着，环境里只要有人声
+        （视频/游戏对白），VAD 就永远判"语音"、静音断句一次都不触发，
+        只能靠保险丝。30 秒的话用户说完「阿拾」最多等 30 秒 + 识别时间。
+        """
+        wake = getattr(self.voice_config, "trigger_mode", "key") == "wake"
+        ep = getattr(self, "endpointer", None)
+        if ep is None:
+            return
+        if wake:
+            self._ptt_mode = False
+            ep.config.end_silence_ms = self._silence_ms_default
+            ep.config.max_utterance_ms = 6_000
+        else:
+            ep.config.end_silence_ms = self._silence_ms_default
+            ep.config.max_utterance_ms = getattr(self, "_max_utterance_ms_default", 30_000)
+
     # ── 唤醒词匹配（2026-10-30）─────────────────────────────────────────
     #
     # ## 为什么要"模糊"匹配
@@ -1164,38 +1618,25 @@ class VoiceSession:
     def _match_wake_word(self, text: str) -> Optional[str]:
         """文本里有没有唤醒词。返回命中的那个词，没有则 None。
 
-        ⚠️ 返回的是**配置里的原词**（不是文本里那两个字）——
-        因为后面 `_strip_wake_word` 要按原词长度定位。
+        ⚠️ 返回的是**配置里的原词**（不是文本里那几个字）——
+        后面 `_strip_wake_word` 要靠它定位。
+
+        ## 两级匹配
+
+        ① **字面命中**（`norm.find`）—— 最快，也是"用户本来就写对了"的情况
+        ② **拼音命中** —— ASR 的实际输出几乎总是同音字
+           （实测「阿拾」被转成「阿诗」/「阿石」），所以这一级才是主力
         """
         words = getattr(self.voice_config, "wake_words", ()) or ()
         if not words or not text:
             return None
-        # 去掉标点和空格再比（"阿拾，今天" -> "阿拾今天"）
+        extra = tuple(getattr(self.voice_config, "wake_aliases", ()) or ())
         norm = self._normalize_for_wake(text)
         if not norm:
             return None
-        for word in words:
-            wnorm = self._normalize_for_wake(word)
-            if not wnorm:
-                continue
-            pos = norm.find(wnorm)
-            if pos >= 0:
-                # 要求出现在句首时，位置必须是 0
-                if getattr(self.voice_config, "wake_require_prefix", False) and pos != 0:
-                    continue
+        for word in tuple(words) + extra:
+            if self._locate_wake(norm, word) is not None:
                 return word
-        # 退一步：同音容忍（只对等长窗口）
-        for word in words:
-            wnorm = self._normalize_for_wake(word)
-            if not wnorm:
-                continue
-            n = len(wnorm)
-            for i in range(0, len(norm) - n + 1):
-                window = norm[i : i + n]
-                if self._same_sound(wnorm, window):
-                    if getattr(self.voice_config, "wake_require_prefix", False) and i != 0:
-                        continue
-                    return word
         return None
 
     @staticmethod
@@ -1209,31 +1650,212 @@ class VoiceSession:
             ch for ch in str(text) if ch.isalnum() or "\u4e00" <= ch <= "\u9fff"
         ).lower()
 
-    @staticmethod
-    def _same_sound(a: str, b: str) -> bool:
-        """两个等长串是否"听起来像"（只用于唤醒词容错）。
+    # 单字拼音缓存（`lazy_pinyin` 每次调用都要走正则+查表，逐字调会慢）
+    _PY_CACHE: dict[str, str] = {}
 
-        ## 判据（刻意保守）
+    @classmethod
+    def _wake_char_pinyin(cls, ch: str) -> str:
+        """一个字的**无调拼音**。没有 pypinyin 时原样返回这个字。
 
-        · 完全相等 -> True
-        · 长度不同 -> False
-        · 逐字比较：**只有 1 个字不同**且那个字是常见同音误转 -> True
-        · 其余 -> False
-
-        ⚠️ 只容忍**一个字**的差异。两字词里错一个字（"阿十" vs "阿拾"）
-           已经很宽了；再宽会误触。
+        ⚠️ 退化行为很重要：没装 `pypinyin` 时拼音级匹配自动变成"字面匹配"，
+        功能仍然可用（只是漏同音写法），**不会崩**。
         """
-        if a == b:
+        cached = cls._PY_CACHE.get(ch)
+        if cached is not None:
+            return cached
+        out = ch
+        try:
+            from pypinyin import Style, lazy_pinyin
+
+            py = lazy_pinyin(ch, style=Style.NORMAL)
+            if py:
+                out = str(py[0])
+        except Exception:  # noqa: BLE001 —— 没装/异常一律退回字面
+            out = ch
+        cls._PY_CACHE[ch] = out
+        return out
+
+    @classmethod
+    def _wake_signature(cls, s: str, pinyin: bool) -> tuple[str, ...]:
+        """把一个串变成"听起来是什么"的签名（无调拼音）。
+
+        `pinyin=True`  -> 逐字无调拼音（阿拾 == 阿诗 == 阿石）
+        `pinyin=False` -> 原字符（也就是字面比较）
+        """
+        if not pinyin:
+            return tuple(s)
+        return tuple(cls._wake_char_pinyin(ch) for ch in s)
+
+    # 单字的 (声母, 韵母) 缓存
+    _SYL_CACHE: dict[str, tuple[str, str]] = {}
+
+    @classmethod
+    def _wake_char_syllable(cls, ch: str) -> tuple[str, str]:
+        """一个字的 `(声母, 韵母)`。没有 pypinyin 时返回 `("", 字本身)`。
+
+        ⚠️ 退化用 `("", ch)` 而不是原样返回，是为了让**匹配逻辑只有一套**：
+        退化后"韵母"就是那个字本身、声母恒为空，比较结果等价于字面比较。
+        上层完全不用判断"有没有 pypinyin"。
+        """
+        cached = cls._SYL_CACHE.get(ch)
+        if cached is not None:
+            return cached
+        out: tuple[str, str] = ("", ch)
+        try:
+            from pypinyin import Style, lazy_pinyin
+
+            ini = lazy_pinyin(ch, style=Style.INITIALS, strict=False)
+            fin = lazy_pinyin(ch, style=Style.FINALS, strict=False)
+            if ini and fin:
+                out = (str(ini[0]), str(fin[0]))
+        except Exception:  # noqa: BLE001
+            out = ("", ch)
+        cls._SYL_CACHE[ch] = out
+        return out
+
+    # 舌尖擦音/塞擦音声母：ASR 对它们的混淆率高得离谱，**视作同一类**。
+    #
+    # ## 为什么必须这样（2026-10-30 真机实测，逐个字被听错）
+    #
+    # 用户说的始终是「阿拾」(a shí)，ASR 先后输出过：
+    #
+    #     阿诗(shi) / 阿石(shi) / 阿时(shi) / 阿十(shi)   ← 拼音相同，已覆盖
+    #     八十(ba shi)                                  ← 零声母前多辅音
+    #     阿蛇(a she)                                   ← 舌尖元音 i/e
+    #     阿辞(a ci)                                    ← 声母 sh -> c
+    #
+    # `zh/ch/sh/r/z/c/s` 同属舌尖音区，`sh` 与 `c` 只差舌尖位置，
+    # 在短促、带噪的语音里本来就极易互换 —— 不做这一类归并，
+    # 唤醒词会被无穷无尽的同音变体打败。
+    #
+    # ## 边界（为什么不会放得太宽）
+    #
+    # 只归并**这一组之间**，而且**韵母仍须相同**：
+    #
+    #     阿辞(a ci)  vs 阿拾(a shi)  -> 韵母 i==i，声母同类   ✅ 命中
+    #     阿西(a xi)  vs 阿拾(a shi)  -> x 不在这一组        ❌ 不命中
+    #     阿彩(a cai) vs 阿拾(a shi)  -> 韵母 ai≠i           ❌ 不命中
+    _SIBILANT_INITIALS = frozenset({"zh", "ch", "sh", "r", "z", "c", "s"})
+
+    @classmethod
+    def _syllable_is_same(cls, a: tuple[str, str], b: tuple[str, str], loose: bool) -> bool:
+        """两个字的音节是否算"同一个音"。
+
+        ## 规则
+
+        · **韵母必须完全相同** —— 这一条挡掉绝大部分误匹配
+        · 声母相同 -> 命中
+        · 一侧是**零声母**、另一侧有辅音 -> 也算命中（`loose` 时）
+
+        ## 为什么需要"零声母容错"（2026-10-30 实测）
+
+        用户说「阿拾」，ASR 实际输出成「**八十**」：
+
+            阿拾 -> 声母 ['', 'sh']   韵母 ['a', 'i']
+            八十 -> 声母 ['b', 'sh']  韵母 ['a', 'i']    ← 只多了个 b
+
+        零声母音节（阿/啊/诶）前面常被插入一个浊化起音（b/d/g），
+        ASR 就把它听成一个有意义的汉字。不宽容这一档，唤醒词永远命中不了。
+
+        ## 为什么不干脆放宽到"错一个音节"
+
+        实测反例（都必须仍然不命中）：
+
+            巴西 -> 声母 ['b','x']   韵母 ['a','i']    第二音节声母 x≠sh  ✗
+            打死 -> 声母 ['d','s']   韵母 ['a','i']    第二音节声母 s≠sh  ✗
+            小时 -> 声母 ['x','sh']  韵母 ['iao','i']  第一音节韵母不同   ✗
+
+        「韵母全等」这一条就足够挡掉它们。
+        """
+        ia, fa = a
+        ib, fb = b
+        if fa != fb:
+            # 🔴 舌尖元音 i ≈ e（2026-10-30 真机实测）
+            #
+            # 用户说「阿拾」，ASR 又一次听成「**阿蛇**」：
+            #
+            #     阿拾 -> 声母 ['', 'sh']   韵母 ['a', 'i']
+            #     阿蛇 -> 声母 ['', 'sh']   韵母 ['a', 'e']
+            #
+            # 语言学上这是**有依据**的混淆：`zhi/chi/shi/ri/zi/ci/si` 里的
+            # `i` 不是普通的 [i]，而是**舌尖元音 [ɨ]**，听感上非常接近 [ɤ]（e）。
+            # 所以只在**声母相同且是舌尖音**时，才允许 i 与 e 互换。
+            #
+            # ⚠️ 不能无条件把 i 和 e 当同一个 —— 那样 `是`(shi) 会和 `社`(she)
+            #    混淆到所有含这两个字的词上，误触面太大。
+            if (
+                ia == ib
+                and {fa, fb} == {"i", "e"}
+                and ia in ("zh", "ch", "sh", "r", "z", "c", "s")
+            ):
+                return True
+            return False
+        if ia == ib:
             return True
-        if len(a) != len(b):
+        if not loose:
             return False
-        diff = [i for i in range(len(a)) if a[i] != b[i]]
-        if len(diff) != 1:
-            return False
-        # 只对**双字及以上**的词做容错：单字词容忍一个字 = 全放行
-        if len(a) < 2:
-            return False
-        return True
+        # 舌尖音同组（sh/c/s/zh/ch/z/r）视作等价：韵母已经相同了，
+        # 只差舌尖位置 —— 这是 ASR 最常见的混淆（实测 sh -> c）。
+        if ia in cls._SIBILANT_INITIALS and ib in cls._SIBILANT_INITIALS:
+            return True
+        # 只放行"一侧零声母"：`''` 与 `b` 等价，但 `x` 与 `sh` 不等价
+        return ia == "" or ib == ""
+
+    def _locate_wake(self, norm: str, word: str) -> Optional[tuple[int, int]]:
+        """在**已归一化**的串里定位一个唤醒词，返回 `(起点, 长度)` 或 None。
+
+        ⚠️ 这是匹配与剥离的**唯一实现** —— 两边共用，避免"匹配上了但
+        剥离失败、唤醒词被留进正文"这种分叉（这个项目踩过同类坑）。
+        """
+        wnorm = self._normalize_for_wake(word)
+        if not wnorm:
+            return None
+        need_prefix = bool(getattr(self.voice_config, "wake_require_prefix", False))
+
+        # ① 字面
+        pos = norm.find(wnorm)
+        if pos >= 0 and (not need_prefix or pos == 0):
+            return (pos, len(wnorm))
+
+        # ② 拼音（含零声母容错）
+        if not bool(getattr(self.voice_config, "wake_pinyin", True)):
+            return None
+        n = len(wnorm)
+        if len(norm) < n:
+            return None
+        loose = bool(getattr(self.voice_config, "wake_initial_tolerance", True))
+        target = [self._wake_char_syllable(ch) for ch in wnorm]
+        for i in range(0, len(norm) - n + 1):
+            if need_prefix and i != 0:
+                break  # 只允许句首，后面不用看了
+            window = norm[i : i + n]
+            relaxed = 0
+            ok = True
+            for k in range(n):
+                want_syl = target[k]
+                got_syl = self._wake_char_syllable(window[k])
+                if got_syl == want_syl:
+                    continue
+                if not self._syllable_is_same(want_syl, got_syl, loose):
+                    ok = False
+                    break
+                relaxed += 1
+            # 🔴 **最多一个音节放宽**（2026-10-30）
+            #
+            # 每条放宽规则单独看都有语言学依据，但它们**会相乘**：
+            #
+            #     阿拾 = ('' , a) + (sh, i)
+            #     打死 = (d  , a) + (s , i)
+            #              ^ 零声母容错   ^ 舌尖音同组
+            #
+            # 两处同时放宽就让「打死你」命中了唤醒词 —— 这种词出现的频率
+            # 远高于唤醒词，等于把误触面放大了一个量级。
+            #
+            # 限制成"整词最多一处放宽"后：八十（零声母）、阿辞（舌尖音）、
+            # 阿蛇（i/e）各自都只有一处，全部保留；「打死」两处，被拒。
+            if ok and relaxed <= 1:
+                return (i, n)
+        return None
 
     def _strip_wake_word(self, text: str, word: str) -> str:
         """把唤醒词从文本里剥掉，返回剩下的内容。
@@ -1245,42 +1867,45 @@ class VoiceSession:
 
         ## 做法
 
-        找到（模糊）命中的位置，**按长度切掉**，再清掉两头的标点空格。
+        找到命中的位置，**按字符数切掉**，再清掉两头的标点空格。
 
-        ⚠️ 用长度切而不是字符串替换：命中的可能是同音字（"阿十"），
-           `str.replace("阿拾", "")` 替换不到。
+        ⚠️ 用下标切而不是 `str.replace`：命中的是同音字（「阿诗」），
+           `replace("阿拾", "")` 根本替换不到 —— 剥完唤醒词还在。
         """
-        norm_index = self._find_wake_span(text, word)
-        if norm_index is None:
-            return text.strip()
-        start, end = norm_index
-        return text[:start].strip(" ，,。.!！?？、~～") + text[end:].strip(" ，,。.!！?？、~～")
+        norm, positions = self._norm_with_positions(text)
+        hit = self._locate_wake(norm, word)
+        if hit is None:
+            return text.strip(" ，,。.!！?？、~～")
+        start_n, length = hit
+        start = positions[start_n]
+        end = positions[start_n + length - 1] + 1
+        return text[:start].strip(" ，,。.!！?？、~～") + text[end:].strip(
+            " ，,。.!！?？、~～"
+        )
 
-    def _find_wake_span(self, text: str, word: str) -> Optional[tuple[int, int]]:
-        """在**原始文本**里定位唤醒词的起止下标（跳过标点后的坐标）。
+    @staticmethod
+    def _norm_with_positions(text: str) -> tuple[str, list[int]]:
+        """归一化文本，同时记录"归一化后的每个字符对应原文的哪个下标"。
 
-        ⚠️ 这里要重新走一遍原始串：`_match_wake_word` 是在去标点的串上比的，
-        下标对不上原文，必须映射回来。
+        ⚠️ 必须有它：匹配在**去标点**的串上做，而下标要用来切**原文** ——
+        两者差着标点，直接拿匹配下标去切原文会错位。
         """
-        # 建映射：去标点后的每个字符 -> 原文下标
         positions: list[int] = []
-        for i, ch in enumerate(text):
+        chars: list[str] = []
+        for i, ch in enumerate(str(text)):
             if ch.isalnum() or "\u4e00" <= ch <= "\u9fff":
                 positions.append(i)
-        norm = self._normalize_for_wake(text)
-        wnorm = self._normalize_for_wake(word)
-        if not norm or not wnorm:
+                chars.append(ch.lower())
+        return "".join(chars), positions
+
+    def _find_wake_span(self, text: str, word: str) -> Optional[tuple[int, int]]:
+        """在**原始文本**里定位唤醒词的起止下标。保留给测试/调试用。"""
+        norm, positions = self._norm_with_positions(text)
+        hit = self._locate_wake(norm, word)
+        if hit is None:
             return None
-        n = len(wnorm)
-        for i in range(0, len(norm) - n + 1):
-            window = norm[i : i + n]
-            if window == wnorm or self._same_sound(wnorm, window):
-                if getattr(self.voice_config, "wake_require_prefix", False) and i != 0:
-                    continue
-                start = positions[i]
-                end = positions[i + n - 1] + 1
-                return (start, end)
-        return None
+        start_n, length = hit
+        return (positions[start_n], positions[start_n + length - 1] + 1)
 
     async def set_enabled(self, enabled: bool) -> None:
         self.voice_config.enabled = enabled
@@ -1325,6 +1950,13 @@ class VoiceSession:
             words = tuple(str(w).strip() for w in raw_words if str(w).strip())
         else:
             words = ()
+        raw_aliases = ptt.get("wake_aliases")
+        if isinstance(raw_aliases, str):
+            aliases: tuple[str, ...] = (raw_aliases.strip(),) if raw_aliases.strip() else ()
+        elif isinstance(raw_aliases, (list, tuple)):
+            aliases = tuple(str(w).strip() for w in raw_aliases if str(w).strip())
+        else:
+            aliases = ()
         mode = str(ptt.get("trigger_mode") or "key").strip().lower()
         if mode not in ("key", "wake"):
             mode = "key"
@@ -1336,6 +1968,9 @@ class VoiceSession:
             trigger_mode=mode,
             wake_words=words,
             wake_require_prefix=bool(ptt.get("wake_require_prefix", False)),
+            wake_pinyin=bool(ptt.get("wake_pinyin", True)),
+            wake_initial_tolerance=bool(ptt.get("wake_initial_tolerance", True)),
+            wake_aliases=aliases,
         )
 
     def attach(self) -> None:
@@ -1557,12 +2192,13 @@ class VoiceSession:
                 self._last_level_log = now_d
                 log.info(
                     "采集电平：energy=%.5f threshold=%.5f %s | zcr=%.3f 噪声底=%.5f | "
-                    "语音态=%s 门态=%s 已攒语音=%dms 丢弃=%d",
+                    "prob=%.3f | 语音态=%s 门态=%s 已攒语音=%dms 丢弃=%d",
                     vad.energy,
                     self.vad.threshold(),
                     "语音" if vad.is_speech else "静音",
                     vad.zcr,
                     self.vad.noise_floor,
+                    vad.prob,
                     self.state.value,
                     self.endpointer.state.value,
                     self.endpointer._speech_ms,
@@ -1599,6 +2235,24 @@ class VoiceSession:
                 # 还没攒够连续的语音帧：这一帧丢弃，不喂端点
                 # （避免宠物的声音被误当成用户开口）
                 return None
+
+        # 🔴 唤醒词模式：宠物自己在说话时**一律不喂端点**（2026-10-30）
+        #
+        # ## 为什么（这是唤醒词模式特有的风险）
+        #
+        # 唤醒词模式下麦克风**常开**，而宠物用外放说话 —— 它自己的声音会被
+        # 麦克风收回来。如果它的回复里正好包含唤醒词（或者只是被 ASR 幻听成
+        # 唤醒词），就会**自己触发自己**，形成自激循环。
+        #
+        # `allow_barge_in=False` 时原来会**直接落到下面的"正常端点检测"**，
+        # 把宠物自己的声音攒进端点；等它说完，这段就被送去识别 ——
+        # 识别出来的正是宠物自己刚说的话。
+        #
+        # ⚠️ 放置位置很关键：必须在 barge-in 之后。
+        #    开着 barge-in 时，打断成功那一帧已经把 `_pet_speaking` 置 False，
+        #    用户那句话的开头不会被这里丢掉。
+        if self._pet_speaking and getattr(self.voice_config, "trigger_mode", "key") == "wake":
+            return None
 
         # ---- 正常端点检测 ----
         #
@@ -1851,6 +2505,27 @@ class VoiceSession:
         所以：**状态设置要幂等**（下面用 `_ptt_mode` 判断该不该改），
         而不是靠早退跳过。
         """
+        # 🔴 唤醒词模式**必须绕过闸门**（2026-10-30）
+        #
+        # ## 这个 bug 的形态
+        #
+        # 前端看到 `push_to_talk.enabled: true` 就把闸门关着（等按键打开）——
+        # 那是"按住说话"的设计。而唤醒词模式**恰恰需要一直听**。
+        #
+        # 结果：用户切到唤醒词模式后，麦克风虽然开着，但闸门关着，
+        # **一个字节都不处理** -> 日志里连"采集电平"都没有 -> 说唤醒词没反应。
+        #
+        # ## 修法
+        #
+        # `wake` 模式下**强制开闸**，忽略前端传来的 `enabled`。
+        # 日志要写明是被模式覆盖的，否则用户看到"闸门关着"会以为坏了。
+        if getattr(self.voice_config, "trigger_mode", "key") == "wake":
+            if not enabled:
+                log.info(
+                    "唤醒词模式：忽略「关闭闸门」请求 —— 该模式必须一直听"
+                    "（按住的语义在这里不适用）"
+                )
+            enabled = True
         self._capture_enabled = enabled
         """
         ## ⚠️ 这里**必须留一条 INFO 日志**（2026-10-10 加）
@@ -1902,8 +2577,45 @@ class VoiceSession:
             "松手"这个信号，只能靠静音。所以这里改的是**实例级**的端点配置，
             而不是全局默认值。
             """
-            self._ptt_mode = True
-            self.endpointer.config.end_silence_ms = 10**9
+            #
+            # 🔴 但**唤醒词模式绝不能用 PTT 语义**（2026-10-30 实测踩到）
+            #
+            # 唤醒词模式确实是"一直听"，但它是靠**静音断句**切句的 ——
+            # 那里没有"松手"这个信号。如果把 `end_silence_ms` 设成无穷大，
+            # 端点永远不收尾，音频会一直攒：
+            #
+            #     `已攒语音=17920ms` 一直在涨，从不触发识别
+            #
+            # 而且唤醒词模式下前端**只会发 `start`、永远不发 `end`**
+            # （闸门一直开着），所以连 `force_end()` 那条收尾路径都不会走 ——
+            # 那句话**永远结束不了**。
+            #
+            # 表现就是"说了唤醒词完全没反应"，而且日志里看不出错 ——
+            # 只有那句 `已攒语音=` 在涨。所以这里必须区分。
+            if getattr(self.voice_config, "trigger_mode", "key") == "wake":
+                self._ptt_mode = False
+                self.endpointer.config.end_silence_ms = self._silence_ms_default
+                # 🔴 唤醒词模式**必须用短窗口**（2026-10-30 实测踩到）
+                #
+                # 实测环境里麦克风一直收到**连续的人声类音频**（游戏/视频里的
+                # 对白），VAD 永远判"语音"，静音断句一次都不触发 —— 只能靠
+                # 30 秒保险丝断句。于是日志里全是：
+                #
+                #     语音识别（30.00s，耗时 9266ms）：如果有关记录的部分的话除外…
+                #     唤醒词未命中，忽略：如果有关记录的部分的话除外…
+                #
+                # 用户说一句「阿拾」，最多要等 **30 秒 + 9 秒识别** 才有反应。
+                #
+                # 改成 6 秒：最坏等待 6 秒 + 识别，平均 3 秒多。
+                # ⚠️ 不能再短：窗口太短会把「阿拾，今天天气怎么样」切成两半，
+                #    反而识别不到完整句子。
+                self.endpointer.config.max_utterance_ms = 6_000
+            else:
+                self._ptt_mode = True
+                self.endpointer.config.end_silence_ms = 10**9
+                self.endpointer.config.max_utterance_ms = getattr(
+                    self, "_max_utterance_ms_default", 30_000
+                )
         else:
             # 关闸门时恢复静音断句（免提模式要用）
             if self._ptt_mode:
@@ -2103,9 +2815,16 @@ class VoiceSession:
             text = self._strip_wake_word(text, matched)
             log.info("唤醒词命中「%s」-> 实际内容：%s", matched, text[:40] or "（空）")
             if not text.strip():
-                # 只说了唤醒词、没说内容 -> 当作"叫它一声"，回一句短的
-                log.info("只说了唤醒词，没有正文 —— 当作打招呼")
-                text = ""
+                # 只说了唤醒词、没说内容 -> 当作"叫它一声"
+                #
+                # ⚠️ 这里**不能**留空串：`Gateway._on_user_voice` 开头就是
+                #    `if not text: return` —— 空文本会被**静默丢弃**，
+                #    用户喊了一声唤醒词却什么都没发生（看起来像坏了）。
+                #
+                # 传原话（含唤醒词）下去：大脑收到这句话，会自然地
+                # 回应"诶？"/"叫我吗" —— 这正是"被叫了一声"该有的反应。
+                log.info("只说了唤醒词，没有正文 —— 当作打招呼，把原话传下去")
+                text = transcript.text
 
         await self.bus.publish(
             "user.voice",

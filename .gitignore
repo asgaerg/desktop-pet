@@ -103,3 +103,18 @@ build/installer-screen.png
 # install / unpack x2），只有 unpack 那个被下面这条覆盖。另外四种以前会被 git status 报成未跟踪。
 # 统一按前缀忽略 —— 它们在仓库根**不可能**是项目内容。
 pip-*-*/
+
+# ---------------------------------------------------------------------------
+# 🔴 代码签名私钥 —— **绝不能进 git**（2026-10-30）
+#
+# uild/signing/desktoppet-selfsigned.pfx 带**私钥**（密码在
+# tools/make-signing-cert.py 里）。进了公开仓库等于把以这个身份签名
+# 的能力送给所有人 —— 别人可以签一个带恶意代码的 DesktopPet，
+# 而 Windows 会显示是你签的。
+#
+# 保留的是生成脚本（tools/make-signing-cert.py）和流程文档，
+# 证书本身由使用者自己 create 出来。
+# ---------------------------------------------------------------------------
+build/signing/
+*.pfx
+*.p12
