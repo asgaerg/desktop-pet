@@ -9467,6 +9467,81 @@ def test_reading(suite: "Suite") -> None:
 
         return "回调给完整正文；文件头/章节标记/下载时间都已清掉"
 
+    @suite.check("起点按内容判断：正文照读、版权页/空章跳过、重复去重")
+    def _() -> str:
+        """守住用户 2026-11-02 报的「天官赐邪的前面2章消失了」。
+
+        ## 那个 bug
+
+        旧代码两处都是：
+
+            idx = done if done >= 2 else 2      # 前两章常是版权页
+
+        **无条件**跳过前两章。规则来自新笔趣阁（它第 1 章叫「版权信息」），
+        却被当成所有书源的通用规则。
+
+        实测翻车：思兔阅读《天官赐邪》第 1、2 章是正常正文
+        （2599 / 2323 字，评分 237 / 213），被一起跳掉。而那是故事开头
+        （主角第一次进福地、遇到第一个邪祟），跳过等于从第三章中间开始看。
+
+        ## 但也不能一律不跳
+
+        新笔趣阁《诡秘之主》的目录前三条是：
+
+            [0] 新书已发        0 字      <- 空占位
+            [1] 开始阅读     2493 字      <- 和下面内容一样
+            [2] 第一章 绯红   2493 字      <- 正文
+
+        所以判据要**按内容**：空章/版权页跳，重复条目去重，正文照读。
+
+        这条测试直接调 `_looks_like_front_matter`（纯函数，不联网）。
+        """
+        from .reading import _looks_like_front_matter
+
+        novel = "狂风呼啸。骤雨倾盆。" * 20      # 像正文
+        copyright_text = "版权所有 侵权必究"       # 太短，不像正文
+
+        # ① 正常正文 -> 不跳（这是天官赐邪那两章的情况）
+        _assert(
+            not _looks_like_front_matter("第1章 洞天福地", novel),
+            "正常正文被误判成版权页 —— 就是「前2章消失」那个 bug",
+        )
+        _assert(
+            not _looks_like_front_matter("第2章 红衣吊祟", novel),
+            "第2章也该照读",
+        )
+
+        # ② 空章 -> 跳（新笔趣阁的「新书已发」）
+        _assert(
+            _looks_like_front_matter("新书已发", ""),
+            "空章节必须跳过（否则会落盘一个只有标题的空章）",
+        )
+        _assert(
+            _looks_like_front_matter("新书已发", "   \n\n  "),
+            "全是空白的章节也要跳过",
+        )
+
+        # ③ 版权页 -> 跳
+        _assert(
+            _looks_like_front_matter("版权信息", copyright_text),
+            "版权页必须跳过",
+        )
+
+        # ④ 楔子/序章一律当正文（很多小说把关键伏笔放这里）
+        for good in ("楔子", "序章", "引子", "前言"):
+            _assert(
+                not _looks_like_front_matter(good, "夜很深了，他站在门口。"),
+                f"「{good}」必须当正文，不能跳过",
+            )
+
+        # ⑤ 标题像版权页但内容够长 -> 不跳（宁可多读，别漏正文）
+        _assert(
+            not _looks_like_front_matter("关于本书", novel),
+            "标题可疑但内容是正文时，应当照读（宁可多读也别漏）",
+        )
+
+        return "正文照读；空章/版权页跳过；楔子序章放行"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(
