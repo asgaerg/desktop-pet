@@ -9869,6 +9869,146 @@ def test_reading(suite: "Suite") -> None:
 
         return "目录/区间/截断/越界都正确；只读本地不联网；章号不连续也能处理"
 
+    @suite.check("模块：联网搜索开关真的能关掉联网（不是假开关）")
+    def _() -> str:
+        """用户问：「联网搜索小黑盒杂谈使用的是联网搜索模块吗」，
+        查下来发现**两处假开关**（2026-11-02 修）。
+
+        ## 假开关 ①：两个模块注册表实例
+
+        `Gateway.modules` 和 `Conversation._module_registry` 是两个独立对象。
+        设置页切换改的是前者，而 `_web_enabled()` 读的是后者 ——
+        于是"关了还在搜"。实测 `gw.modules is conv._module_registry` 为 False。
+
+        修法：`Conversation.set_module_registry()` 注入同一个实例。
+
+        ## 假开关 ②：关模块没清工具缓存
+
+        工具清单是懒加载缓存。`_web_enabled()` 变了，但 `self._tools`
+        还留着旧的 —— 模型照样能调 `web_search`。
+
+        修法：`name == "search"` 时置空 `conversation._tools`。
+
+        ## 这条测试断言三件事
+
+        ① 注册表是同一个对象
+        ② 关掉后工具清单里**没有** web_search / 阅读工具
+        ③ 开回来能恢复（不能一次关掉就永久没了）
+        """
+        from .config import Config
+        from .gateway import Gateway
+
+        cfg = Config()
+        cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
+        gw = Gateway(cfg)
+        conv = gw.conversation
+
+        # 触发懒建，才能比较
+        _ = conv._web_enabled()
+
+        # ① 同一份注册表
+        _assert(
+            gw.modules is getattr(conv, "_module_registry", None),
+            "Gateway.modules 和 Conversation._module_registry 必须是同一个对象，"
+            "否则设置页切的和实际读的不是一回事（假开关）",
+        )
+
+        # ② 关掉联网 -> 工具清单缩水
+        before = [t.name for t in conv._tool_list()]
+        _assert("web_search" in before, f"默认应当有 web_search，实际 {before}")
+
+        gw.modules.set_enabled("search", False)
+        gw._clear_tool_cache() if hasattr(gw, "_clear_tool_cache") else None
+        conv._tools = None          # 模拟 `_apply_module_change` 的清缓存
+        after = [t.name for t in conv._tool_list()]
+        _assert(
+            "web_search" not in after,
+            f"关掉联网后不该还有 web_search，实际 {after}",
+        )
+        _assert(
+            "read_book" not in after,
+            f"关掉联网后不该还有 read_book（读小说也要联网），实际 {after}",
+        )
+        _assert(
+            "sandbox_read" in after,
+            f"沙箱工具不该受联网开关影响，实际 {after}",
+        )
+
+        # ③ 开回来能恢复
+        gw.modules.set_enabled("search", True)
+        conv._tools = None
+        back = [t.name for t in conv._tool_list()]
+        _assert("web_search" in back, f"开回来应当恢复 web_search，实际 {back}")
+        _assert("read_book" in back, f"开回来应当恢复 read_book，实际 {back}")
+
+        return "同一注册表；关掉真的移除联网工具；开回来能恢复"
+
+    @suite.check("模块：小黑盒杂谈依赖「联网搜索」，小说阅读依赖「小说阅读」")
+    def _() -> str:
+        """两个事件**不是**同一套底层（用户问的就是这个）。
+
+        ```
+        小黑盒杂谈   web_search + web_fetch（联网抓网页）  -> search 模块
+        小说阅读     自己的书源解析（直接抓小说站）        -> reading 模块
+        ```
+
+        但两条都**需要联网**，所以关掉「联网搜索」时两个都该停。
+
+        ## `needs` 不够用的原因
+
+        `community_chat.needs = ("web_search",)` 是**静态能力**
+        （CAPABILITIES 里写死 True），不代表模块开着。它实际会调
+        `tools._web_search`，而那个在模块关着时直接拒绝 ——
+        不补 `module_of` 映射的话：抽中 -> 抢槽 -> 进去发现被拒 -> 白占一个槽。
+        """
+        import random as _random
+        import time as _t
+
+        from .config import Config
+        from .events import EventEngine, get_event
+        from .gateway import Gateway
+
+        cfg = Config()
+        gw = Gateway(cfg)
+        gate = gw.events
+
+        def _ok(kind: str) -> tuple[bool, str]:
+            spec = get_event(kind)
+            return gate.eligible(
+                spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+            )
+
+        # 都开 -> 两个都能抽
+        ok1, w1 = _ok("reading")
+        ok2, w2 = _ok("community_chat")
+        _assert(ok1 and ok2, f"默认两个都该能抽：reading={w1} community={w2}")
+
+        # 关「联网搜索」-> 杂谈必须停（它靠 web_search）
+        gw.modules.set_enabled("search", False)
+        ok3, why3 = _ok("community_chat")
+        _assert(not ok3, "关掉联网搜索后，小黑盒杂谈不该还能抽")
+        _assert(
+            "module_off" in why3,
+            f"原因要说明是模块关着，实际 {why3!r}",
+        )
+
+        # 关「联网搜索」时小说阅读也读不了（内部另有闸门，见 _reading_via_model）
+        _assert(
+            not gw.conversation._web_enabled(),
+            "关掉联网后 _web_enabled 必须为 False（否则自主阅读会绕过闸门）",
+        )
+
+        # 恢复联网、关「小说阅读」-> 杂谈恢复、小说停
+        gw.modules.set_enabled("search", True)
+        gw.modules.set_enabled("reading", False)
+        ok4, _w4 = _ok("community_chat")
+        ok5, why5 = _ok("reading")
+        _assert(ok4, "恢复联网后杂谈应当能抽")
+        _assert(not ok5, "关掉小说阅读后 reading 不该能抽")
+        _assert("module_off" in why5, f"原因要说明模块关着，实际 {why5!r}")
+
+        return "杂谈绑 search、小说绑 reading；关联网时两个都停"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(

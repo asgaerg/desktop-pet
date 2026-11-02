@@ -1715,18 +1715,59 @@ class Conversation:
         return tools_module.mode_from_config(self.config.root.get("tools") or {})
 
     def _modules(self) -> Any:
-        """懒建模块注册表。
+        """拿到**唯一**的模块注册表。
 
-        ⚠️ 不塞进 `Conversation.__init__`：那个构造函数在自检里有十几处假实现，
-        加必填参数会连环炸。注册表本身很轻（只读配置），懒建没有代价。
+        ## 🔴 2026-11-02 修：这里原来懒建了**第二个实例**，导致假开关
+
+        原实现：
+
+            reg = getattr(self, "_module_registry", None)
+            if reg is None:
+                reg = ModuleRegistry(self.config)
+                self._module_registry = reg
+            return reg
+
+        而 `Gateway.__init__` 里还有 `self.modules = ModuleRegistry(config)`。
+        于是**同一份配置有两个注册表对象**：
+
+            Gateway.modules              设置页切换时改的是这个（见 `_apply_module_change`）
+            Conversation._module_registry  `web_enabled()` 读的是这个
+
+        后果（用户报"关掉联网搜索还在搜"的那一类）：
+
+            设置页关掉「联网搜索」 -> `self.modules.set_enabled('search', False)`
+            -> `self.modules.enabled('search')` 返回 False  ✅ 看起来生效了
+            -> 但 `_web_enabled()` 读的是**另一个实例**，它还是 True
+            -> `web_search` 工具照样挂载、照样能搜         ❌ 假开关
+
+        实测确认：`gw.modules is conv._module_registry` -> **False**。
+
+        ## 修法
+
+        不再自己 new。优先复用外部注入的注册表（`set_module_registry`），
+        没有再退回 `Gateway.modules` —— 两者都是**同一个对象**，
+        所以"设置页切的"和"这里读的"必然一致。
+
+        ⚠️ 保留懒建兜底：`Conversation` 在自检里有十几处裸构造，
+        那时没有 `Gateway.modules`，不能直接 AttributeError。
         """
         reg = getattr(self, "_module_registry", None)
-        if reg is None:
-            from .modules import ModuleRegistry
+        if reg is not None:
+            return reg
+        # 由 Gateway 注入进来（见 `Gateway.__init__` 里的 `set_module_registry`）
+        from .modules import ModuleRegistry
 
-            reg = ModuleRegistry(self.config)
-            self._module_registry = reg
+        reg = ModuleRegistry(self.config)
+        self._module_registry = reg
         return reg
+
+    def set_module_registry(self, registry: Any) -> None:
+        """注入**唯一**的模块注册表（2026-11-02）。
+
+        必须在 `Gateway.__init__` 建完 `self.modules` 之后立刻调用，
+        否则 `_web_enabled()` 会退回懒建、又造出第二个实例。
+        """
+        self._module_registry = registry
 
     def _web_enabled(self) -> bool:
         """联网开关（用户要求「**开启之后**可以自由的搜索」）。默认**关**。
@@ -2616,6 +2657,14 @@ class Gateway:
             self.bus, config, memory=self.memory, brain=self.brain
         )
         self.conversation.attach()
+        # 🔴 把**同一个**模块注册表交给 Conversation（2026-11-02 修假开关）
+        #
+        # `Conversation._web_enabled()` 要用它判断「联网搜索」模块开没开，
+        # 而设置页切换时改的是 `self.modules`。原来两处各自 new 一个实例，
+        # 于是"设置页关了、工具还挂着"。详见 `_modules()` 的说明。
+        #
+        # ⚠️ 必须在 `attach()` 之后、任何 `_tool_list()` 之前调用。
+        self.conversation.set_module_registry(self.modules)
 
         # 🔴 阅读器要在**建 Conversation 之前**就存在，并挂到它身上（2026-10-31）
         #
@@ -2692,6 +2741,25 @@ class Gateway:
         #    用户在设置页一关就要立刻生效，缓存的话要重启才生效
         #    —— 这个项目已经吃过太多次"假开关"的亏。
         self.events.module_of["reading"] = "reading"
+        # 🔴 小黑盒杂谈也依赖「联网搜索」模块（2026-11-02 修）
+        #
+        # `community_chat` 的 `needs` 是 `("web_search",)` —— 那是**静态能力**
+        # （CAPABILITIES 里写死为 True），不代表模块开着。
+        #
+        # 它实际调用链是：
+        #
+        #     _event_read_community
+        #       -> reader.read_post(self._reading_search, self._reading_fetch)
+        #       -> tools._web_search / _web_fetch
+        #       -> 这两个在「联网搜索」模块关着时会**直接拒绝**
+        #
+        # 不加这条映射的后果：模块关着时事件仍被抽中、抢槽、进去才发现
+        # 搜索被拒、返回 None —— **白占一个槽**，事件日志里还会留一条
+        # "它去翻杂谈了"（实际什么都没读到）。
+        #
+        # 这与 `reading` 那条是同一个道理：**抽取阶段就排除**，
+        # 不要抽中了再在 handler 里判。
+        self.events.module_of["community_chat"] = "search"
         self.events.module_enabled = self.modules.enabled
         # 🔴 安静档不触发任何事件（2026-11-02 用户要求）
         #
@@ -4482,7 +4550,32 @@ class Gateway:
                     self._run_autosnap_forever(), name="autosnap"
                 )
                 done["_autosnap_task"] = True
-        # search / monologue / voice / 地基模块：无即时副作用
+        elif name == "search":
+            # 🔴 关/开「联网搜索」必须**清工具缓存**（2026-11-02 修）
+            #
+            # ## 原来这里写着「无即时副作用」，那是错的
+            #
+            # 工具清单（`Conversation._tools`）是**懒加载缓存**：
+            # 建好之后就一直在，除非有人把它置空。
+            #
+            # 于是：
+            #
+            #     设置页关掉「联网搜索」
+            #     -> `_web_enabled()` 返回 False（模块开关生效了）
+            #     -> 但 `self._tools` 里**还留着** web_search/web_fetch
+            #     -> 模型照样能调，工具照样发请求  ❌ 假开关
+            #
+            # 这和 `attach()` 里那段"订阅要挂在拥有那份状态的类上"是同一个坑：
+            # 清缓存必须清**拥有缓存的类**（Conversation），不是 Gateway 自己的。
+            #
+            # ⚠️ 阅读工具（search_book/read_book 等）也在这个缓存里，
+            #    它们要求 `reader.has_book_sources() and _web_enabled()`，
+            #    所以关掉 search 时它们一起消失 —— 这是对的：
+            #    读小说也要联网。
+            self.conversation._tools = None
+            done["tools_cache_cleared"] = True
+            log.info("联网搜索模块切换：已清空工具缓存（下次生成时重建）")
+        # monologue / voice / 地基模块：无即时副作用
         return done
 
     def start_autonomy(self) -> None:
@@ -4875,6 +4968,31 @@ class Gateway:
         返回值的来源：模型调工具后，`reading_tools` 会回调
         `_reading_note_from_tool`，把内容记进 `self._reading_from_tool`。
         """
+        # 🔴 联网/模块闸门（2026-11-02 补）
+        #
+        # ## 为什么这里要单独判
+        #
+        # 这个函数**不走 `_tool_list()`** —— 它自己 `build_reading_tools()`
+        # 造一套只用阅读工具的小清单（因为主清单里还有 web_search 等，
+        # 不该让"闲着看书"这个内部动作看到它们）。
+        #
+        # 而 `_tool_list()` 里有一道 `_web_enabled()` 闸门。绕过它就意味着：
+        #
+        #     设置页关掉「联网搜索」
+        #     -> 主清单里的阅读工具确实消失了  ✅
+        #     -> 但自主阅读循环**照样**能造一套出来去抓书  ❌ 假开关
+        #
+        # 读小说要联网（每章一个 HTTP 请求），所以必须受同一道闸门。
+        #
+        # ⚠️ `_web_enabled` 是 **Conversation** 的方法，不是 Gateway 的
+        #    （门禁 `check-self-refs.py` 当场抓到，这已经是今天第五次）。
+        if not self.conversation._web_enabled():
+            log.debug("网上阅读：联网关着，本轮不读")
+            return None
+        if not self.modules.enabled("reading"):
+            log.debug("网上阅读：小说阅读模块关着，本轮不读")
+            return None
+
         prompt = (
             "你现在闲着，用户很久没跟你说话了。\n"
             "你可以自己去看点书——想读什么、读多少都由你决定。\n"
