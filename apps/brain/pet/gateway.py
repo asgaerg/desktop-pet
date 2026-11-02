@@ -4869,7 +4869,20 @@ class Gateway:
                         reading_only,
                         str(call.get("name") or ""),
                         str(call.get("arguments") or ""),
-                        None,   # ⚠️ 不传 bus：内部动作不该在状态条上显示"搜索中"
+                        # 🔴 必须传 bus（2026-11-02 改）。
+                        #
+                        # 原来这里写的是 `None`，理由是「内部动作不该在
+                        # 状态条上显示搜索中」。但用户明确要求：
+                        #
+                        #   「状态栏要能在宠物自己搜书看的时候显示看书中，
+                        #     这样我就知道她去看书了而不是发呆」
+                        #
+                        # 不传 bus 就**一个事件都不发**，状态条永远停在
+                        # 「空闲」—— 用户看到的正是"她在发呆"。
+                        #
+                        # 现在主进程按 tool 名分流到 `reading` 档（橙色
+                        # 「看书中」），不会误显示成「联网搜索中」。
+                        self.bus,
                     )
                     results.append(
                         ToolExchange(

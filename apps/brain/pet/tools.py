@@ -1184,8 +1184,23 @@ def schemas(tools: list[Tool]) -> list[dict[str, Any]]:
 
 这也和"只报外部可见的操作"是同一条原则：状态条该反映
 **用户能感知到的等待**，而不是内部实现细节。
+
+## 🔴 2026-11-02 加 `read_book` / `search_book`
+
+用户原话：「状态栏要能在宠物自己搜书看的时候显示看书中，
+这样我就知道她去看书了而不是发呆」。
+
+阅读比搜索**慢得多**（每章一个 HTTP 请求，读 5 章约 10 秒，
+50 章要几分钟）—— 恰恰是最需要让用户看到"它在忙"的那一类。
+不加的话用户看到的是「空闲」，以为它发呆去了。
+
+⚠️ 但它们**不该显示成"联网搜索中"**：那个词是"查一下就回来"的语义，
+而读书要几十秒。所以主进程那边按 `tool` 名分流到 `reading` 档
+（见 `refreshActivityStatus`），不是简单复用 `searching`。
 """
-REMOTE_TOOLS = frozenset({"web_search", "web_fetch", "bilibili_search"})
+REMOTE_TOOLS = frozenset(
+    {"web_search", "web_fetch", "bilibili_search", "read_book", "search_book"}
+)
 
 
 def _tool_detail(name: str, args: dict[str, Any]) -> str:
@@ -1200,6 +1215,13 @@ def _tool_detail(name: str, args: dict[str, Any]) -> str:
         url = str(args.get("url") or "")
         # 去掉协议头，省地方
         return url.replace("https://", "").replace("http://", "")[:28]
+    # 阅读工具：书名 + 读几章（2026-11-02）
+    if name in ("read_book", "search_book"):
+        title = str(args.get("title") or "")[:20]
+        n = args.get("chapters")
+        if name == "read_book" and n is not None:
+            return f"{title} {n}章"[:28]
+        return title[:28]
     return ""
 
 

@@ -229,6 +229,29 @@ body {
   animation: pulse 1.1s ease-in-out infinite;
 }
 
+/*
+ * 📖 看书中（2026-11-02 加，用户要求）。
+ *
+ * > 「状态栏要能在宠物自己搜书看的时候显示看书中，
+ * >   这样我就知道她去看书了而不是发呆」
+ *
+ * 暖橙色，和现有四档都能区分：
+ *   绿 空闲 / 蓝 搜索 / 紫 思考 / 青 说话 / 红 异常 / **橙 看书**
+ *
+ * 呼吸动画：读一本书要几十秒（每章一个请求），
+ * **动的灯**才像"在忙"，静止的灯看起来就是卡住了。
+ *
+ * ⚠️ 不用搜索那个蓝（#2f86ed）：用户要能一眼分出
+ * "它在查资料"（几秒）和"它在看小说"（几十秒）。
+ */
+.light[data-state='reading'] {
+  background: #f5a623;
+  box-shadow:
+    0 0 3px 1px rgba(245, 166, 35, 0.9),
+    0 0 11px 4px rgba(245, 166, 35, 0.5);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
 .light[data-state='error'] {
   background: #e5484d;
   box-shadow:

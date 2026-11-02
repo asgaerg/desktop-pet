@@ -2473,11 +2473,24 @@ function connectSocket(port: number, brain: string): void {
        */
       if (phase === 'start') {
         searchDepth += 1;
-        const verb = tool === 'web_fetch' ? '读网页' : '搜索';
+        // 📖 阅读单独计数（2026-11-02）：慢得多，要显示成「看书中」而不是
+        // 「联网搜索中」。两者可能同时进行，靠两个计数 + 优先级算（见 refreshActivityStatus）。
+        if (tool === 'read_book' || tool === 'search_book') readingDepth += 1;
+        const verb =
+          tool === 'web_fetch'
+            ? '读网页'
+            : tool === 'read_book' || tool === 'search_book'
+              ? '看书'
+              : '搜索';
         refreshActivityStatus();
         log(`[工具] ${verb}开始：${detail || tool}（进行中 ${searchDepth} 个）`);
       } else if (phase === 'end') {
         searchDepth = Math.max(0, searchDepth - 1);
+        // ⚠️ 也要夹到 0：end 可能比 start 多（sidecar 重启后残留计数），
+        //    负数的 readingDepth 会让 `> 0` 判断失效，状态条永远不显示看书。
+        if (tool === 'read_book' || tool === 'search_book') {
+          readingDepth = Math.max(0, readingDepth - 1);
+        }
         refreshActivityStatus();
         log(`[工具] ${tool} 结束（剩余 ${searchDepth} 个）`);
       }
@@ -7978,6 +7991,12 @@ app.on('web-contents-created', (_event, contents) => {
  */
 function statusKindFor(text: string): { kind: StatusKind; label: string } {
   if (/失败|错误|异常|不匹配/.test(text)) return { kind: 'error', label: '异常' };
+  // 📖 看书（2026-11-02 加）。
+  //
+  // ⚠️ 这条必须**排在「搜索」前面**：阅读工具的描述里带"搜索"字样
+  //    （`search_book`），而且 `_tool_detail` 给出的书名里也可能含
+  //    "搜索"。放在后面会被 `/搜索/` 抢先匹配成「联网搜索中」。
+  if (/看书|阅读/.test(text)) return { kind: 'reading', label: '看书中' };
   // 🔴 2026-10-16 用户指定：状态条文字用全称（原来是 2 字词「搜索/准备」）
   if (/搜索|读网页/.test(text)) return { kind: 'searching', label: '联网搜索中' };
   // 🔴 2026-10-16：「思考」原来被归进 speaking —— 生成回复时状态条显示
@@ -8066,10 +8085,29 @@ function setStatus(text: string): void {
 let turnThinking = false;
 /** 并发工具计数（pet.tool start/end 配对） */
 let searchDepth = 0;
+/**
+ * 其中属于**阅读**的并发数（2026-11-02 加）。
+ *
+ * ## 为什么要单独计数，而不是只看"有没有 read_book"
+ *
+ * `pet.tool` 是 start/end 配对的计数制，可能**同时**有搜索和阅读在跑
+ * （模型一轮里发两个工具调用）。如果只记一个布尔"在读"，那么：
+ *
+ *   read_book start -> 标记"在读"
+ *   web_search start -> 还是"在读"（错，应该是搜索）
+ *   web_search end   -> ?
+ *   read_book end    -> 清标记
+ *
+ * 用两个计数就能算出优先级：**阅读优先于搜索**。
+ * 理由：阅读慢得多（几十秒 vs 几秒），用户更需要看到它；
+ * 而且搜索往往是阅读的前置动作（先搜书再读），
+ * 搜完了继续读，状态条不该从"看书中"跳回"搜索中"再跳回来。
+ */
+let readingDepth = 0;
 let lastActivityAt = 0;
 let activityWatchdog: NodeJS.Timeout | null = null;
 /** 上一次刷新算出的档位 —— 只用来打迁移日志，不参与判断 */
-let lastActivityKind: 'thinking' | 'searching' | 'idle' = 'idle';
+let lastActivityKind: 'thinking' | 'searching' | 'reading' | 'idle' = 'idle';
 /**
  * 语音**真的在播**（2026-10-16 加）。
  *
@@ -8084,6 +8122,7 @@ let voiceSpeaking = false;
 function clearActivityStatus(): void {
   turnThinking = false;
   searchDepth = 0;
+  readingDepth = 0;
   voiceSpeaking = false;
   if (activityWatchdog) {
     clearInterval(activityWatchdog);
@@ -8095,15 +8134,32 @@ function clearActivityStatus(): void {
 
 function refreshActivityStatus(): void {
   lastActivityAt = Date.now();
-  const next: 'thinking' | 'searching' | 'idle' =
-    searchDepth > 0 ? 'searching' : turnThinking ? 'thinking' : 'idle';
+  // ⚠️ 阅读优先于搜索（理由见 readingDepth 的说明）
+  const next: 'thinking' | 'searching' | 'reading' | 'idle' =
+    readingDepth > 0
+      ? 'reading'
+      : searchDepth > 0
+        ? 'searching'
+        : turnThinking
+          ? 'thinking'
+          : 'idle';
 
   if (next !== lastActivityKind) {
     log(`[状态条] ${lastActivityKind} -> ${next}`);
     lastActivityKind = next;
   }
 
-  if (next === 'searching') {
+  if (next === 'reading') {
+    // 📖 看书中（2026-11-02 加，用户要求）
+    //
+    // > 「状态栏要能在宠物自己搜书看的时候显示看书中，
+    // >   这样我就知道她去看书了而不是发呆」
+    //
+    // ⚠️ 托盘也用「看书中」而不是「联网搜索中」：托盘和状态条是
+    //    同一个事实的两个显示面，说法不一致会让人以为是两件事。
+    tray?.setStatus('看书中');
+    statusWindow?.setStatus('reading', '看书中');
+  } else if (next === 'searching') {
     tray?.setStatus('联网搜索中');
     // 🔴 2026-10-16 用户指定：状态条文字用全称「联网搜索中」（原来是 2 字「搜索」）
     statusWindow?.setStatus('searching', '联网搜索中');
@@ -8116,13 +8172,27 @@ function refreshActivityStatus(): void {
   }
   if (!activityWatchdog) {
     activityWatchdog = setInterval(() => {
+      /*
+       * ⚠️ 阅读的兜底时间要**长得多**（2026-11-02）。
+       *
+       * 原来一律 90 秒。但读一本书可能远超 90 秒：
+       * 每章一个 HTTP 请求，读 50 章要好几分钟。
+       *
+       * 如果还用 90 秒，表现是：读第 3 章时状态条突然跳回「在线」，
+       * 而它其实还在读 —— 用户会以为它读完了/放弃了，
+       * 恰恰是这次要修的那个"以为她发呆"的错觉。
+       *
+       * 给 10 分钟：远超正常阅读时长，只在 sidecar 真的崩了
+       * （end 事件永远不来）时才触发。
+       */
+      const budget = readingDepth > 0 ? 600_000 : 90_000;
       if (
         // voiceSpeaking 也在兜底范围：终点信号（onended/时长定时器）全丢时，
         // 最多 90 秒强制回空闲 —— 「说话中」不能永久卡死（2026-10-17）。
-        (turnThinking || searchDepth > 0 || voiceSpeaking) &&
-        Date.now() - lastActivityAt > 90_000
+        (turnThinking || searchDepth > 0 || readingDepth > 0 || voiceSpeaking) &&
+        Date.now() - lastActivityAt > budget
       ) {
-        log('[状态条] 90 秒没有新事件 —— 判定回合已结束（end 事件丢失），回空闲');
+        log(`[状态条] ${budget / 1000} 秒没有新事件 —— 判定回合已结束（end 事件丢失），回空闲`);
         clearActivityStatus();
       }
     }, 15_000);

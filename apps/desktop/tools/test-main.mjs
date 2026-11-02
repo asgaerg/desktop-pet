@@ -6306,8 +6306,57 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
   // 🔴 2026-10-17：onended 有概率不触发（实测），时长定时器兜底
   check('voice-io 有 buffer.duration 时长兜底定时器（与 onended 双保险、幂等）',
     vioSrc.includes('buffer.duration * 1000') && vioSrc.includes('reported'));
+  // ⚠️ 2026-11-02 更新：条件里多了 readingDepth（看书中也要兜底），
+  //    所以不能再用旧的精确字面量匹配 —— 改成"包含全部四项"。
   check('看门狗兜底覆盖说话中（voiceSpeaking）',
-    /turnThinking \|\| searchDepth > 0 \|\| voiceSpeaking/.test(mainSrc));
+    /turnThinking \|\| searchDepth > 0 \|\| readingDepth > 0 \|\| voiceSpeaking/.test(mainSrc));
+
+  /*
+   * 📖 「看书中」状态（2026-11-02 用户要求）
+   *
+   * 用户原话：「状态栏要能在宠物自己搜书看的时候显示看书中，
+   * 这样我就知道她去看书了而不是发呆」。
+   *
+   * ## 这条链有四段，缺任何一段都是"用户看不到"
+   *
+   *   ① Python 侧 `REMOTE_TOOLS` 含 read_book/search_book
+   *      -> 不然 run_tool 一个事件都不发
+   *   ② Python 自主阅读循环传 bus（不是 None）
+   *      -> 不然它自己读书时没有事件
+   *   ③ 主进程按 tool 名分流到 readingDepth，而不是混进 searchDepth
+   *      -> 不然显示成「联网搜索中」（语义是"查一下马上回来"，而读书要几十秒）
+   *   ④ CSS 有 `data-state='reading'` 的配色
+   *      -> 不然灯是默认色，看不出在看书
+   *
+   * 这四段分别在三个文件里 —— 正是本项目那族"两边都写好了、中间没接上"
+   * 最容易漏的地方，所以每一段都单独断言。
+   */
+  check('看书中：状态类型定义了 reading 档',
+    /export type StatusKind[\s\S]{0,600}\|\s*'reading'/.test(
+      readFileSync(path.join(here, '..', 'src', 'main', 'statusWindow.ts'), 'utf-8')));
+  check('看书中：CSS 有 reading 的配色',
+    /\.light\[data-state='reading'\]/.test(
+      readFileSync(path.join(here, '..', 'src', 'renderer', 'status.css'), 'utf-8')));
+  check('看书中：主进程单独计数 readingDepth（不混进 searchDepth）',
+    mainSrc.includes('let readingDepth = 0') &&
+    /tool === 'read_book' \|\| tool === 'search_book'/.test(mainSrc));
+  check('看书中：阅读优先于搜索（readingDepth 在 searchDepth 之前判断）',
+    /readingDepth > 0\s*\?\s*'reading'[\s\S]{0,120}searchDepth > 0\s*\?\s*'searching'/.test(mainSrc));
+  check('看书中：状态条文字是「看书中」',
+    /statusWindow\?\.setStatus\('reading', '看书中'\)/.test(mainSrc));
+  check('看书中：statusKindFor 认识「看书」（且排在搜索前面）',
+    /if \(\/看书\|阅读\/\.test\(text\)\) return \{ kind: 'reading', label: '看书中' \};[\s\S]{0,200}搜索\|读网页/.test(mainSrc));
+  check('看书中：看门狗给阅读更长的预算（不能 90 秒就判超时）',
+    /readingDepth > 0 \? 600_000 : 90_000/.test(mainSrc));
+
+  const pyTools = readFileSync(
+    path.join(here, '..', '..', 'brain', 'pet', 'tools.py'), 'utf-8');
+  check('看书中：Python 的 REMOTE_TOOLS 含阅读工具',
+    /REMOTE_TOOLS = frozenset\([\s\S]{0,160}"read_book"[\s\S]{0,80}"search_book"/.test(pyTools));
+  const pyGw = readFileSync(
+    path.join(here, '..', '..', 'brain', 'pet', 'gateway.py'), 'utf-8');
+  check('看书中：自主阅读循环传了 bus（不是 None）',
+    /run_tool\(\s*reading_only[\s\S]{0,900}?self\.bus,\s*\n\s*\)/.test(pyGw));
 
   /*
    * 🔴 指定麦克风失效时必须回退到系统默认（2026-10-28 真故障）
