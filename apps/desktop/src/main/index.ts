@@ -597,8 +597,19 @@ function forwardToBubble(message: { type?: string }): boolean {
   }
   const decision = decideBubble({
     isTextKind: true, // 走到这里说明 kind 已经匹配上了（上面 !kind 就 return 了）
-    // 模块开关叠加在用户开关之上（AND）：关掉「窗口/气泡」模块 = 气泡一律不弹
-    bubbleVisible: bubbleVisible && moduleEnabled('ui.windows'),
+    /*
+     * ⚠️ 「窗口/气泡」模块 2026-11-02 **已删除**（用户要求）。
+     *
+     * 原来这里是：
+     *
+     *     bubbleVisible: bubbleVisible && moduleEnabled('ui.windows'),
+     *
+     * 用户原话：「模块里面的立绘动画模块、窗口气泡模块去掉」。
+     *
+     * 删掉后气泡只受**用户自己的开关**（`bubbleVisible`）和沉浸模式控制 ——
+     * 不再有一层模块门控。这正是用户要的：少一层开关，少一处"看着关了实际没关"。
+     */
+    bubbleVisible,
     immersiveMode,
     reason: (message as { reason?: string }).reason,
     ttsEnabled,
@@ -4174,20 +4185,38 @@ function themeScript(value: string): string {
  * 还会再来一次。
  */
 /**
- * 模块开关的状态脚本（2026-10-18，模块化阶段三）。
+ * 🔴 「立绘动画」模块 2026-11-02 **已删除**（用户要求）。
  *
- * 只做一件事：把 `modules.sprite.enabled` 变成 `<html data-mod-sprite>`，
- * 由 CSS 决定藏不藏立绘。和主题同一套注入方式 —— 不新增 IPC，也不碰 preload。
+ * 用户原话：「模块里面的立绘动画模块、窗口气泡模块去掉」。
+ *
+ * ## 原来它是怎么工作的
+ *
+ * 把 `modules.sprite.enabled` 变成 `<html data-mod-sprite>`，
+ * 由 `styles.css` 里的 `[data-mod-sprite='0']` 选择器藏掉立绘。
+ *
+ * ## 为什么现在整个删掉而不是留着不管
+ *
+ * 模块表里已经没有 `sprite` 这一项了，`readDeepScalar(...['modules','sprite'])`
+ * 会永远返回默认值 `true` —— 也就是说这段代码**恒等于"什么都不做"**。
+ *
+ * 留着它的坏处是实打实的：以后有人看到 `data-mod-sprite` 会以为
+ * "有个立绘开关"，去设置页找却找不到，然后怀疑是 bug。
+ * 死代码比没有代码更容易误导人。
+ *
+ * 立绘现在**总是显示**，由用户自己的"隐藏宠物"等开关控制。
  */
 function modulesScript(): string {
-  const sprite = readDeepScalar(CONFIG_ROOT, ['modules', 'sprite', 'enabled'], true) !== false;
-  return `document.documentElement.dataset.modSprite='${sprite ? '1' : '0'}';`;
+  // 保留函数（调用点还在，删掉要改三处且没有收益），但不再注入任何东西。
+  // 返回空语句是安全的：executeJavaScript('') 不会报错。
+  return '';
 }
 
-/** 把模块开关刷到一个窗口 */
+/** 把模块开关刷到一个窗口（2026-11-02 起为空操作，见 `modulesScript`） */
 function injectModules(contents: Electron.WebContents): void {
   if (contents.isDestroyed()) return;
-  contents.executeJavaScript(modulesScript()).catch((err: unknown) => {
+  const script = modulesScript();
+  if (!script) return;   // 没有要注入的东西 —— 直接返回，连调用都省了
+  contents.executeJavaScript(script).catch((err: unknown) => {
     // ⚠️ 别静默吞掉：模块开关注入失败的症状是“点了关掉、立绘还在”，
     //    而这种“界面没反应”最难查。留一行日志，至少能看到真因。
     log(
@@ -6640,10 +6669,23 @@ function registerSettingsIpc(): void {
  *   `settings:modules`     查状态（转发给大脑 modules.query）
  *   `settings:set-module`  试切一个（先热切、成功才落盘）
  *
- * 允许热切的只有 5 个：voice / autonomy / monologue / screen / search。
- * 其余是地基或前端模块，界面上置灰 —— 也不在这里接受写入。
+ * ## 🔴 这个白名单必须和 `modules.py` 的 `MODULES` 保持一致
+ *
+ * 后端 `gate: true` 的模块才能热切。白名单少一个的后果是：
+ * 设置页上那个开关**点得动、也不报错**，但主进程直接拒绝写入 ——
+ * 用户看到的是"切了没反应"（又是"假开关"）。
+ *
+ * ⚠️ 2026-11-02：删掉 `sprite` / `ui.windows`（模块本身已删），
+ *    加上 `reading`（小说阅读，用户要求做成模块）。
  */
-const HOT_MODULES = new Set(['voice', 'autonomy', 'monologue', 'screen', 'search', 'sprite', 'ui.windows']);
+const HOT_MODULES = new Set([
+  'voice',
+  'autonomy',
+  'monologue',
+  'screen',
+  'search',
+  'reading',
+]);
 
 /**
  * 写一个模块开关到 `persona.yaml`（2026-10-18）。

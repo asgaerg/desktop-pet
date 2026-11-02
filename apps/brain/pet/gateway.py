@@ -44,6 +44,8 @@ from .curiosity import (
     nonsense_seed,
 )
 from .events import CAPABILITIES, EventEngine
+# ⚠️ 还要模块本身（`bind_handler` 是模块级函数，不在 EventEngine 上）
+from . import events as events_mod
 from .segments import SegmentTracker
 from . import quotes as quotes_mod
 from . import reading as reading_mod
@@ -2666,6 +2668,28 @@ class Gateway:
             quiet_hours=list(config.events.get("quiet_hours") or []),
             max_per_day=int(config.events.get("max_per_day", 12)),
         )
+        # 📖 把「小说阅读」「小黑盒杂谈」两个事件的执行器接上（2026-11-02）
+        #
+        # events.py 不能 import gateway（循环依赖），所以那边只声明
+        # "我要一个 handler"，实现在这里注入 —— 见 `bind_handler` 的说明。
+        #
+        # ⚠️ 必须**在事件引擎建好之后、循环启动之前**调用。
+        #    漏了的话这两个事件照样会被抽中、照样占槽、照样返回 detail，
+        #    但**什么都不会真的去做** —— 表现是日志里说"它去读书了"，
+        #    而书架上没有新章节。这种"看起来做了"比报错难查得多。
+        events_mod.bind_handler("reading", "read_novel")
+        events_mod.bind_handler("community_chat", "read_community")
+        # 🔴 事件 -> 模块 的映射（2026-11-02）
+        #
+        # 让「小说阅读」模块关掉时，`reading` 事件在**抽取阶段**就被排除，
+        # 而不是抽中了再在 handler 里判（那样会白占一个槽，
+        # 而且事件日志会记一条"它去读书了"，实际什么都没做）。
+        #
+        # ⚠️ `module_enabled` 用 lambda 现读，不缓存值：
+        #    用户在设置页一关就要立刻生效，缓存的话要重启才生效
+        #    —— 这个项目已经吃过太多次"假开关"的亏。
+        self.events.module_of["reading"] = "reading"
+        self.events.module_enabled = self.modules.enabled
         # 条件事件表（状态切换的三条规则）。
         #
         # ⚠️ 这是 2026-10-25 的架构调整：判定从 `state.py::tick()` 搬到这里。
@@ -4477,19 +4501,24 @@ class Gateway:
                 self._run_autosnap_forever(), name="autosnap"
             )
 
-        # 网上阅读循环（2026-10-31）：又一个独立任务。
+        # 🔴 网上阅读循环 2026-11-02 **停用**（改成事件了）
         #
-        # ⚠️ 为什么也要独立：抓一本书是串行十几个 HTTP 请求（可能十几秒），
-        #    挂在说话/截图循环里会让那些该准时的动作**被网络拖住**。
+        # 用户原话：「将整个搜索、看小说的功能作为自主行动中搜索小说功能的模块」。
         #
-        # 没有书源、也没开社区帖子时**不启动** —— 空转的循环只会白烧 CPU。
-        if self.reader.has_book_sources() or self.reader.config.community_enabled:
-            if self._reading_task is None or self._reading_task.done():
-                self._reading_task = asyncio.get_running_loop().create_task(
-                    self._run_reading_forever(), name="reading"
-                )
-        else:
-            log.info("网上阅读：没有书源、社区帖子也关着，不启动阅读循环")
+        # 原来这里起一个 `_run_reading_forever` 独立循环，它自己判空闲、
+        # 自己 sleep、和事件引擎完全平行。三个坏处：
+        #
+        #   ① 可能在事件正在执行时也开始读（两个行为叠一起）
+        #   ② 事件引擎的「同一时间不存在两个事件」管不到它
+        #   ③ 权重/冷却这些调节手段全都用不上（用户要的 7:3 就没法表达）
+        #
+        # 现在它是**事件**（`reading` / `community_chat`），由 EventEngine
+        # 按权重抽、占槽执行。这个循环保留代码但**不再启动** ——
+        # 留着是因为 `_reading_via_model` 等辅助方法还要用，
+        # 而且万一要退回去，改一行就能恢复。
+        log.info(
+            "网上阅读：已并入事件模块（小说 w=7 / 小黑盒杂谈 w=3），不再起独立循环"
+        )
 
         # 状态机循环（2026-10-23）。
         #
@@ -4915,6 +4944,155 @@ class Gateway:
         在工具回调里直接开口会导致"模型还在思考就插话"。
         """
         self._reading_from_tool = chunk
+
+    # ------------------------------------------------------------------ 事件：读书
+    #
+    # ## 为什么这两个 handler 在这里，而不是继续用独立循环
+    #
+    # 用户原话：「将整个搜索、看小说的功能作为自主行动中搜索小说功能的模块」。
+    #
+    # 之前 `_run_reading_forever` 是个**独立循环**：自己判空闲、自己 sleep、
+    # 和事件引擎完全平行。后果是：
+    #   · 它可能在事件正在执行时也开始读（两个行为叠一起）
+    #   · 事件引擎的"同一时间不存在两个事件"管不到它
+    #   · 权重/冷却这些调节手段全都用不上
+    #
+    # 现在改成事件：由 `EventEngine.pick()` 按权重抽，抽中才跑，
+    # 跑的时候占槽（`duration_s`），槽里别的事件抽不到。
+
+    async def _event_read_novel(self, ctx: dict[str, Any]) -> Optional[str]:
+        """事件「去网上看自己喜欢的小说」—— 让模型自己决定读什么。
+
+        返回一句"它做了什么"（记进 event_log）；None = 没读成，不留痕迹。
+
+        ## 为什么还是让模型决定，而不是程序抓一章
+
+        用户原话：「我的意思是自己选一本书读，有时候会换着读，
+        有时候会读很多章，比如一次几十章几万字」。
+
+        这是**判断**，只有模型能做（今天想读三章还是三十章、换不换书）。
+        程序只提供工具，不预设节奏。
+        """
+        # 模块关了就什么都不做（用户要的：关掉后只剩小黑盒杂谈）
+        if not self.modules.enabled("reading"):
+            log.debug("事件：小说阅读模块关着，跳过")
+            return None
+
+        chunk = await self._reading_via_model()
+        if chunk is None:
+            # 模型没调工具 = 这次不想读。不是错误（用户要"它自己决定"）。
+            log.info("事件：这一轮模型没去读（由它自己决定）")
+            return None
+
+        self._last_reading = chunk
+        self._last_reading_at = time.monotonic()
+        log.info(
+            "事件：读完《%s》（%s，%d 字）",
+            chunk.title, chunk.source, chunk.chars,
+        )
+        # 🔴 阅读历史要进原文记忆（2026-11-02 用户要求）
+        #
+        # 用户原话：「原文记忆里面要保留它的阅读小说历史，比如，
+        # 自己找到了一个好看的小说，或者是用户推荐下看了一本小说，
+        # 检索提炼也要参与」。
+        #
+        # ⚠️ 用 `source` 区分来源，提炼时能看出"这本是自己找的还是用户推荐的"：
+        #    read_book  -> 用户在对话里让它读的（`_reading_from_dialog`）
+        #    idle       -> 它自己闲着找的
+        self._remember_reading(chunk)
+        return f"它自己读了《{chunk.title}》（{chunk.chars} 字）"
+
+    async def _event_read_community(self, ctx: dict[str, Any]) -> Optional[str]:
+        """事件「去小黑盒看看大家在聊什么」—— 轻量看帖子，不落盘。
+
+        用户原话：「看小黑盒杂谈那个还是30分钟触发，不和这个在一个模块，
+        那个属于是事件模块中用户30分钟不与宠物聊天，宠物自动触发」。
+
+        ⚠️ 和小说阅读的区别（用户特意强调分开）：
+          · 小说  -> 要下载、占盘、几分钟
+          · 杂谈  -> 只读网页、不落盘、几十秒
+        """
+        chunk = await self.reader.read_post(self._reading_search, self._reading_fetch)
+        if chunk is None:
+            log.info("事件：这轮没读到社区帖子")
+            return None
+
+        self._last_reading = chunk
+        self._last_reading_at = time.monotonic()
+        log.info("事件：读了帖子《%s》（%d 字）", chunk.title[:30], chunk.chars)
+        # 帖子不落盘（读完就没必要留），但**也要进记忆**：
+        # 不然它看了半天，下一轮对话完全不记得看过什么。
+        self._remember_reading(chunk)
+        return f"它翻了翻社区杂谈，看到《{chunk.title[:24]}》"
+
+    def _remember_reading(self, chunk: Any) -> None:
+        """把"读了什么"写进原文记忆，供检索/提炼使用（2026-11-02 用户要求）。
+
+        用户原话：「原文记忆里面要保留它的阅读小说历史，比如，
+        自己找到了一个好看的小说，或者是用户推荐下看了一本小说，
+        检索提炼也要参与」。
+
+        ## 为什么写成 assistant 轮而不是单独一张表
+
+        记忆库的检索/提炼全都是围绕**对话轮**做的（`remember_turn` ->
+        嵌入 -> 提炼事实）。单独开一张"阅读历史表"的话，
+        检索和提炼都得再写一套，而且"聊到那本书时能不能想起来"
+        还要自己实现相似度 —— 复用现成的轮次是最省事且效果最直接的做法。
+
+        ## ⚠️ 文本要带"这是我读的"而不是冒充对话
+
+        写成普通 assistant 轮会让模型以为**它跟用户说过这句话**，
+        下轮可能说「我上次跟你提过这本书」。所以开头明确写
+        「（我读了…）」，让它分得清"我读过"和"我说过"。
+        """
+        if self.memory is None:
+            return
+        try:
+            from_dialog = bool(getattr(self, "_reading_from_dialog", False))
+            kind_word = "书" if getattr(chunk, "kind", "book") == "book" else "帖子"
+            who = "用户推荐我读的" if from_dialog else "我自己找的"
+            text = (
+                f"（我读了{kind_word}《{chunk.title}》——{who}）\n"
+                f"{chunk.text[:600]}"
+            )
+            # ⚠️ `session_id` 在 **Conversation** 上（gateway.py:464），不在 Gateway。
+            #    这是反复出现的「属性在另一个类上」—— 门禁 `check-self-refs.py`
+            #    只查方法不查属性，所以这类错误它抓不到，只能靠运行时报错。
+            #    写跨类属性前先确认归属，别凭印象。
+            self.memory.remember_turn(self.conversation.session_id, "assistant", text)
+            log.info("记忆：阅读历史已写入（%s《%s》）", who, chunk.title)
+
+            # 🔴 还要**提炼成事实**，否则检索根本命中不了（2026-11-02）
+            #
+            # 用户原话：「检索提炼也要参与」。
+            #
+            # ## 为什么光写原文记忆不够
+            #
+            # 记忆库是**两层**的：
+            #
+            #     原文记忆 `recent_turn`   -> 只在"最近记忆"那一段整段注入
+            #     检索记忆 `search_memory` -> 按相关度挑几条注入（提炼后的短句）
+            #
+            # 而 `_retrieve_hits()` 走的是**检索记忆**（`search_memory`）——
+            # 原文那层只有"最近 N 轮"会露脸，过了窗口就再也想不起来。
+            #
+            # 所以只写原文的话：今天读的书，明天聊起来它完全不记得。
+            #
+            # `_extract_in_background` 会把内容压成几条事实写进检索层，
+            # 之后用户提「夜玄」就能命中「它读过《夜玄》」。
+            #
+            # ⚠️ 用 `create_task` 不 await：提炼要调一次模型（约 1~3 秒），
+            #    不该让阅读事件多等。失败也不影响阅读本身。
+            #
+            # ⚠️ `_extract_in_background` 是 **Conversation** 的方法（gateway.py:2482），
+            #    不是 Gateway 的 —— 门禁 `check-self-refs.py` 当场抓到。
+            #    这是今天第四次「方法在另一个类上」，门禁每次都拦住，
+            #    但没有一次是我自己先发现的。写跨类调用前必须查归属。
+            asyncio.get_running_loop().create_task(
+                self.conversation._extract_in_background("", text)
+            )
+        except Exception:  # noqa: BLE001 —— 记忆失败不该影响阅读
+            log.warning("记忆：阅读历史写入失败（已忽略）", exc_info=True)
 
     async def _reading_search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         """给 `Reader.read_post` 注入的搜索函数。
@@ -5482,6 +5660,18 @@ class Gateway:
             #    event_log 永远是 0，而进程看起来一切正常**。
             #    真机验证才抓到（`tools/test-live-subjectivity.py`）。
             "interests": self.conversation._interest_topics(limit=5),
+            # 📖 小说阅读 / 小黑盒杂谈（2026-11-02 并入事件模块）
+            #
+            # 用户原话：「将整个搜索、看小说的功能作为自主行动中
+            # 搜索小说功能的模块」。
+            #
+            # 所以这两个不再是独立循环，而是**事件**：由事件引擎按权重
+            # 抽取（小说 7 : 杂谈 3），占槽期间别的随机事件抽不到。
+            #
+            # ⚠️ 传的是**方法本身**，不是它的返回值 —— `run()` 会
+            #    以 `handler(ctx)` 的形式调用。
+            "read_novel": self._event_read_novel,
+            "read_community": self._event_read_community,
         }
         outcome = await self.events.run(spec, ctx)
         if outcome is None:

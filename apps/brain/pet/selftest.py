@@ -7057,7 +7057,18 @@ def test_subjectivity(suite: SelfTest) -> None:
         ready = [r for r in rows if not r["dormant"]]
         dormant = [r for r in rows if r["dormant"]]
         _assert(ready, "一个可用事件都没有 —— 那等于没实现")
-        _assert(len(dormant) == 3, f"应有 3 个未来功能路口，实际 {len(dormant)}")
+        # ⚠️ 2026-11-02 从 3 改成 2：`reading` 不再是"路口"了 ——
+        #    小说阅读真的实现了（reading.py + reading_tools.py），
+        #    `CAPABILITIES["reading"]` 也从 False 改成 True。
+        #
+        #    剩下两个路口是 music_sing（拉起音乐 App）和 coop_game（一起打游戏），
+        #    它们确实还没做。
+        _assert(len(dormant) == 2, f"应有 2 个未来功能路口，实际 {len(dormant)}")
+        # 小说阅读必须**可用**（用户要它真能触发，不是挂着好看）
+        _assert(
+            any(r["kind"] == "reading" for r in ready),
+            "小说阅读事件必须是可用状态（不能还是 dormant）",
+        )
         # 路口必须说明缺什么能力（否则用户不知道为什么它不做）
         for item in dormant:
             _assert(item["missing"], f"{item['label']} 没说明缺什么能力")
@@ -9173,6 +9184,168 @@ def test_reading(suite: "Suite") -> None:
         _assert(gw._reading_from_dialog is False, "真取之后标记也要清")
 
         return "consume=False 保留；consume=True 取走并清标记"
+
+    @suite.check("模块：小说阅读是独立模块，立绘/气泡两个模块已删除")
+    def _() -> str:
+        """守住用户 2026-11-02 的要求。
+
+        用户原话：
+        > 「将整个搜索、看小说的功能作为自主行动中搜索小说功能的模块，
+        >   看小黑盒杂谈那个还是30分钟触发，不和这个在一个模块」
+        > 「这两个做成模块放在设置模块里面，模块里面的立绘动画模块、
+        >   窗口气泡模块去掉」
+
+        所以：
+          · 必须有 `reading`（小说阅读），而且可热切（gate=True）
+          · 必须**没有** `sprite` / `ui.windows`
+        """
+        from .modules import MODULES
+
+        names = {m.name for m in MODULES}
+        _assert("reading" in names, "缺少「小说阅读」模块")
+        _assert("sprite" not in names, "「立绘动画」模块应当已删除")
+        _assert("ui.windows" not in names, "「窗口/气泡」模块应当已删除")
+
+        reading = next(m for m in MODULES if m.name == "reading")
+        _assert(reading.label == "小说阅读", f"标签应为「小说阅读」，实际 {reading.label!r}")
+        _assert(reading.gate, "小说阅读必须可热切（否则设置页开关是死的）")
+        # 详情里要说明它是"附加能力"（用户要求写清是附加功能）
+        _assert("附加" in reading.note, f"note 应说明是附加能力：{reading.note!r}")
+
+        return "有 reading（可热切）；sprite / ui.windows 已删除"
+
+    @suite.check("模块：关掉小说阅读后，reading 事件在抽取阶段就被排除")
+    def _() -> str:
+        """模块关掉时不能"抽中了再判"—— 那会白占一个槽。
+
+        ## 为什么这条重要
+
+        `needs` 是**静态能力**（`CAPABILITIES` 里写死），而模块是
+        **用户可随时开关**的。两者不是一回事：
+
+            模块关掉 -> needs 依然是 True -> dormant 为 False
+                     -> 照样被抽中 -> 抢槽 -> handler 里才发现关着 -> 什么都不做
+
+        后果是事件日志里会记一条"它去读书了"，实际什么都没发生 ——
+        又是"看起来做了"。
+
+        所以 `eligible()` 必须返回 `module_off:xxx`，连抽中的机会都不给。
+        """
+        import random as _random
+        import time as _t
+
+        from .events import EventEngine, get_event
+
+        gate = EventEngine(rng=_random.Random(7))
+        spec = get_event("reading")
+        _assert(spec is not None, "没有 reading 事件")
+
+        # ① 没注入模块查询函数 -> 按开处理（不误伤）
+        ok, why = gate.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(ok, f"未注入 module_enabled 时应当可用，实际 {why!r}")
+
+        # ② 注入"模块关着" -> 必须排除
+        gate.module_of["reading"] = "reading"
+        gate.module_enabled = lambda name: False
+        ok2, why2 = gate.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(not ok2, "模块关着时不该可抽")
+        _assert("module_off" in why2, f"原因应说明是模块关着，实际 {why2!r}")
+
+        # ③ 模块开着 -> 恢复可用
+        gate.module_enabled = lambda name: True
+        ok3, _why3 = gate.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(ok3, "模块开着时应当可用")
+
+        return "模块关 -> module_off 排除；模块开 -> 可用"
+
+    @suite.check("小说 7 : 小黑盒杂谈 3（用户指定权重）")
+    def _() -> str:
+        """两个事件的权重必须是 7:3。
+
+        用户原话：「分成小黑盒3，小说7权重，小说搜索模块关闭时
+        自然就只触发小黑盒杂谈事件了」。
+
+        ⚠️ 权重是**相对**的，所以断言比例而不是绝对值 ——
+        以后加别的事件时调整绝对值不会误伤这条测试。
+        """
+        from .events import get_event
+
+        novel = get_event("reading")
+        chat = get_event("community_chat")
+        _assert(novel is not None, "没有 reading 事件")
+        _assert(chat is not None, "没有 community_chat 事件（小黑盒杂谈）")
+
+        ratio = novel.weight / chat.weight
+        _assert(
+            abs(ratio - 7 / 3) < 0.01,
+            f"小说:杂谈 应为 7:3，实际 {novel.weight:.1f}:{chat.weight:.1f}（{ratio:.2f}）",
+        )
+        # 两个都要占槽（"同一时间不存在两个事件"）
+        _assert(novel.duration_s is not None, "小说阅读必须占槽（要读几十秒到几分钟）")
+        _assert(chat.duration_s is not None, "小黑盒杂谈也要占槽")
+        # 小说要读很久，槽位时间必须给足
+        _assert(
+            novel.duration_s >= 300,
+            f"小说阅读的槽位时间太短（{novel.duration_s}s），读几章会被掐断",
+        )
+
+        return f"7:3 成立；槽位 小说 {novel.duration_s:.0f}s / 杂谈 {chat.duration_s:.0f}s"
+
+    @suite.check("阅读历史进原文记忆，并带「自己找的/用户推荐」来源")
+    def _() -> str:
+        """用户要求：原文记忆里要保留阅读历史，检索提炼也要参与。
+
+        用户原话：
+        > 「原文记忆里面要保留它的阅读小说历史，比如，自己找到了一个
+        >   好看的小说，或者是用户推荐下看了一本小说，检索提炼也要参与」
+
+        ## 断言什么
+
+        · 写完能在原文记忆里查到
+        · 开头带「（我读了书《…》——我自己找的 / 用户推荐我读的）」
+          这样模型分得清"我读过"和"我跟你说过"
+        · 两种来源要能区分
+        """
+        from .config import Config
+        from .gateway import Gateway
+        from .reading import BookChunk
+
+        cfg = Config()
+        gw = Gateway(cfg)
+        _assert(gw.memory is not None, "测试需要记忆库")
+
+        gw._reading_from_dialog = False
+        gw._remember_reading(
+            BookChunk(title="夜玄", source="read_book", text="雪地里捡到一把断剑。",
+                      kind="book", chars=5000)
+        )
+        gw._reading_from_dialog = True
+        gw._remember_reading(
+            BookChunk(title="诡秘之主", source="read_book", text="蒸汽与机械的世界。",
+                      kind="book", chars=16000)
+        )
+
+        texts = []
+        for row in gw.memory.db.recent_turns(since_ts=0, limit=20):
+            try:
+                texts.append(str(row["text"]))
+            except Exception:  # noqa: BLE001
+                continue
+        joined = "\n".join(texts)
+
+        _assert("夜玄" in joined, "自己找的那本没进原文记忆")
+        _assert("诡秘之主" in joined, "用户推荐的那本没进原文记忆")
+        _assert("我自己找的" in joined, "没标明是自己找的")
+        _assert("用户推荐我读的" in joined, "没标明是用户推荐的")
+        _assert("（我读了书" in joined, "开头没写「（我读了书…）」—— 会被误当成对话")
+
+        return "两本都进原文记忆；来源区分正确；不会被误当成对话"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

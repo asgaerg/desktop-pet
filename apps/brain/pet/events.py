@@ -73,7 +73,15 @@ CAPABILITIES: dict[str, bool] = {
     "web_search": True,     # 已有 MCP 搜索
     "music_app": False,     # TODO: 拉起音乐 App，读用户喜欢的歌，唱几段
     "coop_game": False,     # TODO: 和用户一起打游戏
-    "reading": False,       # TODO: 阅读书籍 / 小说模块
+    # 🔴 2026-11-02 置为 True：小说阅读已经实现了（reading.py + reading_tools.py）。
+    #
+    # 这里一直是 False，所以 `reading` 事件是 `dormant`（注册着但永不触发）——
+    # 阅读功能之前**只由 `_run_reading_forever` 那个独立循环驱动**，
+    # 和事件模块没有关系。
+    #
+    # 用户现在要求把它并入自主行动：「将整个搜索、看小说的功能作为
+    # 自主行动中搜索小说功能的模块」。
+    "reading": True,
 }
 
 # 能力的人话名字（给 `list_events()` 和设置页用）
@@ -161,14 +169,61 @@ def _specs() -> list[EventSpec]:
             kind="reading",
             label="去网上看自己喜欢的小说",
             needs=("reading",),
-            weight=1.0,
+            # 🔴 2026-11-02 用户指定权重 7（和 community_chat 的 3 是 7:3）。
+            #
+            # 原话：「分成小黑盒3，小说7权重，小说搜索模块关闭时
+            # 自然就只触发小黑盒杂谈事件了」。
+            #
+            # ⚠️ 权重要和 `community_chat` 一起看 —— 它们是这一对的两端。
+            #    改一个就要回头看另一个，否则比例就偏了。
+            weight=7.0,
+            # 冷却比小黑盒长：读小说是"进行中"的重事件（要几十秒到几分钟），
+            # 连着读会让宠物长时间不理用户。
             cooldown_s=7200.0,
             mood_delta=0.07,
             energy_delta=-0.03,
             attention_delta=0.18,
             impression="它有自己想看的东西，不是为了你才去看的",
             detail="它自己找了点东西看，看得入神",
-            todo="阅读书籍/小说模块",
+            # ⚠️ 必须占槽且给足时间：读一本书可能几分钟（每章一个请求）。
+            #    给短了会被超时兜底提前掐断，表现为"读到一半就不读了"。
+            duration_s=10 * 60.0,
+            # 🔴 执行器由 gateway 注入（`ctx["read_novel"]`）。
+            #
+            # 这里写 `None`，真正的绑定在 `_specs()` 之后由
+            # `bind_handlers()` 完成 —— 因为 events.py 不该 import gateway
+            # （那会循环依赖），而 handler 需要 Gateway 的模型/记忆/工具。
+            handler=None,
+        ),
+        # ── 小黑盒杂谈（2026-11-02 加，用户指定 3 的权重）──
+        #
+        # 用户原话：「看小黑盒杂谈那个还是30分钟触发，不和这个在一个模块，
+        # 那个属于是事件模块中用户30分钟不与宠物聊天，宠物自动触发」。
+        #
+        # 所以它是**轻事件**：只是去看看帖子、说两句，
+        # 不下载、不落盘，几十秒内结束。
+        #
+        # ⚠️ 和 `reading` 的区别（用户特意强调要分开）：
+        #
+        #     reading        读小说 -> 要下载、占盘、几分钟
+        #     community_chat 看杂谈 -> 只读网页、不落盘、几十秒
+        #
+        # 两者比例 7:3（用户指定）。关掉「小说阅读」模块后，
+        # `reading` 因为 needs=("reading",) 而变成 dormant，
+        # 只剩这个 —— 正是用户要的效果。
+        EventSpec(
+            kind="community_chat",
+            label="去小黑盒看看大家在聊什么",
+            needs=("web_search",),
+            weight=3.0,
+            cooldown_s=1800.0,
+            mood_delta=0.05,
+            attention_delta=0.12,
+            impression="它会自己去看别人在聊什么，有自己的消遣",
+            detail="它翻了翻社区里的杂谈，看得挺有意思",
+            # 轻事件但也要占槽：读网页要几秒到几十秒，
+            # 占槽期间不该同时去唱歌（用户要「同一时间不存在两个事件」）。
+            duration_s=2 * 60.0,
         ),
         # ── 不需要新能力、现在就能做的一个 ──
         #
@@ -214,6 +269,52 @@ def _specs() -> list[EventSpec]:
 
 EVENTS: list[EventSpec] = _specs()
 _BY_KIND: dict[str, EventSpec] = {e.kind: e for e in EVENTS}
+
+
+def bind_handler(kind: str, ctx_key: str) -> None:
+    """把某个事件的 handler 绑成"从 ctx 里取 `ctx_key` 并调用它"。
+
+    ## 为什么需要这一层（2026-11-02）
+
+    `EventSpec.handler` 是个 `handler(ctx) -> Optional[str]` 的函数。
+    但小说阅读的 handler 需要 Gateway 的模型/记忆/工具 ——
+    而 events.py **不能 import gateway**（循环依赖）。
+
+    所以：events.py 只声明"我要一个 handler"，真正的实现在 Gateway；
+    由 Gateway 在构造事件引擎时调 `bind_handler("reading", "read_novel")`，
+    这里生成的函数只做一件事 —— 从 `ctx` 里把那个实现捞出来调。
+
+    ## 为什么不直接在 `_specs()` 里写 lambda
+
+    `_specs()` 是模块级函数，它拿不到 `ctx`（那是每次执行时才有）。
+    而且写 lambda 的话"这个事件到底绑没绑上"在代码里看不出来 ——
+    现在 `bind_handler` 被调用过就是绑上了，没调用就是 `handler is None`
+    （事件照样占槽、照样返回 detail，只是不会真的去做事）。
+
+    ⚠️ 如果 `ctx_key` 不在 ctx 里，返回 None（= 没做成，不记录）。
+    这比抛 KeyError 好：抛了会被 `run()` 的 except 吞掉并记一条 ERROR，
+    看起来像 bug，而实际只是"这个入口没接"。
+    """
+
+    async def _dispatch(ctx: dict[str, Any]) -> Optional[str]:
+        # ⚠️ 必须是 `async def`：`EventEngine.run()` 里写的是
+        #    `produced = await spec.handler(ctx)` —— 同步函数返回的
+        #    普通值会让 `await` 抛 TypeError，而那个异常会被
+        #    `run()` 的 except 吞掉、只记一条 ERROR，表现是"事件永远没做成"。
+        fn = ctx.get(ctx_key)
+        if fn is None:
+            log.warning(
+                "事件 %s 的 handler 没接上（ctx 里没有 %r）—— 这次跳过",
+                kind, ctx_key,
+            )
+            return None
+        return await fn(ctx)
+
+    spec = _BY_KIND.get(kind)
+    if spec is None:
+        log.warning("bind_handler：没有名为 %s 的事件", kind)
+        return
+    spec.handler = _dispatch
 
 
 def get_event(kind: str) -> Optional[EventSpec]:
@@ -384,6 +485,36 @@ class EventEngine:
         self.timeouts = 0
         #: 条件事件表（2026-10-25）。按 priority 排序。
         self.rules: list[Rule] = []
+        #: 事件 kind -> 依赖的模块名（2026-11-02 加）。
+        #:
+        #: ## 为什么需要它（而不是只用 `needs`）
+        #:
+        #: `needs` 是**静态能力**（写死在 `CAPABILITIES` 里，运行期不变），
+        #: 而模块是**用户可随时开关**的。两者不是一回事：
+        #:
+        #:     小说阅读模块关掉后，`reading` 的 needs=("reading",) 依然是 True
+        #:     -> `dormant` 为 False -> 照样被抽中 -> 占槽 -> handler 里再判模块
+        #:
+        #: 后果是**白占一个槽**：抽中、抢到槽、进去发现模块关着、什么都不做。
+        #: 而且事件日志会记一条"它去读书了"（detail 非空），实际什么都没发生。
+        #:
+        #: 所以由 Gateway 在构造时填这张表，`eligible()` 据此在**抽取阶段**排除。
+        self.module_of: dict[str, str] = {}
+        #: 模块开关的查询函数（Gateway 注入 `lambda name: modules.enabled(name)`）。
+        #:
+        #: ⚠️ 用函数而不是直接持有 ModuleRegistry：events.py 不该依赖 modules.py
+        #:    的具体类型，而且用户改模块开关后要能**立刻**生效（现读配置）。
+        self.module_enabled: Optional[Callable[[str], bool]] = None
+
+    def _module_on(self, name: str) -> bool:
+        """模块是否开着。没注入查询函数时按**开**处理（不误伤）。"""
+        if self.module_enabled is None:
+            return True
+        try:
+            return bool(self.module_enabled(name))
+        except Exception:  # noqa: BLE001 —— 模块查询失败不该让事件全停
+            log.debug("模块开关查询失败（按开处理）", exc_info=True)
+            return True
 
     # ------------------------------------------------------- 单占位槽（互斥）
 
@@ -505,6 +636,21 @@ class EventEngine:
         """
         if spec.dormant:
             return False, f"dormant:缺{'+'.join(spec.missing())}"
+        # 🔴 模块关着 -> 不抽它（2026-11-02 加）
+        #
+        # `needs` 是**静态能力**（写死在 CAPABILITIES 里，运行期不变），
+        # 而模块是**用户可随时开关**的。两者不是一回事：
+        #
+        #     小说阅读模块关掉后，`reading` 的 needs=("reading",) 依然是 True
+        #     -> dormant 为 False -> 照样被抽中 -> 占槽 -> handler 里再判模块
+        #
+        # 后果是**白占一个槽**：抽中、抢到槽、进去发现模块关着、什么都不做。
+        # 而且事件日志会记一条"它去读书了"（detail 非空），实际什么都没发生。
+        #
+        # 所以在这里就排除，连抽中的机会都不给。
+        mod = self.module_of.get(spec.kind)
+        if mod and not self._module_on(mod):
+            return False, f"module_off:{mod}"
         if in_conversation:
             return False, "in_conversation"
         # 🔴 槽位被占 -> 不触发（2026-10-25 单占位槽）。

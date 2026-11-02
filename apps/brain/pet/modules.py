@@ -75,10 +75,21 @@ MODULES: tuple[Module, ...] = (
            note="关掉则停止视觉/截图（与权限开关是 AND 关系）"),
     Module("search", "联网搜索", default=True,
            note="关掉则联网一律不调（叠加菜单里的三档模式）"),
-    Module("sprite", "立绘动画", default=True,
-           note="关掉只隐藏立绘（程序还在跑，开回来立刻可见）"),
-    Module("ui.windows", "窗口/气泡", default=True,
-           note="关掉气泡窗口不再弹出"),
+    # ------------------------------------------------------------------
+    # 小说阅读（2026-11-02 加，用户要求）
+    #
+    # 用户原话：「将整个搜索、看小说的功能作为自主行动中搜索小说功能的模块」。
+    #
+    # ⚠️ 它和「联网搜索」是**两个不同的东西**，不要合并：
+    #    · search   -> web_search / web_fetch，查资料（几秒）
+    #    · reading  -> search_book / read_book，找小说并下载章节（几十秒到几分钟）
+    #
+    # ⚠️ 关掉它的效果是「只剩小黑盒杂谈」——用户明确要的：
+    #    「小说搜索模块关闭时自然就只触发小黑盒杂谈事件了」。
+    #    实现见 events.py 里两个事件的权重与 CAPABILITIES。
+    Module("reading", "小说阅读", default=True,
+           note="附加能力：让宠物自己搜索小说、下载并阅读。"
+                "关掉后自主行为里只剩小黑盒杂谈这类轻事件"),
 )
 
 _BY_NAME = {m.name: m for m in MODULES}
