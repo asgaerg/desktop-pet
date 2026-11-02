@@ -291,6 +291,62 @@ def _looks_like_front_matter(name: str, body: str) -> bool:
     return name_suspicious and body_unfit
 
 
+def _clip_at_sentence(text: str, limit: int) -> str:
+    """把文本截到 `limit` 字以内，但**必须落在句子边界**上。
+
+    ## 为什么不能直接 `text[:limit]`
+
+    2026-11-02 用户翻记忆时问：「最新一条是没说完话吗」。
+
+    实际写进去的是阅读历史，用 `chunk.text[:600]` 生切的，结尾长这样：
+
+        据说罗塞尔大帝曾经看过"亵渎石板"，据说他制造的秘
+
+    停在「秘」字上 —— **看起来就是话说了一半**。
+
+    而且这个印象会传到模型那里：那一轮回复是紧接在这条记忆后面
+    生成的，模型看到一段断掉的话，可能跟着"补全"或者自己说话也说一半。
+
+    ## 怎么找边界
+
+    从 `limit` 往回找**最近的**句末标点，在它后面截断：
+
+        。！？…  —— 中文常用句末
+        .!?      —— 英文/数字结尾
+        "』」）  —— 引号/括号收尾（对话体小说大量使用）
+
+    ⚠️ 往回找的上限是 40% —— 再往前就没有"截断"的意义了（保留太少）。
+    找不到就硬切，并补一个省略号，至少让"这里是断的"是**明确**的，
+    而不是看起来像话说了一半。
+
+    ## 为什么不用 `textwrap` / 正则整段切
+
+    只需要"别停在半个字上"这一件事。引入更复杂的切句逻辑
+    （考虑省略号连用、引号嵌套）收益很低 —— 记忆里那段只是给模型
+    看的摘要，不是要出版。
+    """
+    if limit <= 0 or not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    # 从末尾往回找句末标点（最多回退 40%）
+    floor = max(0, int(limit * 0.6))
+    # ⚠️ 用集合而不是字符串字面量：中文收尾引号（”』」）本身就在
+    #    字符串里，写成 `in "”』」"` 会让引号嵌套、语法直接崩。
+    ENDS = set("。！？…!?.")
+    TAILS = set("”』」）)】")
+    for i in range(len(head) - 1, floor - 1, -1):
+        if head[i] in ENDS:
+            # 把紧随其后的收尾引号/括号也带上（对话体很常见）
+            j = i + 1
+            while j < len(head) and head[j] in TAILS:
+                j += 1
+            return head[:j]
+    # 找不到句末 -> 硬切 + 省略号（明确表示"这里是断的"）
+    return head + "…"
+
+
 def body_score(text: str) -> tuple[float, str]:
     """给一段文字打"像不像小说正文"的分。0 分 = 不可用。
 
@@ -1205,6 +1261,184 @@ class Reader:
             if len(out) >= limit:
                 break
         return out
+
+    def _parse_chapters(self, title: str) -> list[dict[str, Any]]:
+        """把一本书的 txt 拆成章节列表。给 `review_book` 工具用。
+
+        返回 `[{no, name, text, chars, downloaded_at}]`，按章号升序。
+
+        ## 文件格式（`_save` 写出来的）
+
+            《书名》
+            来源：某站
+            开始：2026-11-02 10:00:00
+
+
+            <!-- chapter:3 -->
+            ────────────────────────────────────
+            第3章  章节名
+            下载于 2026-11-02 10:00:01
+            ────────────────────────────────────
+
+            正文…
+
+        ## ⚠️ 解析必须宽容
+
+        用户可能手动编辑过这个文件（删掉某章、改标题、粘贴别的东西进来）。
+        解析失败时**返回能解析出来的部分**，而不是抛异常 ——
+        "回看"是只读功能，它失败不该影响任何别的事。
+
+        ⚠️ 章号可能**不连续**（用户删过中间的章节），不要假设 `no == 下标 + 1`。
+        """
+        path = self._book_path(title)
+        if not path.is_file():
+            return []
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return []
+
+        parts = re.split(r"<!-- chapter:(\d+) -->", raw)
+        out: list[dict[str, Any]] = []
+        i = 1
+        while i + 1 < len(parts) + 1 and i + 1 <= len(parts) - 1:
+            try:
+                no = int(parts[i])
+            except (ValueError, IndexError):
+                break
+            body = parts[i + 1] if i + 1 < len(parts) else ""
+
+            # 从正文块里拆出"标题行 / 下载时间 / 正文"
+            name = ""
+            downloaded = ""
+            text_lines: list[str] = []
+            in_body = False
+            for line in body.splitlines():
+                s = line.strip()
+                if s.startswith("─"):
+                    # 第二条分隔线之后才是正文
+                    if in_body is False and name:
+                        in_body = True
+                    continue
+                if not in_body:
+                    if s.startswith("下载于"):
+                        downloaded = s.replace("下载于", "").strip()
+                    elif s and not name:
+                        name = s
+                    continue
+                if s:
+                    text_lines.append(s)
+
+            text = "\n".join(text_lines)
+            out.append(
+                {
+                    "no": no,
+                    "name": name,
+                    "text": text,
+                    "chars": len(text),
+                    "downloaded_at": downloaded,
+                }
+            )
+            i += 2
+
+        out.sort(key=lambda c: c["no"])
+        return out
+
+    def review_book(
+        self,
+        title: str,
+        from_chapter: int = 0,
+        to_chapter: int = 0,
+        limit_chars: int = 0,
+    ) -> dict[str, Any]:
+        """回看已下载的章节（2026-11-02 用户要求）。
+
+        用户原话：「给它加一个能看过往章节的功能吧，这样方便回去看伏笔和故事精彩描写」。
+
+        ## 为什么不重新联网抓
+
+        已经下载的章节**就在本地 txt 里**。联网重抓有三个问题：
+          · 慢（每章一个 HTTP 请求）
+          · 书源可能已经失效（免费站寿命短，昨天能抓今天挂）
+          · 站点内容可能改过，回看应该看到**当初读到的那一版**
+
+        所以这个功能是纯本地的：读文件、切片、返回。
+
+        ## 参数
+
+        · `from_chapter` / `to_chapter`：章号区间，**含两端**。
+          都给 0 = 全书目录（只列标题，不带正文）。
+        · `limit_chars`：正文最多返回多少字（0 = 每章全文）。
+          伏笔回看通常只要片段，给个上限能省上下文。
+
+        返回 `{"ok", "title", "total", "chapters": [...], "message"}`。
+        """
+        chapters = self._parse_chapters(title)
+        if not chapters:
+            return {
+                "ok": False,
+                "title": title,
+                "total": 0,
+                "chapters": [],
+                "message": f"本地没有《{title}》的下载记录。",
+            }
+
+        nums = [c["no"] for c in chapters]
+        # 都不给 -> 只回目录（这是"我想知道自己读到哪了"的最常见用法）
+        if from_chapter <= 0 and to_chapter <= 0:
+            return {
+                "ok": True,
+                "title": title,
+                "total": len(chapters),
+                "range": [nums[0], nums[-1]],
+                "chapters": [
+                    {"no": c["no"], "name": c["name"], "chars": c["chars"]}
+                    for c in chapters
+                ],
+                "message": f"《{title}》共 {len(chapters)} 章（第 {nums[0]}~{nums[-1]} 章）",
+            }
+
+        lo = from_chapter if from_chapter > 0 else nums[0]
+        hi = to_chapter if to_chapter > 0 else nums[-1]
+        if hi < lo:
+            lo, hi = hi, lo
+
+        picked = [c for c in chapters if lo <= c["no"] <= hi]
+        if not picked:
+            return {
+                "ok": False,
+                "title": title,
+                "total": len(chapters),
+                "chapters": [],
+                "message": (
+                    f"《{title}》本地只有第 {nums[0]}~{nums[-1]} 章，"
+                    f"没有 {lo}~{hi} 这一段。"
+                ),
+            }
+
+        out_chapters = []
+        for c in picked:
+            text = c["text"]
+            if limit_chars > 0 and len(text) > limit_chars:
+                text = _clip_at_sentence(text, limit_chars)
+            out_chapters.append(
+                {
+                    "no": c["no"],
+                    "name": c["name"],
+                    "chars": c["chars"],
+                    "downloaded_at": c["downloaded_at"],
+                    "text": text,
+                }
+            )
+
+        return {
+            "ok": True,
+            "title": title,
+            "total": len(chapters),
+            "range": [nums[0], nums[-1]],
+            "chapters": out_chapters,
+            "message": f"《{title}》第 {lo}~{hi} 章（共 {len(out_chapters)} 章）",
+        }
 
     def list_downloaded(self) -> list[dict[str, Any]]:
         """列出本地已下载的书和进度。给 `list_books` 工具用。"""

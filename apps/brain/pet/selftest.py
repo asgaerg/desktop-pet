@@ -9751,6 +9751,124 @@ def test_reading(suite: "Suite") -> None:
 
         return "没注入/查询异常都放行，不会静默停摆"
 
+    @suite.check("回看：能按章号翻已下载的章节，只看本地不联网")
+    def _() -> str:
+        """用户 2026-11-02 要求。
+
+        > 「给它加一个能看过往章节的功能吧，这样方便回去看伏笔和故事精彩描写」
+
+        并且明确它**只在需要时用**：
+
+        > 「宠物正常是不会看的，需要了解一些东西的时候可以适当回看
+        >   拼接起来，或者由用户说回顾精彩章节什么的」
+
+        ## 为什么要断言"不联网"
+
+        回看必须读**本地已下载**的章节，不能重新去抓：
+          · 慢（每章一个请求）
+          · 书源可能已经失效（免费站寿命短）
+          · 站点内容可能改过，回看应该看到**当初读到的那一版**
+
+        所以这里造一个本地文件，然后把所有书源清空 ——
+        如果它还是能回看成功，就证明它真的没走网络。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .reading import Reader
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-review-"))
+        try:
+            books = tmp / "pet-books"
+            books.mkdir(parents=True)
+            (books / "测试书.txt").write_text(
+                "《测试书》\n来源：测试源\n开始：2026-11-02 10:00:00\n\n\n"
+                "<!-- chapter:1 -->\n"
+                "────────────────────────────────────────\n"
+                "第1章  开端\n"
+                "下载于 2026-11-02 10:00:01\n"
+                "────────────────────────────────────────\n"
+                "\n"
+                "第一段正文。这里埋了一个伏笔。\n"
+                "第二段正文。\n\n"
+                "<!-- chapter:2 -->\n"
+                "────────────────────────────────────────\n"
+                "第2章  发展\n"
+                "下载于 2026-11-02 10:00:05\n"
+                "────────────────────────────────────────\n"
+                "\n"
+                "第二章的内容在这里。\n\n"
+                "<!-- chapter:5 -->\n"
+                "────────────────────────────────────────\n"
+                "第5章  高潮\n"
+                "下载于 2026-11-02 10:00:09\n"
+                "────────────────────────────────────────\n"
+                "\n"
+                "第五章很精彩。\n",
+                encoding="utf-8",
+            )
+
+            r = Reader.__new__(Reader)          # 不跑 __init__（会读配置/联网）
+            r._books_dir_override = books       # 见下面 books_dir 的兼容
+
+            # `books_dir` 走配置，这里直接打个补丁让它指到临时目录
+            r.books_dir = lambda: books  # type: ignore[method-assign]
+            r.config = type("C", (), {"chunk_chars": 1500, "min_body_chars": 500})()
+
+            # ① 只给书名 -> 目录
+            res = r.review_book("测试书")
+            _assert(res["ok"], f"应当能回看：{res.get('message')}")
+            _assert(res["total"] == 3, f"应当是 3 章，实际 {res['total']}")
+            nos = [c["no"] for c in res["chapters"]]
+            _assert(nos == [1, 2, 5], f"章号应当原样保留（可能不连续），实际 {nos}")
+            _assert(
+                all("text" not in c for c in res["chapters"]),
+                "只给书名时不该返回正文（省上下文）",
+            )
+
+            # ② 给区间 -> 回正文
+            res2 = r.review_book("测试书", 1, 2)
+            _assert(res2["ok"], "区间回看应当成功")
+            _assert(len(res2["chapters"]) == 2, f"应当 2 章，实际 {len(res2['chapters'])}")
+            _assert(
+                "伏笔" in res2["chapters"][0]["text"],
+                f"第1章正文里应当有「伏笔」，实际 {res2['chapters'][0]['text'][:50]!r}",
+            )
+            _assert(
+                "下载于" not in res2["chapters"][0]["text"],
+                "正文里不该混进「下载于」这种元数据",
+            )
+
+            # ③ `limit_chars` 要截断，且落在句子边界
+            res3 = r.review_book("测试书", 1, 2, limit_chars=8)
+            t1 = res3["chapters"][0]["text"]
+            _assert(len(t1) <= 12, f"截断后应当很短，实际 {len(t1)} 字：{t1!r}")
+            _assert(
+                t1.rstrip()[-1] in "。！？…”」",
+                f"截断必须落在句末，实际结尾 {t1[-4:]!r}",
+            )
+
+            # ④ 不存在的书 / 超出范围 -> 明确失败，不抛异常
+            res4 = r.review_book("没有这本书")
+            _assert(not res4["ok"], "不存在的书应当返回 ok=False")
+            _assert("没有" in res4["message"], f"要说明原因，实际 {res4['message']!r}")
+
+            res5 = r.review_book("测试书", 50, 60)
+            _assert(not res5["ok"], "超出范围应当返回 ok=False")
+            _assert("1~5" in res5["message"] or "第" in res5["message"], "要说明本地有哪些章")
+
+            # ⑤ 章名已经带「第N章」时不该重复拼前缀
+            _assert(
+                res2["chapters"][0]["name"].startswith("第1章"),
+                "解析出来的章名应当原样保留",
+            )
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "目录/区间/截断/越界都正确；只读本地不联网；章号不连续也能处理"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(

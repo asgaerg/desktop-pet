@@ -50,6 +50,9 @@ from .segments import SegmentTracker
 from . import quotes as quotes_mod
 from . import reading as reading_mod
 from . import reading_tools
+# ⚠️ `_clip_at_sentence` 2026-11-02 挪到 `reading.py` 了 —— 回看功能也要用它，
+#    而 reading.py 不能 import gateway（循环依赖）。这里显式导入，原调用点不变。
+from .reading import _clip_at_sentence
 from .screen_chat import (
     capture_and_describe,
     describe_for_prompt,
@@ -5837,62 +5840,6 @@ class Gateway:
     def new_say_id(self) -> str:
         """给插件用的发言 id 分配器。"""
         return self.conversation.new_say_id()
-
-
-def _clip_at_sentence(text: str, limit: int) -> str:
-    """把文本截到 `limit` 字以内，但**必须落在句子边界**上。
-
-    ## 为什么不能直接 `text[:limit]`
-
-    2026-11-02 用户翻记忆时问：「最新一条是没说完话吗」。
-
-    实际写进去的是阅读历史，用 `chunk.text[:600]` 生切的，结尾长这样：
-
-        据说罗塞尔大帝曾经看过"亵渎石板"，据说他制造的秘
-
-    停在「秘」字上 —— **看起来就是话说了一半**。
-
-    而且这个印象会传到模型那里：那一轮回复是紧接在这条记忆后面
-    生成的，模型看到一段断掉的话，可能跟着"补全"或者自己说话也说一半。
-
-    ## 怎么找边界
-
-    从 `limit` 往回找**最近的**句末标点，在它后面截断：
-
-        。！？…  —— 中文常用句末
-        .!?      —— 英文/数字结尾
-        "』」）  —— 引号/括号收尾（对话体小说大量使用）
-
-    ⚠️ 往回找的上限是 40% —— 再往前就没有"截断"的意义了（保留太少）。
-    找不到就硬切，并补一个省略号，至少让"这里是断的"是**明确**的，
-    而不是看起来像话说了一半。
-
-    ## 为什么不用 `textwrap` / 正则整段切
-
-    只需要"别停在半个字上"这一件事。引入更复杂的切句逻辑
-    （考虑省略号连用、引号嵌套）收益很低 —— 记忆里那段只是给模型
-    看的摘要，不是要出版。
-    """
-    if limit <= 0 or not text:
-        return ""
-    if len(text) <= limit:
-        return text
-    head = text[:limit]
-    # 从末尾往回找句末标点（最多回退 40%）
-    floor = max(0, int(limit * 0.6))
-    # ⚠️ 用集合而不是字符串字面量：中文收尾引号（”』」）本身就在
-    #    字符串里，写成 `in "”』」"` 会让引号嵌套、语法直接崩。
-    ENDS = set("。！？…!?.")
-    TAILS = set("”』」）)】")
-    for i in range(len(head) - 1, floor - 1, -1):
-        if head[i] in ENDS:
-            # 把紧随其后的收尾引号/括号也带上（对话体很常见）
-            j = i + 1
-            while j < len(head) and head[j] in TAILS:
-                j += 1
-            return head[:j]
-    # 找不到句末 -> 硬切 + 省略号（明确表示"这里是断的"）
-    return head + "…"
 
 
 def _parse_search_text(raw: str) -> list[dict[str, str]]:

@@ -218,6 +218,91 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
             )
         return "\n".join(lines)
 
+    async def _review_book(args: dict[str, Any]) -> str:
+        """回看已下载的章节（2026-11-02）。
+
+        用户要求：「方便回去看伏笔和故事精彩描写」，
+        并且明确它**只在需要时用**：
+        `「宠物正常是不会看的，需要了解一些东西的时候可以适当回看
+        拼接起来，或者由用户说回顾精彩章节什么的」`。
+
+        所以要把它写成"有目的才翻"，而不是"没事翻翻"。
+        """
+        query = str(args.get("title") or "").strip()
+        if not query:
+            return "错误：要给一个书名（title 参数）。"
+
+        # 允许书名模糊匹配（用户可能只说"天官"）
+        books = reader.list_downloaded()
+        exact = next((b for b in books if b["title"] == query), None)
+        if exact is None:
+            subs = [b for b in books if query in b["title"]]
+            if len(subs) == 1:
+                exact = subs[0]
+            elif len(subs) > 1:
+                names = "、".join(f"《{b['title']}》" for b in subs[:5])
+                return f"「{query}」匹配到几本：{names}。请给完整一点的书名。"
+        if exact is None:
+            have = "、".join(f"《{b['title']}》" for b in books[:6]) or "（一本都没有）"
+            return (
+                f"本地没有《{query}》的下载记录。\n"
+                f"现在本地有：{have}。\n"
+                "（只有**下载过**的书才能回看，没读过的不在本地。）"
+            )
+
+        def _int(key: str) -> int:
+            try:
+                return int(args.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        lo = _int("from_chapter")
+        hi = _int("to_chapter")
+        limit_chars = _int("limit_chars")
+        if limit_chars < 0:
+            limit_chars = 0
+        # ⚠️ 上限：回看的目的是"找伏笔/看一段描写"，不是把整本书塞进上下文。
+        #    5 章约 1.5 万字，够定位；再多会把对话上下文挤爆。
+        limit_chars = min(limit_chars, 4000) if limit_chars else 0
+
+        import asyncio
+
+        try:
+            res = await asyncio.to_thread(
+                reader.review_book, exact["title"], lo, hi, limit_chars
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("review_book 失败：%s: %s", type(exc).__name__, exc)
+            return f"回看《{query}》时出错了（{type(exc).__name__}）。"
+
+        if not res.get("ok"):
+            return str(res.get("message") or "回看失败。")
+
+        chapters = res.get("chapters") or []
+        head = f"{res['message']}"
+
+        # ⚠️ 章名里可能**已经带**「第N章」（`_save` 写的标题行就是这样），
+        #    再拼一次前缀会变成「第1章 第1章 洞天福地」（2026-11-02 实测踩到）。
+        def _label(c: dict[str, Any]) -> str:
+            name = str(c.get("name") or "").strip()
+            if re.match(r"^第\s*\d+\s*章", name):
+                return name
+            return f"第{c['no']}章  {name}"
+
+        # 没给区间 = 只要目录
+        if not any("text" in c for c in chapters):
+            lines = [head, "（下面只列章节名。要看正文就传 from_chapter/to_chapter）", ""]
+            for c in chapters:
+                lines.append(f"  {_label(c)}（{c['chars']} 字）")
+            return "\n".join(lines)
+
+        lines = [head, ""]
+        for c in chapters:
+            lines.append(f"── {_label(c)}（{c['chars']} 字）──")
+            lines.append(str(c.get("text") or ""))
+            lines.append("")
+        return "\n".join(lines)
+
     return [
         Tool(
             name="search_book",
@@ -318,5 +403,57 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
             ),
             parameters={"type": "object", "properties": {}},
             handler=_list_books,
+        ),
+        Tool(
+            name="review_book",
+            description=(
+                "回看**已经下载过**的章节（本地文件，不联网）。\n"
+                "\n"
+                "## 什么时候用（重要：不要没事翻）\n"
+                "\n"
+                "这是个**有目的才用**的工具，不是日常消遣：\n"
+                "\n"
+                "· 用户说「前面那段你还有印象吗」「XX 是怎么出场的」\n"
+                "· 用户说「回顾一下精彩章节」「把伏笔捋一捋」\n"
+                "· 你自己需要确认某个**已经读过的细节**（人物关系、某个道具、\n"
+                "  前面埋的线）才能接上话题时\n"
+                "\n"
+                "⚠️ **不要**因为闲着就翻旧章节 —— 那会把上下文挤爆，\n"
+                "而且用户要的是「你读下去」，不是「你回头看」。\n"
+                "\n"
+                "## 怎么用\n"
+                "\n"
+                "· `title` 给书名（可以是简称，会做包含匹配）\n"
+                "· 不给 `from_chapter`/`to_chapter` -> 只回**章节目录**，\n"
+                "  用来快速看「有哪些章、每章多少字」\n"
+                "· `from_chapter` / `to_chapter`：章号区间（含两端），回正文\n"
+                "· `limit_chars`：每章最多返回多少字（0 = 全文，上限 4000）\n"
+                "  找伏笔时给 800~1500 就够定位，省上下文\n"
+                "\n"
+                "## 返回什么\n"
+                "\n"
+                "章节名 + 正文片段。**只含本地下载过的章** ——\n"
+                "没读过的章不在本地，回看不了（那要用 read_book 继续往下读）。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "书名（可简称）"},
+                    "from_chapter": {
+                        "type": "integer",
+                        "description": "从第几章开始（含）。不传 = 只看目录",
+                    },
+                    "to_chapter": {
+                        "type": "integer",
+                        "description": "到第几章结束（含）。不传 = 到最后一章",
+                    },
+                    "limit_chars": {
+                        "type": "integer",
+                        "description": "每章最多返回多少字，0 = 全文（上限 4000）",
+                    },
+                },
+                "required": ["title"],
+            },
+            handler=_review_book,
         ),
     ]
