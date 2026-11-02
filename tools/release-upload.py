@@ -134,12 +134,40 @@ def main() -> int:
         )
         took = time.time() - t0
         out = r.stdout.decode("utf-8", "replace")
-        # --progress-bar 的输出混在 stdout 里，取最后一个 JSON 对象
-        brace = out.rfind("{")
-        try:
+        """
+        ## 🔴 解析响应：`rfind("{")` 会切出残片（2026-11-02 修）
+
+        原实现：
+
+            brace = out.rfind("{")
             data = json.loads(out[brace:]) if brace >= 0 else {}
-        except json.JSONDecodeError:
-            data = {}
+
+        `rfind` 找的是**最后一个 `{`**，而响应 JSON 里对象是嵌套的
+        （`"uploader": {...}` / `"digest"` 之后的字段），于是截出来的是
+        一段**以 `{` 开头的残片**，`json.loads` 抛 JSONDecodeError，
+        `data` 变成 `{}`，然后被判成"失败"。
+
+        实际后果（v0.2.4 发版时踩到）：**文件真的传上去了**
+        （GitHub 那边 `state=uploaded`、digest 与本地一致），
+        但脚本报「❌ 失败」，于是我以为没传、又传了一遍。
+
+        修法：`--progress-bar` 的进度条走 **stderr**，JSON 在 **stdout**，
+        所以直接 `json.loads(out)` 即可；兜底再试"从第一个 `{` 到最后一个 `}`"。
+        """
+        data: dict[str, object] = {}
+        for candidate in (
+            out.strip(),                       # 正常情况下 stdout 就是纯 JSON
+            out[out.find("{"): out.rfind("}") + 1] if "{" in out else "",
+        ):
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                data = parsed
+                break
 
         if "id" not in data:
             say("   ❌ 失败：" + (out[-400:] if out else (r.stderr or b"").decode('utf-8','replace')[:300]))
