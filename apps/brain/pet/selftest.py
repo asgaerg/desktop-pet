@@ -4705,6 +4705,48 @@ def _cleanup_workspace_tmp() -> None:
         pass
 
 
+def _warn_bare_tmp_dirs() -> None:
+    """报告项目根下**无前缀**的 `tmp*` 目录（2026-11-02 加）。
+
+    ## 为什么要报
+
+    用户问：「ai项目路径下有tmphlwm6f2s这种文件夹是干什么的，好多这种，
+    有些还是空文件夹」。
+
+    查下来是**测试/调试脚本**用了裸 `tempfile.mkdtemp()`（没有 prefix）：
+
+      · 本环境 `tempfile` 的落点就是**工作区根**（见上面 `_sweep_stale_memory_tmp`）
+      · 无前缀 = 那个清扫只认 `pet-selftest-mem-`，永远收不到它们
+      · 于是每跑一次就积一个，41 个里有 23 个是当天的
+
+    根因已修（那条测试现在带 `prefix=` 且 `finally` 里自己删）。但
+    **不能保证以后没人再写裸 `mkdtemp()`**，所以这里加一道检测。
+
+    ## ⚠️ 为什么只警告、不自动删
+
+    `tmp*` 这个名字太通用 —— 项目根下可能有别人（其它工具、用户自己）
+    建的同名目录。自动删的风险（删掉不该删的）远大于收益（省一次手动清理）。
+
+    所以只在**自检跑完时**打一行提示，让人知道"这些是垃圾，可以删"。
+    """
+    try:
+        root = Path(__file__).resolve().parents[3]   # 仓库根
+        bare = [
+            d for d in root.iterdir()
+            if d.is_dir() and d.name.startswith("tmp") and not d.name.startswith("tmp-")
+        ]
+    except OSError:
+        return
+    if not bare:
+        return
+    print(
+        f"⚠️ 仓库根有 {len(bare)} 个无前缀的 tmp* 目录（多半是调试脚本用裸 "
+        f"mkdtemp() 留下的，可以删）：{'、'.join(d.name for d in bare[:5])}"
+        + ("…" if len(bare) > 5 else ""),
+        file=sys.stderr,
+    )
+
+
 _MEM_TMP_PREFIX = "pet-selftest-mem-"
 
 
@@ -9424,46 +9466,67 @@ def test_reading(suite: "Suite") -> None:
 
         from .reading import BookChunk
 
-        # 造一个和 read_many 落盘格式一致的文件
-        tmp = _P(tempfile.mkdtemp()) / "测试书.txt"
-        body_lines = [f"第{i}段正文，这里有一些内容用来凑字数。" for i in range(1, 40)]
-        tmp.write_text(
-            "《测试书》\n来源：测试源\n开始：2026-11-02 10:00:00\n\n\n"
-            "<!-- chapter:3 -->\n"
-            "────────────────────────────────────────\n"
-            "第 3 章  测试章节\n"
-            "下载于 2026-11-02 10:00:01\n"
-            "────────────────────────────────────────\n"
-            + "\n".join(body_lines),
-            encoding="utf-8",
-        )
+        # ⚠️ 必须带 `prefix` 并自己清理（2026-11-02 修）
+        #
+        # 第一版写的是 `tempfile.mkdtemp()`（无前缀），两个问题：
+        #
+        #   ① 本环境 `tempfile` 的落点就是**工作区根**（见
+        #      `_sweep_stale_memory_tmp` 的注释），于是每跑一次自检
+        #      就在项目根留一个 `tmpXXXXXXXX` 目录。用户问：
+        #      「ai项目路径下有tmphlwm6f2s这种文件夹是干什么的，好多这种」
+        #
+        #   ② 无前缀 = `_sweep_stale_memory_tmp` 扫不到它
+        #      （那个清扫只认 `pet-selftest-mem-` 前缀），永远没人收。
+        #
+        # 现在：带前缀 + `finally` 里删干净。和本文件其它临时目录一个规矩。
+        tmp_dir = _P(tempfile.mkdtemp(prefix="pet-selftest-readbody-"))
+        try:
+            tmp = tmp_dir / "测试书.txt"
+            body_lines = [f"第{i}段正文，这里有一些内容用来凑字数。" for i in range(1, 40)]
+            tmp.write_text(
+                "《测试书》\n来源：测试源\n开始：2026-11-02 10:00:00\n\n\n"
+                "<!-- chapter:3 -->\n"
+                "────────────────────────────────────────\n"
+                "第 3 章  测试章节\n"
+                "下载于 2026-11-02 10:00:01\n"
+                "────────────────────────────────────────\n"
+                + "\n".join(body_lines),
+                encoding="utf-8",
+            )
 
-        # 复刻 reading_tools 里"读正文文件"的那段
-        raw = tmp.read_text(encoding="utf-8")
-        keep = []
-        for line in raw.splitlines():
-            s = line.strip()
-            if not s:
-                continue
-            if s.startswith("<!-- chapter:"):
-                continue
-            if s.startswith("──") or s.startswith("《"):
-                continue
-            if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
-                continue
-            keep.append(s)
-        body = "\n".join(keep)
+            # 复刻 reading_tools 里"读正文文件"的那段
+            raw = tmp.read_text(encoding="utf-8")
+            keep = []
+            for line in raw.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith("<!-- chapter:"):
+                    continue
+                if s.startswith("──") or s.startswith("《"):
+                    continue
+                if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
+                    continue
+                keep.append(s)
+            body = "\n".join(keep)
 
-        _assert(len(body) > 500, f"正文应当远大于摘要（100 字），实际 {len(body)}")
-        _assert("第39段正文" in body, "正文应当包含最后一段（摘要会丢掉它）")
-        # 文件头/章节标记都要清掉，别把"下载于…"写进记忆
-        _assert("下载于" not in body, "记忆里不该有「下载于」这种噪音")
-        _assert("<!-- chapter:" not in body, "记忆里不该有章节标记")
-        _assert("来源：" not in body, "记忆里不该有来源行")
+            _assert(len(body) > 500, f"正文应当远大于摘要（100 字），实际 {len(body)}")
+            _assert("第39段正文" in body, "正文应当包含最后一段（摘要会丢掉它）")
+            # 文件头/章节标记都要清掉，别把"下载于…"写进记忆
+            _assert("下载于" not in body, "记忆里不该有「下载于」这种噪音")
+            _assert("<!-- chapter:" not in body, "记忆里不该有章节标记")
+            _assert("来源：" not in body, "记忆里不该有来源行")
 
-        # 顺便确认 BookChunk 能装下完整正文
-        chunk = BookChunk(title="测试书", source="read_book", text=body, kind="book", chars=len(body))
-        _assert(len(chunk.text) > 500, "chunk 应当装完整正文")
+            # 顺便确认 BookChunk 能装下完整正文
+            chunk = BookChunk(
+                title="测试书", source="read_book", text=body, kind="book", chars=len(body)
+            )
+            _assert(len(chunk.text) > 500, "chunk 应当装完整正文")
+        finally:
+            # ⚠️ 一定删干净 —— 不删就在项目根留垃圾（用户会问"这些是什么"）
+            import shutil as _sh
+
+            _sh.rmtree(tmp_dir, ignore_errors=True)
 
         return "回调给完整正文；文件头/章节标记/下载时间都已清掉"
 
@@ -9566,6 +9629,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ⚠️ 同理清掉 `.tmp-test/` 里本次建的目录（2026-10-09 加）。
     #    这里兜底是因为有两个测试忘了自己清，428 次累积了 224 MB。
     _cleanup_workspace_tmp()
+    # 顺便报告仓库根下**无前缀**的 tmp*（2026-11-02 加）。
+    # 那些多半是调试脚本用裸 `mkdtemp()` 留下的 —— 只提示，不自动删
+    # （`tmp*` 太通用，可能是别的工具建的）。
+    _warn_bare_tmp_dirs()
     return 0 if suite.ok else 1
 
 
