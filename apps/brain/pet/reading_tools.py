@@ -138,10 +138,55 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
             try:
                 from .reading import BookChunk
 
+                # 🔴 要给**真正的正文**，不是摘要片段（2026-11-02 修）
+                #
+                # ## 原来的 bug
+                #
+                # 第一版写的是：
+                #
+                #     text="\n".join(f"{n}：{s}" for n, s in samples)
+                #
+                # 而 `samples` 是 `read_many` 里每章取 100 字的**摘要**
+                # （`body[:100]`），用于给模型"感受一下内容"。
+                #
+                # 后果：这条 chunk 被 `_remember_reading` 写进记忆后长这样：
+                #
+                #     （我读了书《诡秘之主》——我自己找的）
+                #     第三十三章 "开关"（第一更求推荐票）：老尼尔话音刚落…
+                #     第三十四章 预付的报酬（第二更求推荐票）：没有窗户的地下室内…
+                #
+                # 两段各 100 字，第二段停在一句话中间。用户翻记忆时问：
+                # 「最新一条是没说完话吗」—— 是的，因为**它本来就只有 100 字**。
+                #
+                # 正文其实已经完整落在 `path` 里了，读出来就行。
+                body = ""
+                try:
+                    from pathlib import Path as _P
+
+                    raw = _P(path).read_text(encoding="utf-8", errors="replace")
+                    # 去掉文件头（书名/来源/开始时间）和章节标记行，
+                    # 只留正文 —— 记忆里不需要"下载于 2026-11-02"这种噪音。
+                    keep: list[str] = []
+                    for line in raw.splitlines():
+                        s = line.strip()
+                        if not s:
+                            continue
+                        if s.startswith("<!-- chapter:"):
+                            continue
+                        if s.startswith("──") or s.startswith("《"):
+                            continue
+                        if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
+                            continue
+                        keep.append(s)
+                    body = "\n".join(keep)
+                except Exception:  # noqa: BLE001 —— 读不到就退回摘要
+                    log.warning("读正文文件失败，退回摘要片段", exc_info=True)
+                    body = "\n".join(f"{n}：{s}" for n, s in samples)
+
                 chunk = BookChunk(
                     title=title,
                     source="read_book",
-                    text="\n".join(f"{n}：{s}" for n, s in samples),
+                    text=body,
                     kind="book",
                     saved_path=path,
                     chars=total_chars,

@@ -3508,17 +3508,21 @@ class Gateway:
         #   · 而且这时用户**正在等回答**，该做的是讲内容，不是"随口提一句"
         #
         # 其它 source 是自己闲着读的，沿用原来那套"别背原文"的约束。
+        #
+        # ⚠️ 截断一律走 `_clip_at_sentence`，不用 `chunk.text[:N]`（2026-11-02）：
+        #    生切会停在半个字上，模型看到一句断掉的话会跟着"补全"，
+        #    或者自己也说一半 —— 用户翻记忆时就是被这个骗到的。
         if chunk.source == "read_book" and from_dialog:
             return (
                 f"你刚按用户的要求读了{kind}《{chunk.title}》，"
-                f"内容大意是：{chunk.text[:400]}\n"
+                f"内容大意是：{_clip_at_sentence(chunk.text, 400)}\n"
                 "用户正在等你回应。挑**具体的内容**说（人物、情节、你注意到的一点），"
                 "不要只说「我读到了」「这本书不错」这种空话 —— "
                 "他会觉得你根本没看。也不要整段复述原文。"
             )
         return (
             f"你刚才自己看了一段{kind}（用户不知道，是你闲着时看的）："
-            f"《{chunk.title}》。内容大意是：{chunk.text[:280]}\n"
+            f"《{chunk.title}》。内容大意是：{_clip_at_sentence(chunk.text, 280)}\n"
             "如果想聊就挑**一个**你最有感觉的点说，像随口提起，"
             "**不要复述原文，不要报书名和字数**，也别说'我刚刚读了'这种话。"
             "一到两句。"
@@ -5044,6 +5048,22 @@ class Gateway:
         写成普通 assistant 轮会让模型以为**它跟用户说过这句话**，
         下轮可能说「我上次跟你提过这本书」。所以开头明确写
         「（我读了…）」，让它分得清"我读过"和"我说过"。
+
+        ## 🔴 截断必须落在**句子边界**（2026-11-02 修，用户当场发现）
+
+        原来这里是 `chunk.text[:600]` —— 生切。实测写进去的一条长这样：
+
+            （我读了书《诡秘之主》——我自己找的）
+            第三十三章 "开关"… 第三十四章 预付的报酬…据说他制造的秘
+
+        结尾停在「秘」字上。用户翻记忆时看到就问：「最新一条是没说完话吗」。
+
+        **它确实像没说完** —— 而且这个印象会传到模型那里：那一轮回复
+        是紧接在这条记忆后面生成的，模型看到一段断掉的话，
+        可能跟着"补全"或者说话说一半。
+
+        修法：`_clip_at_sentence()` —— 从 600 字往回找最近的句末标点
+        （。！？…"』），在它后面截断。找不到才硬切（并补省略号）。
         """
         if self.memory is None:
             return
@@ -5051,10 +5071,8 @@ class Gateway:
             from_dialog = bool(getattr(self, "_reading_from_dialog", False))
             kind_word = "书" if getattr(chunk, "kind", "book") == "book" else "帖子"
             who = "用户推荐我读的" if from_dialog else "我自己找的"
-            text = (
-                f"（我读了{kind_word}《{chunk.title}》——{who}）\n"
-                f"{chunk.text[:600]}"
-            )
+            body = _clip_at_sentence(str(getattr(chunk, "text", "") or ""), 600)
+            text = f"（我读了{kind_word}《{chunk.title}》——{who}）\n{body}"
             # ⚠️ `session_id` 在 **Conversation** 上（gateway.py:464），不在 Gateway。
             #    这是反复出现的「属性在另一个类上」—— 门禁 `check-self-refs.py`
             #    只查方法不查属性，所以这类错误它抓不到，只能靠运行时报错。
@@ -5783,6 +5801,62 @@ class Gateway:
     def new_say_id(self) -> str:
         """给插件用的发言 id 分配器。"""
         return self.conversation.new_say_id()
+
+
+def _clip_at_sentence(text: str, limit: int) -> str:
+    """把文本截到 `limit` 字以内，但**必须落在句子边界**上。
+
+    ## 为什么不能直接 `text[:limit]`
+
+    2026-11-02 用户翻记忆时问：「最新一条是没说完话吗」。
+
+    实际写进去的是阅读历史，用 `chunk.text[:600]` 生切的，结尾长这样：
+
+        据说罗塞尔大帝曾经看过"亵渎石板"，据说他制造的秘
+
+    停在「秘」字上 —— **看起来就是话说了一半**。
+
+    而且这个印象会传到模型那里：那一轮回复是紧接在这条记忆后面
+    生成的，模型看到一段断掉的话，可能跟着"补全"或者自己说话也说一半。
+
+    ## 怎么找边界
+
+    从 `limit` 往回找**最近的**句末标点，在它后面截断：
+
+        。！？…  —— 中文常用句末
+        .!?      —— 英文/数字结尾
+        "』」）  —— 引号/括号收尾（对话体小说大量使用）
+
+    ⚠️ 往回找的上限是 40% —— 再往前就没有"截断"的意义了（保留太少）。
+    找不到就硬切，并补一个省略号，至少让"这里是断的"是**明确**的，
+    而不是看起来像话说了一半。
+
+    ## 为什么不用 `textwrap` / 正则整段切
+
+    只需要"别停在半个字上"这一件事。引入更复杂的切句逻辑
+    （考虑省略号连用、引号嵌套）收益很低 —— 记忆里那段只是给模型
+    看的摘要，不是要出版。
+    """
+    if limit <= 0 or not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    # 从末尾往回找句末标点（最多回退 40%）
+    floor = max(0, int(limit * 0.6))
+    # ⚠️ 用集合而不是字符串字面量：中文收尾引号（”』」）本身就在
+    #    字符串里，写成 `in "”』」"` 会让引号嵌套、语法直接崩。
+    ENDS = set("。！？…!?.")
+    TAILS = set("”』」）)】")
+    for i in range(len(head) - 1, floor - 1, -1):
+        if head[i] in ENDS:
+            # 把紧随其后的收尾引号/括号也带上（对话体很常见）
+            j = i + 1
+            while j < len(head) and head[j] in TAILS:
+                j += 1
+            return head[:j]
+    # 找不到句末 -> 硬切 + 省略号（明确表示"这里是断的"）
+    return head + "…"
 
 
 def _parse_search_text(raw: str) -> list[dict[str, str]]:

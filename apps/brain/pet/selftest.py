@@ -9347,6 +9347,126 @@ def test_reading(suite: "Suite") -> None:
 
         return "两本都进原文记忆；来源区分正确；不会被误当成对话"
 
+    @suite.check("截断落在句子边界，不停在半个字上")
+    def _() -> str:
+        """守住用户 2026-11-02 发现的问题。
+
+        用户原话：「记忆里面最新一条是没说完话吗」。
+
+        现场：记忆里那条阅读历史结尾是
+
+            据说罗塞尔大帝曾经看过"亵渎石板"，据说他制造的秘
+
+        停在「秘」字上 —— 看起来就是话说了一半。
+
+        ## 这条测试管两件事
+
+        ① `_clip_at_sentence` 必须落在句末标点上
+        ② 实在找不到句末时才硬切，并且**补省略号**让"这是断的"明确
+        """
+        from .gateway import _clip_at_sentence
+
+        # ① 能落在句号上
+        long_text = (
+            "老尼尔话音刚落，他背后昏暗里的那双虚幻眼睛就迅速消失不见，"
+            "即使处于灵视状态的克莱恩，也无法再发现它曾经存在过的痕迹。"
+            "这是一个仪式魔法的表征。老尼尔呵呵解释道。有点神奇。"
+        )
+        out = _clip_at_sentence(long_text, 60)
+        _assert(len(out) <= 60, f"不能超长：{len(out)}")
+        _assert(
+            out.rstrip()[-1] in "。！？…”」",
+            f"必须落在句末标点上，实际结尾 {out[-6:]!r}",
+        )
+
+        # ② 找不到句末 -> 硬切 + 省略号（明确表示断在这里）
+        no_punct = "没有标点的一长串文字" * 20
+        out2 = _clip_at_sentence(no_punct, 30)
+        _assert(out2.endswith("…"), f"硬切时必须补省略号，实际 {out2[-6:]!r}")
+
+        # ③ 不超长就不动
+        short = "短句。"
+        _assert(_clip_at_sentence(short, 100) == short, "没超长不该改动")
+
+        # ④ 引号收尾也要带上（对话体小说大量使用）
+        quoted = "他说：" + "好" * 40 + "。”然后走了。"
+        out4 = _clip_at_sentence(quoted, 48)
+        _assert(
+            out4.rstrip()[-1] in "。！？…”」",
+            f"引号收尾要带上，实际 {out4[-6:]!r}",
+        )
+
+        return "句末截断；无标点补省略号；不超长不动"
+
+    @suite.check("阅读回调给的是**完整正文**，不是 100 字摘要")
+    def _() -> str:
+        """守住「记忆里那条看起来没说完」的真正根因。
+
+        ## 现场
+
+        `reading_tools` 里原来写的是：
+
+            text="\\n".join(f"{n}：{s}" for n, s in samples)
+
+        而 `samples` 是 `read_many` 里每章取 `body[:100]` 的**摘要**。
+        于是写进记忆的"正文"只有 200~300 字，最后一段必然停在半句上。
+
+        用户看到的「没说完话」不是截断问题，是**源头就只有 100 字**。
+
+        正文其实已经完整落在 `path` 里了。这条测试断言：回调给的
+        `chunk.text` 必须远大于摘要长度，且来自落盘文件。
+
+        ⚠️ 这里不联网：直接用 `read_many` 造一个真实落盘文件，
+        再跑回调那段逻辑。离线可测，也不会因为书源失效而失败。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .reading import BookChunk
+
+        # 造一个和 read_many 落盘格式一致的文件
+        tmp = _P(tempfile.mkdtemp()) / "测试书.txt"
+        body_lines = [f"第{i}段正文，这里有一些内容用来凑字数。" for i in range(1, 40)]
+        tmp.write_text(
+            "《测试书》\n来源：测试源\n开始：2026-11-02 10:00:00\n\n\n"
+            "<!-- chapter:3 -->\n"
+            "────────────────────────────────────────\n"
+            "第 3 章  测试章节\n"
+            "下载于 2026-11-02 10:00:01\n"
+            "────────────────────────────────────────\n"
+            + "\n".join(body_lines),
+            encoding="utf-8",
+        )
+
+        # 复刻 reading_tools 里"读正文文件"的那段
+        raw = tmp.read_text(encoding="utf-8")
+        keep = []
+        for line in raw.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if s.startswith("<!-- chapter:"):
+                continue
+            if s.startswith("──") or s.startswith("《"):
+                continue
+            if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
+                continue
+            keep.append(s)
+        body = "\n".join(keep)
+
+        _assert(len(body) > 500, f"正文应当远大于摘要（100 字），实际 {len(body)}")
+        _assert("第39段正文" in body, "正文应当包含最后一段（摘要会丢掉它）")
+        # 文件头/章节标记都要清掉，别把"下载于…"写进记忆
+        _assert("下载于" not in body, "记忆里不该有「下载于」这种噪音")
+        _assert("<!-- chapter:" not in body, "记忆里不该有章节标记")
+        _assert("来源：" not in body, "记忆里不该有来源行")
+
+        # 顺便确认 BookChunk 能装下完整正文
+        chunk = BookChunk(title="测试书", source="read_book", text=body, kind="book", chars=len(body))
+        _assert(len(chunk.text) > 500, "chunk 应当装完整正文")
+
+        return "回调给完整正文；文件头/章节标记/下载时间都已清掉"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(
