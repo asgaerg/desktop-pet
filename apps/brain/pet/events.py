@@ -505,6 +505,11 @@ class EventEngine:
         #: ⚠️ 用函数而不是直接持有 ModuleRegistry：events.py 不该依赖 modules.py
         #:    的具体类型，而且用户改模块开关后要能**立刻**生效（现读配置）。
         self.module_enabled: Optional[Callable[[str], bool]] = None
+        #: 安静档查询函数（Gateway 注入，2026-11-02）。
+        #:
+        #: 用户要求「安静状态下不触发任何事件」。用函数而不是布尔：
+        #: 用户随时可能切档，值必须**现读**，缓存就成假开关了。
+        self.quiet_tier: Optional[Callable[[], bool]] = None
 
     def _module_on(self, name: str) -> bool:
         """模块是否开着。没注入查询函数时按**开**处理（不误伤）。"""
@@ -515,6 +520,31 @@ class EventEngine:
         except Exception:  # noqa: BLE001 —— 模块查询失败不该让事件全停
             log.debug("模块开关查询失败（按开处理）", exc_info=True)
             return True
+
+    def _quiet_tier(self) -> bool:
+        """宠物现在是不是「安静」档（2026-11-02 用户要求）。
+
+        ## 用户原话
+
+        > 「安静状态下不主动说话，不触发任何事件，安静30分钟后，
+        >   转到无聊后才开始计算用户不予宠物聊天的计时」
+
+        ## 为什么用注入的函数，而不是让 events.py 读配置
+
+        `events.py` 不该知道 `config.activity_tier` 长什么样 ——
+        它只管"抽不抽事件"。由 Gateway 注入
+        `lambda: config.activity_tier.key == "quiet"`。
+
+        ⚠️ 没注入时按**不安静**处理（保守：不误伤，事件照常跑）。
+        这和 `_module_on` 的取舍一致 —— 缺配置不该让功能静默停摆。
+        """
+        if self.quiet_tier is None:
+            return False
+        try:
+            return bool(self.quiet_tier())
+        except Exception:  # noqa: BLE001
+            log.debug("安静档查询失败（按不安静处理）", exc_info=True)
+            return False
 
     # ------------------------------------------------------- 单占位槽（互斥）
 
@@ -651,6 +681,25 @@ class EventEngine:
         mod = self.module_of.get(spec.kind)
         if mod and not self._module_on(mod):
             return False, f"module_off:{mod}"
+        # 🔴 安静档不触发任何事件（2026-11-02 用户要求）
+        #
+        # 用户原话：「安静状态下不主动说话，不触发任何事件，
+        # 安静30分钟后，转到无聊后才开始计算用户不予宠物聊天的计时」。
+        #
+        # ## 为什么放在这里（而不是各个 handler 里各判一次）
+        #
+        # `eligible()` 是**唯一的入口** —— 抽事件之前必然过这里。
+        # 放在这里就等于"安静档下所有事件一视同仁地不抽"，
+        # 以后新加事件也不用记得再判一次。
+        #
+        # ## 和 `quiet_hours` 的区别
+        #
+        #   quiet_hours  用户设的**时间段**（比如 23:00-08:00，按钟点）
+        #   quiet_tier   宠物自己的**档位**（用户点了「安静」或精力低）
+        #
+        # 两者独立，都要拦。
+        if self._quiet_tier():
+            return False, "quiet_tier"
         if in_conversation:
             return False, "in_conversation"
         # 🔴 槽位被占 -> 不触发（2026-10-25 单占位槽）。

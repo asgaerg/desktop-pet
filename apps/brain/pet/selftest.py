@@ -8420,9 +8420,19 @@ def test_state_machine(suite: SelfTest) -> None:
         # 然后因为"安静粘滞"永久卡死（精力 0 < 0.4 -> 安静 -> 出不来）。
         #
         # 修法两步（都是用户定的）：
-        #   ① 安静时缓慢回血（0.02/分钟，封顶 0.85）
+        #   ① 安静时缓慢回血（速率见 `ENERGY_RECOVER_PER_MIN`，封顶 0.85）
         #   ② 回满后自动转无聊（否则回血只救精力、救不回状态）
         import time as _time
+
+        # ⚠️ 期望值**从常量推导**，不写死数字（2026-11-02 改）。
+        #
+        # 原来这里写的是 `abs(e.energy - 0.2) < 0.01`（对应 0.02/分钟）。
+        # 用户要求「自然增长 30 分钟才回到无聊」后速率改成 0.015，
+        # 这条测试立刻挂了 —— 但代码是对的，只是测试钉死了旧数字。
+        #
+        # 速率是**用户可调的参数**（他这次就调了），测试不该钉死它。
+        # 该钉的是"10 分钟回多少 = 10 × 速率"这个**关系**。
+        per_min = EmotionState.ENERGY_RECOVER_PER_MIN
 
         # ① 回血
         #
@@ -8433,16 +8443,18 @@ def test_state_machine(suite: SelfTest) -> None:
         e.set_state_provider(lambda: QUIET)
         e._last_update = _time.time() - 600   # 正好 10 分钟
         e.tick()
+        want_10 = 10 * per_min
         _assert(
-            abs(e.energy - 0.2) < 0.01,
-            f"安静 10 分钟应回到约 0.20，实际 {e.energy:.3f}",
+            abs(e.energy - want_10) < 0.01,
+            f"安静 10 分钟应回到约 {want_10:.3f}，实际 {e.energy:.3f}",
         )
-        # 再 10 分钟 -> 0.40（两次 tick 累积，证明会持续回）
+        # 再 10 分钟 -> 20 分钟的量（两次 tick 累积，证明会持续回）
         e._last_update = _time.time() - 600
         e.tick()
+        want_20 = 20 * per_min
         _assert(
-            abs(e.energy - 0.4) < 0.01,
-            f"再 10 分钟应回到约 0.40，实际 {e.energy:.3f}",
+            abs(e.energy - want_20) < 0.01,
+            f"再 10 分钟应回到约 {want_20:.3f}，实际 {e.energy:.3f}",
         )
         # 封顶
         e2 = EmotionState(energy=0.8)
@@ -9604,6 +9616,140 @@ def test_reading(suite: "Suite") -> None:
         )
 
         return "正文照读；空章/版权页跳过；楔子序章放行"
+
+    @suite.check("安静档：不主动说话、不触发事件，且恢复正好 30 分钟")
+    def _() -> str:
+        """守住用户 2026-11-02 的要求。
+
+        用户原话：
+
+        > 「状态调节现在调到安静时，将指数调低，让它要自然增长30分钟才回到无聊，
+        >   这样变相的能让用户安静，然后是安静状态下不主动说话，不触发任何事件，
+        >   安静30分钟后，转到无聊后才开始计算用户不予宠物聊天的计时。」
+
+        ## 三件事，分开断言
+
+        ① 恢复速率要让 0.4 -> 0.85 正好 30 分钟
+        ② 安静档：调度器不开口 + 事件不抽
+        ③ 安静期间"多久没聊天"的计时被重置（转到无聊后才开始算）
+
+        ①③ 是纯数学/状态，②要构造 Gateway。
+        """
+        import time as _t
+
+        from .brains.base import EmotionState
+        from .config import Config
+        from .events import EventEngine, get_event
+        from .gateway import Gateway
+
+        # ① 恢复正好 30 分钟
+        per_min = EmotionState.ENERGY_RECOVER_PER_MIN
+        cap = EmotionState.ENERGY_RECOVER_CAP
+        low = 0.4
+        mins = (cap - low) / per_min
+        _assert(
+            abs(mins - 30.0) < 0.5,
+            f"安静恢复到能转无聊应约 30 分钟，实际 {mins:.1f} 分钟（速率 {per_min}/分）",
+        )
+
+        # ② 安静档门控（用真实 Gateway 验，避免"两处各写一套"）
+        cfg = Config()
+        gw = Gateway(cfg)
+        _assert(gw.events.quiet_tier is not None, "Gateway 必须注入 quiet_tier 查询函数")
+
+        gw.config.root.setdefault("activity", {})["overall"] = 0.1   # 安静
+        _assert(
+            gw.scheduler.suppression_reason() == "quiet_tier",
+            f"安静档调度器应被拦，实际 {gw.scheduler.suppression_reason()!r}",
+        )
+        _assert(
+            not gw.scheduler.evaluate().speak,
+            "安静档不该主动开口",
+        )
+        spec = get_event("reading")
+        ok, why = gw.events.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(not ok, "安静档不该抽事件")
+        _assert(why == "quiet_tier", f"原因应为 quiet_tier，实际 {why!r}")
+
+        # 其它三档必须放行（否则"安静"就成了永久静音）
+        for name, val in (("无聊", 0.5), ("好奇", 0.8), ("自言自语", 1.0)):
+            gw.config.root["activity"]["overall"] = val
+            _assert(
+                gw.scheduler.suppression_reason() is None,
+                f"{name}档不该被安静门控拦住",
+            )
+            ok2, why2 = gw.events.eligible(
+                spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+            )
+            _assert(ok2, f"{name}档事件应当可抽，实际 {why2!r}")
+
+        # ③ 安静期间不计"多久没聊天"
+        #
+        # 这条是**异步方法**里的逻辑，单独调一次验证。用 asyncio.run 跑。
+        import asyncio
+
+        async def _check_timer() -> tuple[float, float]:
+            gw.config.root["activity"]["overall"] = 0.1
+            gw.state.switch("quiet", "测试")
+            gw.state.last_chat_at = _t.time() - 3600      # 假装一小时没聊
+            await gw._check_condition_rules()
+            quiet_idle = _t.time() - gw.state.last_chat_at
+
+            gw.state.switch("bored", "测试")
+            gw.state.last_chat_at = _t.time() - 1800      # 半小时没聊
+            await gw._check_condition_rules()
+            bored_idle = _t.time() - gw.state.last_chat_at
+            return quiet_idle, bored_idle
+
+        quiet_idle, bored_idle = asyncio.run(_check_timer())
+        _assert(
+            quiet_idle < 5,
+            f"安静期间计时必须重置（否则一转无聊就立刻满足30分钟），实际 {quiet_idle:.0f}s",
+        )
+        _assert(
+            bored_idle > 1700,
+            f"无聊档计时应当正常累积，实际 {bored_idle:.0f}s",
+        )
+
+        return "恢复30分钟；安静档全拦；安静期间不计聊天时长"
+
+    @suite.check("事件模块：没注入 quiet_tier 时按「不安静」处理（不误伤）")
+    def _() -> str:
+        """缺配置不该让事件静默停摆。
+
+        `EventEngine.quiet_tier` 是 Gateway 注入的。独立使用（测试、
+        脚本）时它是 `None` —— 那时必须**放行**，不能因为"读不到"
+        就把所有事件停掉。
+
+        这和 `_module_on` 的取舍一致：保守方向是"功能照常"，
+        而不是"因为不知道就全禁"。
+        """
+        import random as _random
+        import time as _t
+
+        from .events import EventEngine, get_event
+
+        gate = EventEngine(rng=_random.Random(7))
+        _assert(gate.quiet_tier is None, "新引擎默认不该有 quiet_tier")
+        spec = get_event("reading")
+        ok, why = gate.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(ok, f"没注入时应当放行，实际 {why!r}")
+
+        # 注入一个会抛异常的 -> 也要放行（不能因为查询失败就停摆）
+        def _boom() -> bool:
+            raise RuntimeError("查询炸了")
+
+        gate.quiet_tier = _boom
+        ok2, why2 = gate.eligible(
+            spec, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+        )
+        _assert(ok2, f"查询异常时应当按「不安静」放行，实际 {why2!r}")
+
+        return "没注入/查询异常都放行，不会静默停摆"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

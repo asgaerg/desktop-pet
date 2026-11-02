@@ -280,7 +280,46 @@ class Scheduler:
             return "focus_guard"
         if self.in_quiet_hours():
             return "quiet_hours"
+        # 🔴 安静档不主动说话（2026-11-02 用户要求）
+        #
+        # 用户原话：「安静状态下不主动说话，不触发任何事件」。
+        #
+        # ⚠️ 放在最后：前面几条是**用户显式施加的**（免打扰、专注、静音时段），
+        #    它们是"现在别说话"的硬理由，日志里应该优先显示它们。
+        #    安静档是**宠物自己的状态**，排在后面才不会盖住用户的操作。
+        #
+        # ⚠️ `include_disabled=False`（用户手动戳它）时**也要拦**：
+        #    用户明确说了"安静状态下不主动说话"，而"戳一下"是**用户主动**的，
+        #    不是宠物主动 —— 但它仍然会被这条挡住。
+        #
+        #    这里选择拦住，理由是：安静档的语义是"歇着，别打扰我"，
+        #    这时突然说话（哪怕是应和）违背了用户点安静档的意图。
+        #    用户真想说，切回无聊档即可。
+        if self.in_quiet_tier():
+            return "quiet_tier"
         return None
+
+    def in_quiet_tier(self) -> bool:
+        """当前活泼度档位是不是「安静」（2026-11-02）。
+
+        ## 为什么用档位而不是精力值
+
+        用户点"安静"档和精力掉到 0.4 以下**都会**进入安静状态，
+        但这是两件事：
+          · 精力低 -> 身体累了（会自己恢复）
+          · 用户点安静 -> **他要清静**（不该被精力恢复提前结束）
+
+        判据用档位（`activity_tier.key == "quiet"`）而不是精力，
+        因为档位是用户**显式选择**的意图，而精力是运行时状态。
+
+        ⚠️ 但两者最终都会落到 `state == "quiet"`，而状态机里"精力回满
+        就转无聊"那条规则会让安静**自动结束** —— 那正是用户要的
+        "自然增长 30 分钟才回到无聊"。
+        """
+        try:
+            return self.config.activity_tier.key == "quiet"
+        except Exception:  # noqa: BLE001 —— 配置异常不该让调度器崩
+            return False
 
     def evaluate(self, observation_age_s: Optional[float] = None) -> Decision:
         """

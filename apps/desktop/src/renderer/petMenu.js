@@ -669,7 +669,9 @@
       // `main/petMenuTemplate.ts` 里的 activityOption 文案**逐字一致**，
       // 否则自绘菜单和真菜单会显示两套名字。
       { label: '活泼度', value: '无聊', icon: 'spark', submenu: [
-        { label: '安静 · 注意力在你身上，不截图', type: 'radio', checked: false, action: 'activity:0.1' },
+        // ⚠️ 2026-11-02 同步：真菜单里改成「切换状态后，30分钟后变为无聊」
+        //    （用户要求）。这里必须跟着改，否则自绘菜单显示旧文案。
+        { label: '安静 · 切换状态后，30分钟后变为无聊', type: 'radio', checked: false, action: 'activity:0.1' },
         { label: '无聊 · 自己找事做，偶尔发呆', type: 'radio', checked: true, action: 'activity:0.5' },
         { label: '好奇 · 会自主截图，偶尔搭话', type: 'radio', checked: false, action: 'activity:0.8' },
         { label: '自言自语 · 注意力在自己，会自主截图，20 分钟后安静', type: 'radio', checked: false, action: 'activity:1' },

@@ -2690,6 +2690,16 @@ class Gateway:
         #    —— 这个项目已经吃过太多次"假开关"的亏。
         self.events.module_of["reading"] = "reading"
         self.events.module_enabled = self.modules.enabled
+        # 🔴 安静档不触发任何事件（2026-11-02 用户要求）
+        #
+        # 用户原话：「安静状态下不主动说话，不触发任何事件，
+        # 安静30分钟后，转到无聊后才开始计算用户不予宠物聊天的计时」。
+        #
+        # ⚠️ 用 lambda 现读，不缓存：用户随时可能切档，缓存就成假开关。
+        # ⚠️ 判据是**档位**（activity_tier.key）而不是精力值 ——
+        #    档位是用户的显式选择，精力是运行时状态。两者都会导致
+        #    state == "quiet"，但"用户点了安静"和"它累了"的意图不同。
+        self.events.quiet_tier = lambda: self.config.activity_tier.key == "quiet"
         # 条件事件表（状态切换的三条规则）。
         #
         # ⚠️ 这是 2026-10-25 的架构调整：判定从 `state.py::tick()` 搬到这里。
@@ -4636,6 +4646,32 @@ class Gateway:
             log.debug("状态同步失败（已忽略）", exc_info=True)
 
     async def _check_condition_rules(self) -> None:
+        # 🔴 安静期间**不计入**"用户多久没聊天"（2026-11-02 用户要求）
+        #
+        # 用户原话：
+        #
+        # > 「安静状态下不主动说话，不触发任何事件，安静30分钟后，
+        # >   转到无聊后才开始计算用户不予宠物聊天的计时。」
+        #
+        # ## 为什么要在每次 tick 刷新 `last_chat_at`
+        #
+        # "用户多久没聊天"是靠 `now - state.last_chat_at` 算的。
+        # 安静期间如果**不**刷新它，那么：
+        #
+        #     用户点了「安静」-> 精力慢慢回 -> 30 分钟后转无聊
+        #     -> 但 idle_s 已经是 30 分钟了 -> **立刻又满足"30分钟没聊天"**
+        #     -> 两条规则打架，日志里能看到同一 tick 来回切
+        #
+        # 更糟的是语义错了：用户在安静档待的这 30 分钟**不该算作**
+        # "他冷落了我" —— 是他主动让宠物休息的。
+        #
+        # 刷新它 = 把安静的这 30 分钟"跳过"，计时从**转无聊那一刻**重新开始。
+        # 这正是用户要的"转到无聊后才开始计算"。
+        #
+        # ⚠️ 只在 `state == "quiet"` 时刷，其它状态照常累积。
+        if self.state.state == "quiet":
+            self.state.last_chat_at = time.time()
+
         for _ in range(4):  # 一轮最多连锁切 4 次（防规则互相触发成死循环）
             ctx = {
                 "state": self.state.state,
