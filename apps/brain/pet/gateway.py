@@ -2849,6 +2849,11 @@ class Gateway:
         self._state_task: Optional[asyncio.Task[None]] = None
         # 表情包标注循环（2026-11-02）
         self._sticker_label_task: Optional[asyncio.Task[None]] = None
+        # 免打扰期间截的图，等用户关掉免打扰时再聊（2026-11-04）
+        #
+        # 每项是 `{description, image, titles, at}`。
+        # ⚠️ 上限 20 张（见截图循环里的说明）：图片在内存里，挂一天不能无限攒。
+        self._pending_snaps: list[dict[str, Any]] = []
         # 上一次「截图说话」的时刻（monotonic）。0 = 还没说过。
         # 截图说完 60 秒内不搭话 —— 见 _on_autonomy_speak 里的优先级判断。
         self._last_screen_speak_at: float = 0.0
@@ -2913,6 +2918,15 @@ class Gateway:
             audio_out=BroadcastAudioOutput(self._send_voice_audio),
         )
         self.voice.attach()
+        # 🔴 免打扰/静音时**不合成语音**（2026-11-04 用户要求）
+        #
+        # 用户原话：「开启之后宠物不再出声和显示气泡」。
+        # `VoiceSession.speak()` 是所有语音的唯一出口，在那里拦截最可靠。
+        #
+        # ⚠️ 判定交给调度器的 `_suppression()`：
+        #    它同时管免打扰、静音时段、专注保护 —— 三件事都该禁声。
+        #    自己在这里再写一份条件必然漂移。
+        self.voice._speech_allowed = lambda: self.scheduler.suppression_reason() is None
         # 把「发消息给主进程」的能力交给需要它的引擎（本地 TTS 要请求主进程
         # 起 PowerShell 合成 —— 见 voice.py 里 WindowsSapiTtsEngine 的说明）
         self.voice.attach_sender(self.broadcast)
@@ -3242,7 +3256,18 @@ class Gateway:
         self.conversation.sync_vitality()
         # 免打扰由前端/托盘经 config.update 切换，这里同步到调度器。
         # 单一真相源是配置：前端不再自己维护一份 paused 状态。
-        self.scheduler.set_muted(bool(self.config.autonomy.get("muted", False)))
+        was_muted = self.scheduler.muted
+        now_muted = bool(self.config.autonomy.get("muted", False))
+        self.scheduler.set_muted(now_muted)
+        # 🔴 刚**关掉**免打扰 -> 立刻用期间截的图聊（2026-11-04 用户要求）
+        #
+        # 用户原话：「等待用户关闭免打扰之后可以立刻根据免打扰时宠物
+        # 截的图来对话。」
+        #
+        # ⚠️ 只在「原本是免打扰、现在不是」这一刻触发 ——
+        #    不能每次配置更新都跑（改个音量大小时会突然冒出一句话）。
+        if was_muted and not now_muted:
+            await self._flush_pending_snaps()
         # 提供者配置（provider / base_url / model / 密钥）变了就重建大脑。
         #
         # 为什么需要这条：早先 config.update 只刷新调度器，改 provider 之后
@@ -5435,6 +5460,32 @@ class Gateway:
                 if not result.ok:
                     log.info("自主截图：没看懂（%s）—— 这次跳过", result.message)
                     continue
+                # 🔴 免打扰时：**只截图，不说话**（2026-11-04 用户要求）
+                #
+                # 用户原话：「开启之后宠物不再出声和显示气泡，但是如果用户
+                # 开启了自主截图功能，那么宠物每隔半小时会截一张图，等待
+                # 用户关闭免打扰之后可以立刻根据免打扰时宠物截的图来对话。」
+                #
+                # 所以这里把结果**存进待用队列**，不 `speak_autonomously`。
+                # 用户关掉免打扰时由 `_flush_pending_snaps()` 取出来聊。
+                if self.scheduler.muted:
+                    self._pending_snaps.append(
+                        {
+                            "description": result.description,
+                            "image": result.image,
+                            "titles": list(result.titles or ()),
+                            "at": time.time(),
+                        }
+                    )
+                    # 队列上限：免得挂机一整天攒几十张在内存里
+                    # （每张几十 KB，20 张约 1~2 MB，可接受）
+                    if len(self._pending_snaps) > 20:
+                        self._pending_snaps.pop(0)
+                    log.info(
+                        "自主截图：免打扰中，只截图不说话（待用 %d 张）",
+                        len(self._pending_snaps),
+                    )
+                    continue
                 await self.conversation.speak_autonomously(
                     {
                         "source": "autosnap",
@@ -6166,6 +6217,81 @@ class Gateway:
                 "requestId": "",
             },
         )
+
+    async def _flush_pending_snaps(self) -> None:
+        """免打扰结束后，用期间截的图开口聊（2026-11-04 用户要求）。
+
+        ## 用户原话
+
+        > 「开启之后宠物不再出声和显示气泡，但是如果用户开启了自主截图功能，
+        >   那么宠物每隔半小时会截一张图，等待用户关闭免打扰之后可以立刻
+        >   根据免打扰时宠物截的图来对话。」
+
+        ## 用哪一张
+
+        用**最新**那张（`[-1]`），不是最早那张 —— 用户刚回来，
+        他更关心"刚才"而不是"两小时前"。
+
+        ⚠️ 但要在提示词里说明"这是你在他免打扰期间看到的"，
+           否则模型会以为自己**正在**看屏幕，说成"你屏幕上现在是…"。
+
+        ## 拼接方式
+
+        如果攒了多张，把它们的描述按时间顺序拼起来（最多 3 张）——
+        让模型能看出"这段时间里画面变过几次"，而不是只有一帧。
+        图片只用最新那张（多张图会让 token 爆掉，而且旧的参考价值低）。
+        """
+        snaps = list(self._pending_snaps)
+        if not snaps:
+            return
+        self._pending_snaps.clear()
+
+        # 最多用 3 张的描述（再多就是噪音）
+        recent = snaps[-3:]
+        latest = snaps[-1]
+
+        parts: list[str] = []
+        if len(recent) == 1:
+            parts.append(
+                "这是你在他开启免打扰期间看到的一帧画面"
+                f"（{time.strftime('%H:%M', time.localtime(latest['at']))}）："
+                f"{latest['description']}"
+            )
+        else:
+            parts.append("这是你在他开启免打扰期间看到的几帧画面（按时间顺序）：")
+            for i, s in enumerate(recent, 1):
+                when = time.strftime("%H:%M", time.localtime(s["at"]))
+                parts.append(f"{i}. {when} —— {s['description']}")
+        parts.append(
+            "他刚关掉免打扰。如果画面里有值得说的，就顺着它开口；"
+            "**说清这是刚才看到的**，不要说成「你现在屏幕上」——"
+            "中间可能已经过了很久。"
+        )
+        hint = "\n".join(parts)
+
+        log.info(
+            "免打扰结束：用期间截的 %d 张图里最新那张开口（共攒了 %d 张）",
+            len(recent),
+            len(snaps),
+        )
+        try:
+            await self.conversation.speak_autonomously(
+                {
+                    "source": "dnd-snap",
+                    "context_hint": hint,
+                    # ⚠️ 键名必须是 `stage_direction`：那个会进 **user 轮**，
+                    #    而 `context_hint` 只进 system（容易被记忆压过去）。
+                    "stage_direction": (
+                        "你刚结束一段沉默（用户开了免打扰）。"
+                        "现在可以直接说你在那段时间里看到的东西。"
+                    ),
+                    "screen": latest["description"],
+                },
+                image=latest.get("image") or None,
+                image_mime="image/jpeg",
+            )
+        except Exception:  # noqa: BLE001 —— 开口失败不该影响别的
+            log.warning("免打扰结束后的开口失败（已忽略）", exc_info=True)
 
     async def _snap_and_chat(self, req_id: str = "") -> None:
         """

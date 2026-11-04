@@ -244,6 +244,22 @@ export const HANDLERS_TAKING_CHECKED_STATE: ReadonlySet<string> = new Set([
   'toggleChatMode',
   // ⚠️ 语音播报（2026-10-14）同理：不登记的话每次点击都是"关闭"
   'toggleTtsSpeech',
+  /*
+   * 免打扰（2026-11-04 改成 checkbox）。
+   *
+   * 原来是"点一次静音 30 分钟"的普通项 —— 那时它不需要勾选状态。
+   * 用户现在要的是**开关**（开着就一直静音，直到他自己关掉），
+   * 于是它变成了 `type: 'checkbox'`。
+   *
+   * ⚠️ 现在它必须收 `enabled`：不登记的话传 undefined，
+   *    `setPausedInternal(!paused)` 那边会按 `!undefined === true` 处理 ——
+   *    点一次能开，再点**还是开**，永远关不掉。
+   *
+   * ⚠️ 但 `togglePause` 的签名是 `() => void`（不要参数）——
+   *    处理器表那边调它时不传参，它自己 `!paused` 翻转。
+   *    登记在这里只是让**门禁**知道"这个是 checkbox"，行为不变。
+   */
+  'togglePause',
 ]);
 
 /**

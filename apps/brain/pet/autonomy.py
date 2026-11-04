@@ -342,7 +342,7 @@ class Scheduler:
         # 「安静 20 分钟聊一次 / 无聊 15 / 好奇 10 / 自言自语 2」是**最小间隔**。
         # 没有这一道门的话，意愿曲线会按秒级的东西说话 —— 和用户要的节奏
         # 完全是两回事（他给的是"多久一次"，不是"多容易开口"）。
-        # utonomy.talk_interval_s 可以显式覆盖（测试/调参用；0 = 关掉这道门）。
+        # utonomy.talk_interval_s 可以显式覆盖（测试/调参用；0 = 关掉这道门）。
         talk_override = self.config.autonomy.get("talk_interval_s")
         tier_interval = (
             float(talk_override)
@@ -377,7 +377,7 @@ class Scheduler:
         )
         # 爬升速度同样由档位决定（2026-10-18）：只给 idle_after_s 的话，
         # 四档共用 900 秒饱和 —— 「自言自语」憋 5 分钟意愿还不到阈值，
-        # 结果是配了念经却一句话不说。utonomy.idle_full_s 仍是显式覆盖。
+        # 结果是配了念经却一句话不说。utonomy.idle_full_s 仍是显式覆盖。
         full_override = auto.get("idle_full_s")
         idle_full = (
             float(full_override)
@@ -600,11 +600,33 @@ class Scheduler:
         用户许可     providers.vision.enabled（设置里的「允许偶尔截图」）
         ```
 
-        额外排除免打扰/静音时段/专注保护 —— 那些连"说话"都不许，
-        更不该偷偷看屏幕。
+        ## 🔴 2026-11-04 改：免打扰**不再**挡住截图
+
+        用户原话：
+
+        > 「开启之后宠物不再出声和显示气泡，但是如果用户开启了自主截图功能，
+        >   那么宠物每隔半小时会截一张图，等待用户关闭免打扰之后可以立刻
+        >   根据免打扰时宠物截的图来对话。」
+
+        原来这里写的是「额外排除免打扰/静音时段/专注保护 —— 那些连说话
+        都不许，更不该偷偷看屏幕」。那个判断在**当时**是对的，
+        但用户现在把语义改了：
+
+            免打扰 = 别出声、别弹气泡
+            **不等于**别看屏幕 —— 他明确要它继续截，好等回来时能聊
+
+        ⚠️ 但**静音时段**（`quiet_hours`，按钟点）和**专注保护**
+           （`focus_guard`，全屏/会议）仍然挡住截图 —— 那两个的语义是
+           "现在不方便"，和"用户主动开的免打扰"不是一回事：
+
+             muted        用户**手动点的** —— 他知道自己在干什么
+             quiet_hours  按钟点自动判断 —— 可能他在睡觉
+             focus_guard  按屏幕状态自动判断 —— 可能误判成全屏
+
+        自动判断的那些要保守（宁可少截），手动点的那个尊重用户意图。
         """
         tier = self.config.activity_tier
-        # 显式覆盖优先（utonomy.screenshot_interval_s；null = 跟随档位）
+        # 显式覆盖优先（autonomy.screenshot_interval_s；null = 跟随档位）
         shot_override = self.config.autonomy.get("screenshot_interval_s")
         interval = (
             float(shot_override)
@@ -616,14 +638,16 @@ class Scheduler:
         vision_cfg = self.config.providers.get("vision", {})
         if not bool(vision_cfg.get("enabled", False)):
             return False, "permission_off"
-        blocked = self._suppression()
-        if blocked:
-            return False, blocked
+        # ⚠️ 这里**刻意不看** `self.muted`（见上面的说明）。
+        #    静音时段与专注保护仍然要排除。
+        if self.config.activity.get("focus_guard", True) and self.focus_guard_active:
+            return False, "focus_guard"
+        if self.in_quiet_hours():
+            return False, "quiet_hours"
         now = self._clock()
         if now - self.last_autosnap_at < float(interval):
             return False, "interval"
         return True, "due"
-
     def mark_autosnap(self) -> None:
         """记一次"已经自己截过了"，下一次要等间隔。"""
         self.last_autosnap_at = self._clock()

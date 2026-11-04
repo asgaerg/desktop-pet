@@ -88,6 +88,19 @@ export interface BubbleDecisionInput {
    * 省略时按 `true`（假定健康）—— 没观测到失败就不改变原行为。
    */
   ttsHealthy?: boolean;
+  /**
+   * 免打扰是否开着（2026-11-04 加）。
+   *
+   * 用户原话：「开启之后宠物不再出声和显示气泡」。
+   *
+   * ⚠️ 它排在**沉浸模式之前**：免打扰是"彻底别出声、别露脸"，
+   * 比沉浸模式（"只听语音"）更绝对。沉浸模式还允许"生成失败时给文字"，
+   * 而免打扰连那个都不给。
+   *
+   * 省略时按 `false`（不免打扰）—— 不给这个参数的调用方
+   * （比如老测试）保持原行为。
+   */
+  muted?: boolean;
 }
 
 export function decideBubble(input: BubbleDecisionInput): BubbleDecision {
@@ -95,6 +108,17 @@ export function decideBubble(input: BubbleDecisionInput): BubbleDecision {
 
   // ① 总开关：用户关掉之后连沉浸模式的"例外"也不弹
   if (!input.bubbleVisible) return { show: false, why: '气泡已被菜单关闭' };
+
+  /*
+   * 🔴 ①-b 免打扰：一律不弹（2026-11-04 用户要求）
+   *
+   * > 「开启之后宠物不再出声和显示气泡」
+   *
+   * ⚠️ 放在沉浸模式**之前**：免打扰比沉浸模式更绝对。
+   *    沉浸模式允许"生成失败时用文字兜底"，免打扰连兜底都不要 ——
+   *    用户就是想让屏幕彻底安静。
+   */
+  if (input.muted) return { show: false, why: '免打扰：不弹气泡' };
 
   if (!input.immersiveMode) return { show: true, why: '常规' };
 

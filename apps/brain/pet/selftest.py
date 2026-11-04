@@ -8457,13 +8457,33 @@ def test_state_machine(suite: SelfTest) -> None:
             f"再 10 分钟应回到约 {want_20:.3f}，实际 {e.energy:.3f}",
         )
         # 封顶
+        #
+        # ⚠️ 2026-11-04 改：不能假设"一次 tick 就回满"。
+        #
+        # `tick()` 把 elapsed 截断到 600 秒（10 分钟），所以单次最多回
+        # `10 × 速率`。速率 0.00375 时那只有 0.0375 —— 从 0.8 回不到 0.85。
+        #
+        # 这在**真实运行时**不是问题：tick 每 30 秒一次，逐步累积就能到顶。
+        # 是这条测试的假设错了（它按旧速率 0.02 写的，那时一次 10 分钟能回 0.2）。
+        #
+        # 所以改成**循环 tick** 直到封顶，并断言它确实停在上限。
         e2 = EmotionState(energy=0.8)
         e2.set_state_provider(lambda: QUIET)
+        for _ in range(60):      # 最多 60 次 × 10 分钟 = 10 小时，足够
+            e2._last_update = _time.time() - 600
+            e2.tick()
+            if abs(e2.energy - EmotionState.ENERGY_RECOVER_CAP) < 1e-9:
+                break
+        _assert(
+            abs(e2.energy - EmotionState.ENERGY_RECOVER_CAP) < 1e-6,
+            f"反复回血应当封顶在 {EmotionState.ENERGY_RECOVER_CAP}，实际 {e2.energy:.3f}",
+        )
+        # 封顶后再 tick 也不能涨
         e2._last_update = _time.time() - 600
         e2.tick()
         _assert(
-            abs(e2.energy - EmotionState.ENERGY_RECOVER_CAP) < 1e-6,
-            f"应封顶在 {EmotionState.ENERGY_RECOVER_CAP}，实际 {e2.energy:.3f}",
+            e2.energy <= EmotionState.ENERGY_RECOVER_CAP + 1e-9,
+            f"封顶后不该继续涨，实际 {e2.energy:.3f}",
         )
         # 非安静照常衰减（不能"一直回血"，否则粘滞形同虚设）
         e3 = EmotionState(energy=0.7)
@@ -9603,19 +9623,23 @@ def test_reading(suite: "Suite") -> None:
 
         return "正文照读；空章/版权页跳过；楔子序章放行"
 
-    @suite.check("安静档：不主动说话、不触发事件，且恢复正好 30 分钟")
+    @suite.check("安静档：不主动说话、不触发事件，且恢复正好 2 小时")
     def _() -> str:
-        """守住用户 2026-11-02 的要求。
+        """守住用户 2026-11-02 的要求，以及 2026-11-04 的时长调整。
 
-        用户原话：
+        用户原话（11-02）：
 
         > 「状态调节现在调到安静时，将指数调低，让它要自然增长30分钟才回到无聊，
         >   这样变相的能让用户安静，然后是安静状态下不主动说话，不触发任何事件，
         >   安静30分钟后，转到无聊后才开始计算用户不予宠物聊天的计时。」
 
+        用户原话（11-04）：
+
+        > 「把安静30分钟到无聊改成2小时。」
+
         ## 三件事，分开断言
 
-        ① 恢复速率要让 0.4 -> 0.85 正好 30 分钟
+        ① 恢复速率要让 0.4 -> 0.85 正好 **2 小时**
         ② 安静档：调度器不开口 + 事件不抽
         ③ 安静期间"多久没聊天"的计时被重置（转到无聊后才开始算）
 
@@ -9628,14 +9652,15 @@ def test_reading(suite: "Suite") -> None:
         from .events import EventEngine, get_event
         from .gateway import Gateway
 
-        # ① 恢复正好 30 分钟
+        # ① 恢复正好 2 小时（120 分钟）
         per_min = EmotionState.ENERGY_RECOVER_PER_MIN
         cap = EmotionState.ENERGY_RECOVER_CAP
         low = 0.4
         mins = (cap - low) / per_min
         _assert(
-            abs(mins - 30.0) < 0.5,
-            f"安静恢复到能转无聊应约 30 分钟，实际 {mins:.1f} 分钟（速率 {per_min}/分）",
+            abs(mins - 120.0) < 1.0,
+            f"安静恢复到能转无聊应约 120 分钟（2 小时），"
+            f"实际 {mins:.1f} 分钟（速率 {per_min}/分）",
         )
 
         # ② 安静档门控（用真实 Gateway 验，避免"两处各写一套"）
@@ -9699,7 +9724,7 @@ def test_reading(suite: "Suite") -> None:
             f"无聊档计时应当正常累积，实际 {bored_idle:.0f}s",
         )
 
-        return "恢复30分钟；安静档全拦；安静期间不计聊天时长"
+        return "恢复2小时；安静档全拦；安静期间不计聊天时长"
 
     @suite.check("事件模块：没注入 quiet_tier 时按「不安静」处理（不误伤）")
     def _() -> str:
@@ -10558,6 +10583,114 @@ def test_reading(suite: "Suite") -> None:
         _assert("module_off" in why3, f"原因要说明：{why3!r}")
 
         return "默认关；打开可抽；关联网时连带关"
+
+    @suite.check("免打扰：静音 + 不弹气泡，但**继续截图**、关掉后立刻聊")
+    def _() -> str:
+        """用户 2026-11-04 要求。
+
+        > 「顺便加一个功能，免打扰，放在宠物控制里面，开启之后宠物不再出声
+        >   和显示气泡，但是如果用户开启了自主截图功能，那么宠物每隔半小时
+        >   会截一张图，等待用户关闭免打扰之后可以立刻根据免打扰时宠物
+        >   截的图来对话。」
+
+        ## 四件事分开断言
+
+        ① 免打扰中**不合成语音**（`VoiceSession.speak` 被拦）
+        ② 免打扰中**不弹气泡**（主进程 `decideBubble` 的 muted 参数 ——
+           那条在 TypeScript 里，这里测后端那半）
+        ③ 免打扰中**仍然截图**（`screenshot_due` 不再看 muted）
+        ④ 关掉免打扰时用待用截图开口
+
+        ⚠️ ③ 是最容易做错的：原来的 `screenshot_due` 用 `_suppression()`
+           挡掉了所有抑制原因（含 muted），用户这次明确要"继续截"。
+        """
+        import asyncio
+        import tempfile
+        from pathlib import Path as _P
+
+        from .config import Config
+        from .gateway import Gateway
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-dnd-"))
+        try:
+            import os as _os
+
+            old = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                cfg = Config()
+                gw = Gateway(cfg)
+            finally:
+                if old is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old
+
+            # ── ① 不合成语音 ──
+            gw.scheduler.set_muted(True)
+            calls: list[str] = []
+            orig_syn = gw.voice.tts.synthesize
+
+            async def _spy(text):
+                calls.append(text)
+                return b"", "wav"
+
+            gw.voice.tts.synthesize = _spy
+            try:
+                asyncio.run(gw.voice.speak("不该合成", "t1"))
+            finally:
+                gw.voice.tts.synthesize = orig_syn
+            _assert(not calls, f"免打扰中不该合成语音，实际调了 {len(calls)} 次")
+
+            # ── ② 说话被抑制（气泡那半在 TS 里，这里测后端的抑制）──
+            why = gw.scheduler.suppression_reason(include_disabled=False)
+            _assert(why == "muted", f"免打扰中应当抑制说话，实际 {why!r}")
+
+            # ── ③ 仍然截图 ──
+            gw.config.root.setdefault("providers", {}).setdefault("vision", {})[
+                "enabled"
+            ] = True
+            gw.config.root.setdefault("activity", {})["overall"] = 0.8   # 好奇档
+            gw.scheduler.last_autosnap_at = -1e9
+            due, why2 = gw.scheduler.screenshot_due()
+            _assert(
+                due,
+                f"免打扰中**仍然要能截图**（用户要求），实际 {why2!r}",
+            )
+
+            # ── ④ 关掉免打扰 -> 用待用截图开口 ──
+            gw._pending_snaps = [
+                {"description": "一个代码编辑器", "image": b"x", "titles": [], "at": 100.0},
+                {"description": "一张漫画页", "image": b"y", "titles": [], "at": 200.0},
+            ]
+            spoke: list[dict] = []
+            orig_speak = gw.conversation.speak_autonomously
+
+            async def _cap(trigger=None, **kw):
+                spoke.append({"trigger": trigger or {}, "kw": kw})
+
+            gw.conversation.speak_autonomously = _cap
+            try:
+                asyncio.run(gw._flush_pending_snaps())
+            finally:
+                gw.conversation.speak_autonomously = orig_speak
+
+            _assert(len(spoke) == 1, f"应当开口 1 次，实际 {len(spoke)}")
+            hint = str(spoke[0]["trigger"].get("context_hint") or "")
+            _assert("代码编辑器" in hint, f"提示词该带上画面描述：{hint[:80]!r}")
+            _assert("漫画页" in hint, "两帧都该带上（让模型知道画面变过）")
+            _assert(
+                "免打扰期间" in hint,
+                "必须说明这是**期间**看到的，否则模型会说成「你现在屏幕上」",
+            )
+            _assert(not gw._pending_snaps, "开口之后队列要清空")
+            _assert(bool(spoke[0]["kw"].get("image")), "应当带上最新那张图")
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "不合成语音；说话被抑制；仍然截图；关掉后立刻用待用图开口"
 
 
 def main(argv: Optional[list[str]] = None) -> int:

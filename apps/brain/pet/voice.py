@@ -2912,9 +2912,33 @@ class VoiceSession:
 
         包络是从音频算出来的**真实**数据，不是随机数 —— P1 的口型联动因此从
         "看起来在动"升级为"确实跟着音量在动"。
+
+        ## 🔴 免打扰时**一声都不出**（2026-11-04 用户要求）
+
+        用户原话：「开启之后宠物不再出声和显示气泡」。
+
+        原来免打扰只挡了"自主说话"（调度器的 `muted` 抑制），
+        而**用户打字时它照样回复、照样合成语音** —— 那不算免打扰。
+
+        拦截点选在这里而不是主进程：`speak()` 是**所有**语音的唯一出口
+        （实时说话、试听、以后的任何新路径都走它），放这里不会漏。
+        放主进程的话要改 `tts.synthesize` 的 handler，还有可能被别的
+        调用方绕过。
+
+        ⚠️ 用注入的 `speech_allowed` 而不是直接读配置：
+            `VoiceSession` 不认识 `Config.autonomy`，而且"现在该不该出声"
+            这件事由调度器统一判定（它还管静音时段、专注保护）。
         """
         if not text.strip():
             return
+        check = getattr(self, "_speech_allowed", None)
+        if check is not None:
+            try:
+                if not check():
+                    log.info("免打扰/静音中：这句不合成语音（%d 字）", len(text))
+                    return
+            except Exception:  # noqa: BLE001 —— 判定失败就照常说
+                log.debug("语音放行判定失败（按允许处理）", exc_info=True)
         try:
             payload, fmt = await self.tts.synthesize(text)
         except asyncio.CancelledError:

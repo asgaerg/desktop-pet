@@ -2614,7 +2614,7 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
       // ⚠️ 2026-11-02 用户改的：原来是「安静 · 注意力在你身上，不截图」。
       //    新文案说的是"多久自己恢复"，比"注意力/截图"更贴近用户想知道的事。
       //    30 分钟这个数字是真的（精力恢复 0.015/分，0.4 -> 0.85 正好 30 分钟）。
-      '安静 · 切换状态后，30分钟后变为无聊',
+      '安静 · 切换状态后，2小时后变为无聊',
       '无聊 · 自己找事做，偶尔发呆',
       '好奇 · 会自主截图，偶尔搭话',
       '自言自语 · 注意力在自己，会自主截图，20 分钟后安静',
@@ -2713,8 +2713,9 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
     );
     const quietLabel = stateLabels.find((s) => (s ?? '').startsWith('安静')) ?? '';
     check(
-      '状态：安静档写明 30 分钟后转无聊',
-      quietLabel.includes('30') && quietLabel.includes('无聊'),
+      // ⚠️ 2026-11-04 用户把 30 分钟改成了 2 小时
+      '状态：安静档写明 2 小时后转无聊',
+      quietLabel.includes('2') && quietLabel.includes('小时') && quietLabel.includes('无聊'),
       `实际：${JSON.stringify(quietLabel)}`,
     );
   }
@@ -3305,7 +3306,34 @@ console.log('\n10. petMenu：右键菜单的结构与功能标注');
   // 不写死下标：菜单项会变（这次插入了「隐藏/显示对话框」，免打扰挪到第 3 位）。
   // 按 action 找才稳，否则每插一项都要改一次测试。
   const pauseItem = (ctrl2?.submenu ?? []).find((i) => i.action === 'toggle-pause');
-  check('免打扰项在暂停时含「恢复」', (pauseItem?.label ?? '').includes('恢复'), '实际：' + (pauseItem?.label ?? ''));
+  /*
+   * ⚠️ 2026-11-04 改：免打扰从「30 分钟一次性」变成**checkbox 开关**。
+   *
+   * 用户原话：「开启之后宠物不再出声和显示气泡……等待用户关闭免打扰之后
+   * 可以立刻根据免打扰时宠物截的图来对话。」
+   *
+   * 所以现在断言的是"它是个 checkbox 且勾选状态跟着 paused 走"，
+   * 而不是"标签里有「恢复」"（那是文字会变的那种形态）。
+   */
+  check(
+    '免打扰项是 checkbox，且勾选状态跟着 paused',
+    pauseItem?.type === 'checkbox' && pauseItem?.checked === true,
+    `实际：${JSON.stringify(pauseItem)}`,
+  );
+  const pauseOff = buildPetMenuTemplate({ ...state, paused: false });
+  const pauseOffItem = (pauseOff.find((i) => i.label === '桌宠控制')?.submenu ?? []).find(
+    (i) => i.action === 'toggle-pause',
+  );
+  check(
+    '免打扰未开启时 checkbox 是未勾选',
+    pauseOffItem?.type === 'checkbox' && pauseOffItem?.checked === false,
+    `实际：${JSON.stringify(pauseOffItem?.checked)}`,
+  );
+  check(
+    '免打扰文案说明「仍会截图」',
+    (pauseItem?.label ?? '').includes('截图'),
+    `实际：${JSON.stringify(pauseItem?.label)}`,
+  );
 
   // ---- 「隐藏/显示对话框」（用户要求：点击后文字会变） ----
   {

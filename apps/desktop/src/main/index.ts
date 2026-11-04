@@ -610,6 +610,12 @@ function forwardToBubble(message: { type?: string }): boolean {
      * 不再有一层模块门控。这正是用户要的：少一层开关，少一处"看着关了实际没关"。
      */
     bubbleVisible,
+    // 🔴 免打扰：一律不弹气泡（2026-11-04 用户要求）
+    //
+    // 用户原话：「开启之后宠物不再出声和显示气泡」。
+    // 原来这里没有 `paused` 判断 —— 免打扰只挡了"自主说话"，
+    // 用户打字时它照样回、照样弹气泡。
+    muted: paused,
     immersiveMode,
     reason: (message as { reason?: string }).reason,
     ttsEnabled,
@@ -3832,7 +3838,18 @@ function setActivity(value: number, options: { persist?: boolean } = {}): void {
 }
 
 function togglePause(): void {
-  setPausedInternal(!paused, paused ? 0 : 30);
+  /*
+   * 🔴 2026-11-04 改成**不限时的开关**（原来是"静音 30 分钟"）。
+   *
+   * 用户原话：「顺便加一个功能，免打扰，放在宠物控制里面，开启之后宠物
+   * 不再出声和显示气泡……等待用户关闭免打扰之后可以立刻根据免打扰时
+   * 宠物截的图来对话。」
+   *
+   * `minutes = 0` 表示"手动取消前一直有效"（见 `setPausedInternal`）。
+   * 原来传的 `30` 是"半小时后自动恢复" —— 那更像"稍后提醒"，
+   * 而用户要的是真开关：开着就一直静音，直到他自己关掉。
+   */
+  setPausedInternal(!paused, 0);
 }
 
 /*
