@@ -65,6 +65,127 @@ window.pet.on('chat:focus-input', () => {
   input.focus();
 });
 
+/* --------------------------------------------------------------- 发图片 */
+/*
+ * 2026-11-02 用户要求：「可以用图片和用户聊天」。
+ *
+ * ## 三条输入路径，一个出口
+ *
+ *   ① 点按钮选文件
+ *   ② 粘贴（**最常用** —— 截图之后直接粘）
+ *   ③ 拖拽文件进来
+ *
+ * 三条都调 `sendImageFile(file)`，最终都走 `window.pet.sendImage()`。
+ *
+ * ## 为什么统一读成 dataURL
+ *
+ * 粘贴路径里图片在剪贴板、**没有文件路径**；拖拽进来的可能是临时文件。
+ * 统一读成 dataURL 就没有这些差别了（代价是消息变大，主进程会挡上限）。
+ */
+
+const pickImage = el('pick-image');
+const imageInput = el('image-input');
+
+/** 上限 10 MB，和主进程一致（这里挡是为了即时反馈） */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * 把 File 读成 dataURL 并发出。
+ *
+ * ⚠️ 用 FileReader 而不是 `file.arrayBuffer()` + 手写 base64：
+ *    后者对几 MB 的图会有明显的卡顿，而 FileReader 是浏览器原生异步实现。
+ */
+function sendImageFile(file) {
+  if (!file || !String(file.type || '').startsWith('image/')) return;
+  if (file.size > MAX_IMAGE_BYTES) {
+    toast(`图片太大（${(file.size / 1024 / 1024).toFixed(1)} MB，上限 10 MB）`);
+    return;
+  }
+  if (busy) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = String(reader.result || '');
+    if (!dataUrl.startsWith('data:image/')) return;
+    // 把输入框里已经打好的字一起带上 —— 用户常常"先打一句话再拖图进来"
+    const text = input.value.trim();
+    window.pet.sendImage({ dataUrl, name: String(file.name || ''), text });
+    if (text) input.value = '';
+    setBusy(true);
+    setTimeout(() => setBusy(false), 15000); // 看图比打字慢，给久一点
+  };
+  reader.onerror = () => toast('这张图片读不出来');
+  reader.readAsDataURL(file);
+}
+
+/** 极简提示：对话条没有说话气泡的位置，用状态点闪一下 + 临时改 placeholder */
+function toast(text) {
+  const old = input.placeholder;
+  input.placeholder = text;
+  if (dot) {
+    dot.dataset.level = 'bad';
+    setTimeout(paintDot, 2500);
+  }
+  setTimeout(() => {
+    input.placeholder = old;
+  }, 2500);
+}
+
+// ① 按钮 -> 系统文件选择器
+if (pickImage && imageInput) {
+  pickImage.addEventListener('click', () => imageInput.click());
+  imageInput.addEventListener('change', () => {
+    const file = imageInput.files && imageInput.files[0];
+    if (file) sendImageFile(file);
+    imageInput.value = ''; // 允许连着选同一张
+  });
+}
+
+// ② 粘贴
+/*
+ * ⚠️ 监听在 **document** 上而不是 input 上：用户在对话条任何地方粘贴
+ *    都应该生效（尤其刚点完按钮、焦点不在输入框时）。
+ */
+document.addEventListener('paste', (event) => {
+  const items = (event.clipboardData && event.clipboardData.items) || [];
+  for (const item of items) {
+    if (String(item.type || '').startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) {
+        event.preventDefault();
+        sendImageFile(file);
+        return;
+      }
+    }
+  }
+  // 不是图片就交给浏览器默认行为（普通文字照常粘进输入框）
+});
+
+// ③ 拖拽
+/*
+ * ⚠️ 必须 preventDefault 两个事件：不拦 `dragover` 的话
+ *    浏览器会**拒绝** drop（Electron 里表现为"拖进来什么也没发生"）。
+ */
+document.addEventListener('dragover', (event) => {
+  if (!event.dataTransfer) return;
+  const hasFile = Array.from(event.dataTransfer.types || []).includes('Files');
+  if (hasFile) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }
+});
+
+document.addEventListener('drop', (event) => {
+  const files = (event.dataTransfer && event.dataTransfer.files) || [];
+  for (const file of files) {
+    if (String(file.type || '').startsWith('image/')) {
+      event.preventDefault();
+      sendImageFile(file);
+      return;
+    }
+  }
+});
+
 // 运行状态：只用来着色那个小圆点
 window.pet.on('chat:status', (payload) => {
   lastStatus = String((payload && payload.text) || '');

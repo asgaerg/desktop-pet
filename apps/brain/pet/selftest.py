@@ -10009,6 +10009,570 @@ def test_reading(suite: "Suite") -> None:
 
         return "杂谈绑 search、小说绑 reading；关联网时两个都停"
 
+    @suite.check("图片存储：入库/去重/按情绪分类/标注/挑选")
+    def _() -> str:
+        """用户 2026-11-02 要求：
+
+        > 「表情包和图片专门在项目下里一个文件夹储存。」
+
+        这条测的是 `media.MediaStore` 的**纯本地逻辑**（不联网、不调模型）：
+        建目录、入库、去重、按情绪归类、标注、挑一个发出去。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .media import EMOTIONS, MediaStore
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-media-"))
+        try:
+            s = MediaStore(tmp / "pet-media")
+            s.ensure_dirs()
+
+            # ① 标准目录都建出来了（用户进去能看到该往哪放）
+            for key in ("happy", "sad", "speechless", "ignore"):
+                _assert(
+                    (s.root / "stickers" / key).is_dir(),
+                    f"应当建出 stickers/{key}/ 目录",
+                )
+            _assert((s.root / "stickers" / "_inbox").is_dir(), "应当有 _inbox")
+            _assert((s.root / "images").is_dir(), "应当有 images")
+
+            # ② 入库 -> 进 _inbox（带情绪才进 stickers/<emotion>）
+            it = s.add_file(b"\x89PNG-fake-1", "cat.png", source="user-put")
+            _assert(it is not None, "入库应当成功")
+            _assert(it.path.startswith("stickers/_inbox/"), f"应当在 _inbox：{it.path}")
+            _assert(it.caption == "", "新入库的应当没有标注")
+            _assert(len(s.unlabeled()) == 1, "应当有 1 个未标注")
+
+            # ③ 去重：同内容再放一次 -> 不新增
+            it2 = s.add_file(b"\x89PNG-fake-1", "another.png", source="user-put")
+            _assert(it2 is it, "同一内容应当返回同一个对象（不重复写文件）")
+            _assert(s.stats()["total"] == 1, f"总数应当还是 1，实际 {s.stats()['total']}")
+
+            # ④ 标注 + 归类
+            s.annotate(it, "一只橘猫在笑", by="auto")
+            _assert(it.caption == "一只橘猫在笑", "标注没写进去")
+            _assert(s.move_to_emotion(it, "happy"), "挪进 happy 应当成功")
+            _assert(it.emotion == "happy", f"情绪应当是 happy，实际 {it.emotion!r}")
+            _assert(it.path.startswith("stickers/happy/"), f"path 应当更新：{it.path}")
+            _assert(len(s.unlabeled()) == 0, "标注后不该再算未标注")
+
+            # ⑤ 按情绪查 / 挑一个
+            pool = s.stickers_for("happy")
+            _assert(len(pool) == 1, f"happy 下应当有 1 个，实际 {len(pool)}")
+            pick = s.pick_sticker("happy")
+            _assert(pick is not None and pick.path == it.path, "应当能挑到它")
+            s.mark_used(pick)
+            _assert(pick.used_count == 1, "使用计数没加")
+
+            # ⑥ 没标注的不该被挑中（发一张不知道是什么的图会闹笑话）
+            it3 = s.add_file(b"\x89PNG-fake-2", "x.png", source="user-put")
+            s.move_to_emotion(it3, "happy")     # 挪进去了但没标
+            pool2 = s.stickers_for("happy")
+            _assert(
+                all(x.caption for x in pool2),
+                "stickers_for 只该返回**已标注**的",
+            )
+
+            # ⑦ 用户自己建中文目录也能认
+            cn = s.root / "stickers" / "开心"
+            cn.mkdir(parents=True, exist_ok=True)
+            (cn / "y.png").write_bytes(b"\x89PNG-fake-3")
+            s2 = MediaStore(tmp / "pet-media")
+            got = s2.scan()
+            hit = [x for x in got.values() if x.path == "stickers/开心/y.png"]
+            _assert(hit, "扫描应当发现用户自己建的目录")
+            _assert(hit[0].emotion == "happy", f"中文目录应当映射成 happy，实际 {hit[0].emotion!r}")
+
+            return "目录/入库/去重/标注/归类/挑选/中文目录 全部正确"
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+    @suite.check("图片：user.image 走完 存盘 -> 看懂 -> 拼进 user 轮")
+    def _() -> str:
+        """用户 2026-11-02：「做图片精准识别解析功能」。
+
+        ## 这条测什么
+
+        完整链路（用假视觉，不花钱）：
+          ① base64 -> 存进 pet-media/images/
+          ② 视觉模型给描述
+          ③ 描述拼进**用户那一轮**（不是 system）
+
+        ## ⚠️ 为什么必须拼进 user 轮
+
+        system 里的内容会被记忆/人设压过去（`stage_direction` 那条注释
+        记的就是这个坑）。只有放进 user 轮，模型才会真的顺着图说话。
+        """
+        import asyncio
+        import base64
+        import tempfile
+        from pathlib import Path as _P
+
+        from .config import Config
+        from .gateway import Gateway
+        from .media import MediaStore
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-img-"))
+        try:
+            import os as _os
+
+            old_data = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                gw = Gateway(Config())
+            finally:
+                if old_data is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old_data
+
+            # 媒体根指到临时目录（不污染项目的 pet-media/）
+            gw.media = MediaStore(tmp / "pet-media")
+            gw.media.ensure_dirs()
+
+            got: list[str] = []
+
+            async def _spy(event) -> None:
+                if event.name == "user.text":
+                    got.append(str((event.payload or {}).get("text") or ""))
+
+            gw.bus.subscribe("user.text", _spy)
+
+            # 假视觉：不联网
+            import pet.media_vision as mv
+
+            orig = mv.describe_image
+            mv.describe_image = lambda data, cfg, **kw: ("一只橘猫趴在键盘上", "")  # type: ignore[assignment]
+            try:
+                png = b"\x89PNG\r\n\x1a\n" + b"fake-image-bytes" * 10
+
+                class _Incoming:
+                    type = "user.image"
+                    raw = {
+                        "data": base64.b64encode(png).decode(),
+                        "mime": "image/png",
+                        "name": "cat.png",
+                    }
+                    text = "你看这个"
+                    request_id = "r1"
+
+                asyncio.run(gw._on_user_image(_Incoming()))
+            finally:
+                mv.describe_image = orig  # type: ignore[assignment]
+
+            _assert(got, "对话没有收到任何东西 —— 用户发了图，宠物不能沉默")
+            user_text = got[-1]
+            _assert("橘猫" in user_text, f"描述没进对话：{user_text[:80]!r}")
+            _assert("你看这个" in user_text, "用户配的话丢了")
+            _assert(
+                "用户发来一张图片" in user_text,
+                f"应当标明这是图片：{user_text[:60]!r}",
+            )
+
+            # 入库了吗
+            files = list((tmp / "pet-media" / "images").glob("*.png"))
+            _assert(files, "图片应当存进 pet-media/images/")
+            items = list(gw.media.load().values())
+            _assert(items, "应当登记进 index.json")
+            _assert(items[0].caption, "应当顺手写上标注")
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "base64 存盘 -> 看懂 -> 拼进 user 轮；描述和用户配的话都在"
+
+    @suite.check("图片：视觉不可用时**不能沉默**，要如实说看不清")
+    def _() -> str:
+        """用户发了图，宠物一声不吭比说"我看不清"糟得多。
+
+        这条守住那条分支：视觉模型挂了（没密钥/限流/余额）时，
+        仍然要发一条 user.text，而且明确要求它**别编造画面内容**。
+        """
+        import asyncio
+        import base64
+        import tempfile
+        from pathlib import Path as _P
+
+        from .config import Config
+        from .gateway import Gateway
+        from .media import MediaStore
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-img2-"))
+        try:
+            import os as _os
+
+            old_data = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                gw = Gateway(Config())
+            finally:
+                if old_data is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old_data
+
+            gw.media = MediaStore(tmp / "pet-media")
+            gw.media.ensure_dirs()
+
+            got: list[str] = []
+
+            async def _spy(event) -> None:
+                if event.name == "user.text":
+                    got.append(str((event.payload or {}).get("text") or ""))
+
+            gw.bus.subscribe("user.text", _spy)
+
+            import pet.media_vision as mv
+
+            orig = mv.describe_image
+            mv.describe_image = lambda data, cfg, **kw: ("", "没有可用的视觉模型")  # type: ignore[assignment]
+            try:
+
+                class _Incoming:
+                    type = "user.image"
+                    raw = {
+                        "data": base64.b64encode(b"\x89PNG-fake").decode(),
+                        "mime": "image/png",
+                        "name": "x.png",
+                    }
+                    text = ""
+                    request_id = ""
+
+                asyncio.run(gw._on_user_image(_Incoming()))
+            finally:
+                mv.describe_image = orig  # type: ignore[assignment]
+
+            _assert(got, "视觉不可用时也必须发一条（不能沉默）")
+            _assert(
+                "看不清" in got[-1],
+                f"应当如实说看不清：{got[-1][:80]!r}",
+            )
+            _assert(
+                "不要编造" in got[-1],
+                f"必须明确禁止编造画面内容：{got[-1][:80]!r}",
+            )
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "视觉挂掉时仍然开口，并要求别编造"
+
+    @suite.check("表情包：情绪映射 / 何时该发 / 挑一个")
+    def _() -> str:
+        """用户 2026-11-02 要求：
+
+        > 「可以用图片和用户聊天，比如表情包，代替一些开心、悲伤、无语、
+        >   不理你这种简单和常见的状态表情。」
+
+        ## 三个断言
+
+        ① 情绪 -> 类别映射（curious/neutral/sleepy **不映射**，硬映射会发错图）
+        ② 概率门 < 1（每句都配图很吵）
+        ③ 长回复不配图
+        """
+        import random as _random
+
+        from .sticker import emotion_to_sticker, should_attach
+
+        # ① 映射
+        pairs = {
+            "excited": "happy",
+            "happy": "happy",
+            "annoyed": "ignore",
+            "sad": "sad",
+            "curious": "",
+            "neutral": "",
+            "sleepy": "",
+        }
+        for dom, want in pairs.items():
+            got = emotion_to_sticker(dom)
+            _assert(
+                got == want,
+                f"{dom} 应当映射到 {want!r}，实际 {got!r}",
+            )
+
+        # ② 概率门：rate=0 时永不发，rate=1 且短回复且情绪匹配时必发
+        rng = _random.Random(7)
+        for _ in range(100):
+            _assert(
+                not should_attach(reply_text="嗯", dominant="happy", rate=0.0, rng=rng),
+                "rate=0 时不该发",
+            )
+        _assert(
+            should_attach(reply_text="嗯嗯", dominant="happy", rate=1.0, rng=rng),
+            "rate=1 + 短回复 + 情绪匹配时必发",
+        )
+        # 情绪不匹配时，rate=1 也不发
+        for dom in ("neutral", "curious", "sleepy"):
+            _assert(
+                not should_attach(reply_text="嗯", dominant=dom, rate=1.0, rng=rng),
+                f"{dom} 没有对应类别，不该发",
+            )
+
+        # ③ 长回复不配图
+        long_text = "这是一段很长的回复。" * 10
+        _assert(
+            not should_attach(reply_text=long_text, dominant="happy", rate=1.0, rng=rng),
+            "长回复不该配表情包",
+        )
+
+        # ④ 概率大致符合（1000 次抽样，rate=0.35 应落在 25%~45%）
+        hit = sum(
+            1
+            for _ in range(1000)
+            if should_attach(reply_text="短", dominant="happy", rate=0.35, rng=rng)
+        )
+        _assert(
+            250 <= hit <= 450,
+            f"rate=0.35 抽样 1000 次应落在 250~450，实际 {hit}",
+        )
+
+        return f"映射正确；概率门生效（{hit}/1000）；长回复不配图"
+
+    @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
+    def _() -> str:
+        """用户要求：「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注」。
+
+        这条测标注**循环里的那套动作**（不跑循环本身，那要等 2 分钟）：
+        看图 -> 分类 -> 写标注 -> 挪目录。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .media import MediaStore
+        from .media_vision import label_sticker
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-label-"))
+        try:
+            s = MediaStore(tmp / "pet-media")
+            s.ensure_dirs()
+
+            # 用户丢一张图进 _inbox
+            it = s.add_file(b"\x89PNG-cat-laugh", "laugh.png", source="user-put")
+            _assert(it.path.startswith("stickers/_inbox/"), "新图应当进 _inbox")
+            _assert(len(s.unlabeled()) == 1, "应当有 1 张待标注")
+
+            # 假视觉：返回标准格式
+            import pet.media_vision as mv
+
+            orig = mv.describe_image
+            mv.describe_image = lambda data, cfg, **kw: (  # type: ignore[assignment]
+                "类别：A\n描述：一只橘猫张嘴大笑",
+                "",
+            )
+            try:
+                data = (s.root / it.path).read_bytes()
+                emo, cap, why = label_sticker(data, None)
+            finally:
+                mv.describe_image = orig  # type: ignore[assignment]
+
+            _assert(not why, f"不该失败：{why}")
+            _assert(emo == "happy", f"应当分类为 happy，实际 {emo!r}")
+            _assert("橘猫" in cap, f"描述不对：{cap!r}")
+
+            # 模拟循环里的两步
+            s.annotate(it, cap, by="auto")
+            _assert(s.move_to_emotion(it, emo), "挪目录应当成功")
+            _assert(it.path.startswith("stickers/happy/"), f"应当在 happy 下：{it.path}")
+            _assert(len(s.unlabeled()) == 0, "标注+挪完就不该再算未标注")
+            _assert(
+                len(s.stickers_for("happy")) == 1,
+                "happy 类下应当能查到它",
+            )
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "看图 -> 分类 happy -> 写标注 -> 挪进 happy/"
+
+    @suite.check("协议：user.image 的三种非法输入都要被拒")
+    def _() -> str:
+        """图片是用户可控的大块数据，协议层必须挡住畸形输入。
+
+        三条：缺 data / data 不是字符串 / 编码后超大。
+        """
+        import json as _json
+
+        from .protocol import ProtocolError, parse_incoming
+
+        bad = [
+            {"type": "user.image"},
+            {"type": "user.image", "data": ""},
+            {"type": "user.image", "data": 123},
+        ]
+        for payload in bad:
+            try:
+                parse_incoming(_json.dumps(payload))
+            except ProtocolError:
+                continue
+            raise AssertionError(f"未拒绝非法输入：{payload}")
+
+        # 超过 10 MB 的（用长度估算，不真造那么大）
+        huge = "A" * (11 * 1024 * 1024 * 4 // 3 + 100)
+        try:
+            parse_incoming(_json.dumps({"type": "user.image", "data": huge}))
+            raise AssertionError("超大图片应当被拒")
+        except ProtocolError:
+            pass
+
+        # 合法的一条要能过
+        ok = parse_incoming(
+            _json.dumps(
+                {
+                    "type": "user.image",
+                    "data": "QUJD",
+                    "mime": "image/png",
+                    "text": "看这个",
+                }
+            )
+        )
+        _assert(ok.type == "user.image", "类型不对")
+        _assert(ok.text == "看这个", f"text 没取到：{ok.text!r}")
+
+        return "缺 data / 非字符串 / 超大 都拒绝；合法的一条能过"
+
+    @suite.check("表情包下载：安全边界（协议/内网/magic bytes）")
+    def _() -> str:
+        """用户 2026-11-03 要求宠物能自己上网补充表情包。
+
+        > 「宠物也拥有能自己上网补充自己的表情包……就是给于它下载的功能」
+
+        ## 为什么这条测试最重要
+
+        "从网上下载东西"是本项目里**攻击面最大**的功能之一：
+        搜索结果由外部决定，一个被构造的结果就能让程序去访问任意地址。
+
+        所以这里把每一条硬约束都钉住。**全部是纯函数**，不联网。
+        """
+        from .sticker_fetch import _sniff, extract_images_from_html, is_safe_url
+
+        # ① 只允许 http(s)：file:// 能读本地文件，data: 能绕过所有检查
+        for bad in (
+            "file:///C:/Windows/system.ini",
+            "data:image/png;base64,AAAA",
+            "ftp://example.com/a.png",
+            "javascript:alert(1)",
+            "",
+        ):
+            ok, why = is_safe_url(bad)
+            _assert(not ok, f"这个必须被拒：{bad!r}（实际通过了）")
+            _assert(why, f"拒绝时要给原因：{bad!r}")
+
+        # ② 内网地址（防 SSRF）：搜索结果里塞一个就能打到本机服务
+        for bad in (
+            "http://127.0.0.1:8080/x.png",
+            "http://localhost/x.png",
+            "http://10.0.0.5/x.png",
+            "http://192.168.1.1/x.png",
+            "http://169.254.169.254/latest/meta-data",
+            "http://172.16.0.1/x.png",
+        ):
+            ok, _why = is_safe_url(bad)
+            _assert(not ok, f"内网地址必须被拒：{bad}")
+
+        # ③ 正常的公网图片要放行
+        for good in (
+            "https://example.com/a.png",
+            "http://example.com/a.png",
+            "https://cdn.example.com/path/to/x.jpg?v=1",
+        ):
+            ok, why = is_safe_url(good)
+            _assert(ok, f"这个应当允许：{good}（{why}）")
+
+        # ④ magic bytes：服务端说 image/png 但返回 HTML 是**很常见**的
+        #    （防盗链/登录页），所以必须看文件头而不是 Content-Type
+        _assert(_sniff(b"\x89PNG\r\n\x1a\nrest") == "png", "PNG 头没认出来")
+        _assert(_sniff(b"\xff\xd8\xffrest") == "jpg", "JPEG 头没认出来")
+        _assert(_sniff(b"GIF89a...") == "gif", "GIF 头没认出来")
+        _assert(_sniff(b"RIFF1234WEBP...") == "webp", "WEBP 头没认出来")
+        _assert(_sniff(b"RIFF1234WAVE...") == "", "RIFF 但不是 WEBP，不该当图片")
+        _assert(_sniff(b"<html>not an image</html>") == "", "HTML 必须被识破")
+        _assert(_sniff(b"") == "", "空数据不是图片")
+
+        # ⑤ 从页面里找图：装饰图要跳过，相对路径要补全
+        html = """
+        <img src="/logo/header.png">
+        <img src="/icon/arrow.png">
+        <img data-src="https://cdn.example.com/cat.jpg">
+        <img src="//cdn2.example.com/dog.webp">
+        <img src="data:image/png;base64,AAAA">
+        <img src="/rel/path/fish.png">
+        """
+        found = extract_images_from_html(html, base_url="https://example.com/page")
+        joined = " ".join(found)
+        _assert("cat.jpg" in joined, f"应当找到 cat.jpg：{found}")
+        _assert("dog.webp" in joined, f"应当找到 dog.webp：{found}")
+        _assert("fish.png" in joined, f"相对路径应当补全：{found}")
+        _assert("logo" not in joined, f"logo 该被跳过：{found}")
+        _assert("icon" not in joined, f"icon 该被跳过：{found}")
+        _assert("data:" not in joined, f"data: URL 不该出现：{found}")
+
+        return "协议/内网/magic bytes/装饰图 四道闸门都生效"
+
+    @suite.check("表情包下载：模块默认关，且依赖联网搜索")
+    def _() -> str:
+        """用户要求「这个下载功能也做成模块」。
+
+        ## 为什么默认**关**
+
+        它会主动往网上发请求找图，还会把图下到用户盘上。
+        这种事必须用户显式打开 —— 不能替他做决定。
+        （和「看屏幕」默认关是同一条取舍。）
+
+        ## 为什么依赖 search
+
+        下载靠 `web_search` 找图源。联网关掉时它自动关（依赖闭包）。
+        """
+        import time as _t
+
+        from .config import Config
+        from .events import get_event
+        from .gateway import Gateway
+        from .modules import MODULES
+
+        spec = next((m for m in MODULES if m.name == "stickers"), None)
+        _assert(spec is not None, "应当有 stickers 模块")
+        _assert(spec.label == "表情包下载", f"标签不对：{spec.label!r}")
+        _assert(spec.default is False, "必须默认关（主动联网行为）")
+        _assert(spec.requires == ("search",), f"必须依赖 search：{spec.requires}")
+        _assert(spec.gate, "必须可热切（设置页开关要能点）")
+
+        cfg = Config()
+        cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
+        gw = Gateway(cfg)
+        ev = get_event("fetch_stickers")
+        _assert(ev is not None, "应当有 fetch_stickers 事件")
+        _assert(ev.handler is not None, "handler 必须已绑定（否则抽中了也不做事）")
+
+        def _ok() -> tuple[bool, str]:
+            return gw.events.eligible(
+                ev, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
+            )
+
+        # 默认关 -> 抽取阶段就排除
+        ok, why = _ok()
+        _assert(not ok, "模块默认关时不该能抽")
+        _assert("module_off" in why, f"原因要说明模块关着：{why!r}")
+
+        # 打开 -> 可抽
+        gw.modules.set_enabled("stickers", True)
+        ok2, why2 = _ok()
+        _assert(ok2, f"打开后应当能抽：{why2!r}")
+
+        # 关掉 search -> 依赖闭包把它一起关掉
+        gw.modules.set_enabled("search", False)
+        ok3, why3 = _ok()
+        _assert(not ok3, "关掉联网搜索后，表情包下载也该停")
+        _assert("module_off" in why3, f"原因要说明：{why3!r}")
+
+        return "默认关；打开可抽；关联网时连带关"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(

@@ -212,6 +212,40 @@ body {
   background: var(--input-focus-bg);
 }
 
+/*
+ * 发图按钮（2026-11-02 用户要求）。
+ *
+ * 尺寸和输入框等高（30px）、圆形，颜色跟随主题变量 ——
+ * 这样深色/浅色主题都不用单独配色（和 `.send` 是同一套做法）。
+ *
+ * ⚠️ 必须 `no-drag`：按钮在拖拽条内部，不排除的话点不动。
+ */
+.pick-image {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--focus-bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.pick-image:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.pick-image:active {
+  background: var(--input-focus-bg);
+}
+
 .send {
   flex: 0 0 auto;
   height: 30px;

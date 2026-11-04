@@ -81,6 +81,32 @@
         </div>
       </div>
 
+      <!--
+        表情包显示层（2026-11-02 用户要求）。
+
+        ## 用户原话
+
+        > 「可以用图片和用户聊天，比如表情包，代替一些开心、悲伤、无语、
+        >   不理你这种简单和常见的状态表情。」
+
+        ## 为什么直接放在宠物窗口，而不是新开一个窗口
+
+        新窗口要处理定位、尺寸、层级、点击穿透 —— 而表情包的生命周期很短
+        （显示几秒后自己消失），为它起一个 BrowserWindow 不划算。
+
+        这里做成**叠在宠物旁边的一层图**：`position: absolute` +
+        `pointer-events: none`（不挡点击，用户可以透过它点桌面）。
+
+        ## 为什么 `pointer-events: none` 是必须的
+
+        宠物窗口本身是"点击穿透"的（`#hud` 默认穿透，只有 `.interactive`
+        那块可交互）。表情包是纯展示，加上可点击区域会破坏那个不变量，
+        用户会发现"宠物旁边有一块莫名其妙点不动的地方"。
+      -->
+      <div id="sticker" class="sticker hidden" aria-hidden="true">
+        <img id="sticker-img" alt="" />
+      </div>
+
       <div id="toast" class="toast hidden"></div>
     </div>
 

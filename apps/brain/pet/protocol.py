@@ -118,6 +118,31 @@ INCOMING_TYPES = frozenset(
         # 不是配置。塞进 config.update 会让 `apply_patch` 把未知键
         # 原样保留进 config.root，还会跟着快照广播出去。
         "pet.set_state",
+        # 用户发图片给宠物（2026-11-02 用户要求）。
+        #
+        # ## 用户原话
+        #
+        # > 「做图片精准识别解析功能。」
+        # > 「可以用图片和用户聊天，比如表情包……」
+        #
+        # ## ⚠️ 这是**第六次**加处理分支，白名单先加
+        #
+        # 上面 voice.ptt / tts.result / web.browser.result / vision.snap /
+        # pet.set_state 五条注释都在警告同一件事：漏了白名单，消息在
+        # 解析阶段就被拒，日志里只有一句"未知消息类型"，界面上是"点了没反应"。
+        #
+        # 这次**先加白名单**。
+        #
+        # ## 为什么图片走 base64 而不是文件路径
+        #
+        # 前端把用户选的/粘贴的图读成 base64 一起发过来。理由：
+        #   · 路径在渲染进程里拿到的是 `File.path`，Electron 新版已经不给
+        #   · 用户可能从剪贴板粘贴（根本没有路径）
+        #   · 拖拽进来的文件可能是临时路径，发完就没了
+        #
+        # 代价是消息变大 —— 所以 `parse_incoming` 对 `user.image` 的
+        # 上限单独放宽（见下面那条 256KB 的通用检查之后的分支）。
+        "user.image",
     }
 )
 
@@ -161,7 +186,17 @@ def parse_incoming(raw_text: str) -> Incoming:
     前端与 sidecar 是两个进程，任何输入都当作不可信数据：类型必须已知，
     必填字段必须存在且类型正确，长度做上限保护。
     """
-    if len(raw_text) > 256 * 1024:
+    # ⚠️ 长度上限**按类型区分**（2026-11-02）
+    #
+    # 原来一律 256 KB。但 `user.image` 是 base64 编码的图片：
+    # 一张 300 KB 的 PNG 编码后约 400 KB，直接就被这条通用检查拒掉了。
+    #
+    # 所以先粗判一下类型，图片走单独的上限（见下面 `user.image` 分支）。
+    # 这里是**粗判**（正则/字符串包含），不能为了拿类型就 json.loads ——
+    # 那条大字符串本身就是我们要拒绝的东西，先解析一遍太浪费。
+    _looks_image = '"user.image"' in raw_text[:200]
+    _limit = 12 * 1024 * 1024 if _looks_image else 256 * 1024
+    if len(raw_text) > _limit:
         raise ProtocolError("消息过大")
     try:
         obj = json.loads(raw_text)
@@ -181,6 +216,47 @@ def parse_incoming(raw_text: str) -> Incoming:
         if len(text) > 8000:
             raise ProtocolError("user.text 过长")
         return Incoming(type=type_, raw=obj, text=text, request_id=_str(obj.get("requestId")))
+
+    if type_ == "user.image":
+        """用户发图片给宠物（2026-11-02）。
+
+        ## 字段
+
+            {
+              "type": "user.image",
+              "data": "<base64，不带 data: 前缀>",
+              "mime": "image/png",
+              "name": "cat.png",          // 可选，只用来起文件名
+              "text": "你看这张"           // 可选，用户配的一句话
+            }
+
+        ## ⚠️ 不校验 base64 是否"合法图片"
+
+        协议层只负责"结构对不对"。**能不能解码成图片**由上层（`media.py`
+        入库时）判断 —— 那里才有 Pillow，而且那里才知道尺寸限制。
+
+        这里只挡两件事：`data` 不是字符串/为空，以及解码后超过硬上限。
+        硬上限用**估算**（base64 长度 × 3/4），不解码 —— 解一个 8MB 的
+        base64 只为了量长度太浪费。
+        """
+        data = obj.get("data")
+        if not isinstance(data, str) or not data.strip():
+            raise ProtocolError("user.image 缺少 data")
+        # base64 每 4 个字符解出 3 字节，粗估一下
+        approx = len(data) * 3 // 4
+        if approx > 10 * 1024 * 1024:
+            raise ProtocolError("user.image 图片过大（上限约 10 MB）")
+        mime = obj.get("mime")
+        if not isinstance(mime, str) or not mime.startswith("image/"):
+            mime = "image/png"
+        name = obj.get("name")
+        text = obj.get("text")
+        return Incoming(
+            type=type_,
+            raw=obj,
+            text=text.strip() if isinstance(text, str) else "",
+            request_id=_str(obj.get("requestId")),
+        )
 
     if type_ == "voice.say":
         # 设置页「试听」。和 user.text 一样要取 text —— 不解析的话

@@ -597,6 +597,10 @@ pet.on('pet:message', (message) => {
         showToast('这次没说成，看看日志', 'error');
       }
       break;
+    case 'pet.sticker':
+      // 表情包（2026-11-02 用户要求）：说完话后补一张图
+      showSticker(message);
+      break;
     case 'pet.mouth':
       // 真实音频包络；目前 sidecar 不发，先留着接口
       if (Array.isArray(message.envelope) && message.envelope.length) {
@@ -1392,6 +1396,58 @@ let toastTimer = null;
  * `user.voice` 刚弹的「听到：…」（那条是用户最需要的确认）。
  */
 let stickyToastShown = false;
+
+/* --------------------------------------------------------------- 表情包 */
+/*
+ * 显示一张表情包（2026-11-02 用户要求）。
+ *
+ * ## 消息形状（`pet.sticker`）
+ *
+ *     { data: "<base64>", mime: "image/png",
+ *       emotion: "happy", caption: "一只橘猫在笑", path: "stickers/happy/x.png" }
+ *
+ * ## 生命周期
+ *
+ * 显示 -> 4 秒 -> 淡出 0.25 秒 -> 隐藏。
+ * 没被用户点掉的概念：它是纯展示（`pointer-events: none`），
+ * 用户甚至点不到它，所以"点掉"这个交互不存在。
+ *
+ * ## ⚠️ 连续来两张时只显示最后一张
+ *
+ * 模型不会连发两张（`should_attach` 里有概率门），但万一发生了，
+ * 叠着显示会糊成一团。直接替换 + 重置计时器即可。
+ */
+let stickerTimer = 0;
+let stickerFadeTimer = 0;
+
+/** 表情包显示时长（毫秒） */
+const STICKER_SHOW_MS = 4000;
+
+function showSticker(message) {
+  const box = document.getElementById('sticker');
+  const img = document.getElementById('sticker-img');
+  if (!box || !img) return;
+  const data = String((message && message.data) || '');
+  const mime = String((message && message.mime) || 'image/png');
+  if (!data) return;
+
+  img.src = `data:${mime};base64,${data}`;
+  // 无障碍：把标注当 alt（读屏能念出来）
+  img.alt = String((message && message.caption) || '表情包');
+
+  // 重置上一张的计时
+  if (stickerTimer) clearTimeout(stickerTimer);
+  if (stickerFadeTimer) clearTimeout(stickerFadeTimer);
+  box.classList.remove('hidden', 'fading');
+
+  stickerTimer = setTimeout(() => {
+    box.classList.add('fading');
+    stickerFadeTimer = setTimeout(() => {
+      box.classList.add('hidden');
+      box.classList.remove('fading');
+    }, 260);
+  }, STICKER_SHOW_MS);
+}
 
 function showToast(text, level = 'info', opts = {}) {
   els.toast.textContent = text;

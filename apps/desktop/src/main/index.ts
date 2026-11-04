@@ -3547,6 +3547,58 @@ function registerChatIpc(): void {
     send({ type: 'user.text', text });
   });
 
+  /*
+   * 用户发一张图片（2026-11-02 用户要求）。
+   *
+   * ## 为什么要拆 dataURL 再拼回去
+   *
+   * 渲染层传上来的是完整的 `data:image/png;base64,xxxx`。
+   * 而 Python 侧的 `user.image` 协议分两个字段：`mime` + `data`（纯 base64）。
+   * 在这里拆一次，好处是 **Python 不需要知道 dataURL 这种浏览器写法**。
+   *
+   * ## ⚠️ 上限 10 MB，且在这里挡
+   *
+   * Python 那边也挡，但在这里挡能立刻给用户 toast，
+   * 不用等一次完整的进程往返。
+   */
+  ipcMain.on(
+    'chat:user-image',
+    (_event, payload: { dataUrl?: unknown; name?: unknown; text?: unknown }) => {
+      const dataUrl = String(payload?.dataUrl ?? '');
+      const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(dataUrl);
+      if (!m) {
+        petWindow?.sendToRenderer('pet:toast', { level: 'warn', text: '这张图片读不了' });
+        return;
+      }
+      const mime = m[1].toLowerCase();
+      const data = m[2];
+      // base64 每 4 字符约 3 字节
+      const approxBytes = Math.floor((data.length * 3) / 4);
+      if (approxBytes > 10 * 1024 * 1024) {
+        petWindow?.sendToRenderer('pet:toast', {
+          level: 'warn',
+          text: `图片太大了（${(approxBytes / 1024 / 1024).toFixed(1)} MB，上限 10 MB）`,
+        });
+        return;
+      }
+      if (paused) {
+        petWindow?.sendToRenderer('pet:toast', {
+          level: 'warn',
+          text: '免打扰中，它现在不想说话',
+        });
+        return;
+      }
+      log(`对话条发来图片：${mime}，约 ${(approxBytes / 1024).toFixed(0)} KB`);
+      send({
+        type: 'user.image',
+        data,
+        mime,
+        name: String(payload?.name ?? ''),
+        text: String(payload?.text ?? ''),
+      });
+    },
+  );
+
   // 前端问"现在什么状态"（小圆点着色用）
   ipcMain.handle('chat:status', () => statusText);
 }
@@ -6685,6 +6737,8 @@ const HOT_MODULES = new Set([
   'screen',
   'search',
   'reading',
+  // 表情包下载（2026-11-03）。默认关，用户打开后才生效。
+  'stickers',
 ]);
 
 /**

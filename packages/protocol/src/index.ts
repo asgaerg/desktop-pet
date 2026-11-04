@@ -230,6 +230,9 @@ export type ToBrainMsg =
   | ModulesQueryMsg
   | ModulesSetMsg
   | PetSetStateMsg
+  // 用户发图片（2026-11-02）。⚠️ 加类型时三处要同步：
+  // 这个联合类型、Python 的 INCOMING_TYPES、以及 gateway 的处理分支。
+  | UserImageMsg
   | ConfigUpdateMsg
   /*
    * ⚠️ `tts.result` 也在这边（Electron -> Python）—— 别看名字叫 result
@@ -496,6 +499,37 @@ export interface PetSetStateMsg {
   state: string;
   /** 切换原因（日志用）：user / event */
   reason?: string;
+  ts?: number;
+}
+
+/**
+ * 用户发图片给宠物（上行，2026-11-02 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * > 「做图片精准识别解析功能。」
+ * > 「可以用图片和用户聊天，比如表情包……」
+ *
+ * ## 为什么是 base64 而不是路径
+ *
+ * 三条输入路径都要能用：选文件、Ctrl+V 粘贴、拖拽。
+ * 其中**粘贴根本没有路径**，所以统一在渲染层读成 dataURL，
+ * 主进程拆成 `mime` + `data`（纯 base64）再发过来。
+ *
+ * ⚠️ Python 侧不知道 dataURL 这种浏览器写法 —— 拆分在主进程做，
+ *    协议层只认 `mime` + `data` 两个字段。
+ */
+export interface UserImageMsg {
+  type: 'user.image';
+  /** 纯 base64（**不带** `data:image/png;base64,` 前缀） */
+  data: string;
+  /** 例如 image/png、image/jpeg */
+  mime?: string;
+  /** 原始文件名，只用来给存盘文件起名 */
+  name?: string;
+  /** 用户配的一句话（可以没有） */
+  text?: string;
+  requestId?: string;
   ts?: number;
 }
 

@@ -47,6 +47,35 @@
         <span></span><span></span><span></span>
       </div>
       <span id="dot" class="dot" data-level="info" title="正在启动…"></span>
+      <!--
+        发图按钮（2026-11-02 用户要求「可以用图片和用户聊天」）。
+
+        ## 为什么是按钮 + 隐藏的 file input
+
+        Electron 渲染层里 `<input type="file">` 会弹系统文件选择器，
+        但它自己长得丑且不可控。所以按钮负责好看，input 负责干活。
+
+        ## 还支持粘贴和拖拽（逻辑在 chat.js 里）
+
+        · 粘贴：用户截图后直接粘贴就发 —— 这是**最常用**的路径
+        · 拖拽：从资源管理器拖一张图进来
+
+        三条路都通到同一个 `sendImageFile(file)`。
+      -->
+      <button
+        id="pick-image"
+        class="pick-image"
+        title="发图片（也可以直接粘贴截图，或把图拖进来）"
+        aria-label="发图片"
+      >
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path
+            d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm1 12h14l-4.5-6-3.5 4.5-2.5-3L5 17z"
+            fill="currentColor"
+          />
+        </svg>
+      </button>
+      <input id="image-input" type="file" accept="image/*" hidden />
       <input
         id="input"
         class="input"

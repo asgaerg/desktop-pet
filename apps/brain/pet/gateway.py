@@ -50,6 +50,11 @@ from .segments import SegmentTracker
 from . import quotes as quotes_mod
 from . import reading as reading_mod
 from . import reading_tools
+# 图片/表情包（2026-11-02 用户要求）
+from . import media as media_mod
+from . import media_vision
+from . import sticker as sticker_mod
+from . import sticker_fetch
 # ⚠️ `_clip_at_sentence` 2026-11-02 挪到 `reading.py` 了 —— 回看功能也要用它，
 #    而 reading.py 不能 import gateway（循环依赖）。这里显式导入，原调用点不变。
 from .reading import _clip_at_sentence
@@ -85,6 +90,11 @@ _BUS_TO_WIRE: dict[str, str] = {
     "pet.thinking": "pet.thinking",
     "pet.observe": "pet.observe",
     "pet.mouth": "pet.mouth",
+    # 🖼 表情包（2026-11-02 用户要求）。
+    #
+    # ⚠️ **必须登记在这里**，否则 `_on_bus_event` 会静默丢弃 ——
+    # 上面 `pet.tool` 那段注释记的就是这个坑（"两边都写好了、中间那根线没接"）。
+    "pet.sticker": "pet.sticker",
     # 🔴 工具开始/结束（2026-10-16 补登记）。
     #
     # ## 为什么这条以前是坏的
@@ -1376,6 +1386,23 @@ class Conversation:
             "pet.say.end",
             msg("pet.say.end", id=say_id, text=say_text, reason=reason),
         )
+        # 🖼 说完之后可能补一张表情包（2026-11-02 用户要求）
+        #
+        # 用户原话：「可以用图片和用户聊天，比如表情包，代替一些开心、
+        # 悲伤、无语、不理你这种简单和常见的状态表情。」
+        #
+        # ⚠️ 放在 `say.end` **之后**：表情包是补充，不是正文。
+        #    先让文字落地（前端开始渲染气泡、TTS 开始念），再附图，
+        #    顺序反了会出现"图先弹出来、字还没到"。
+        #
+        # ⚠️ 只在**回复用户**时发，自主发言不发 ——
+        #    用户不理它的时候塞一张图过去很像刷屏。
+        sticker_hook = getattr(self, "_sticker_sender", None)
+        if sticker_hook is not None and not idle and final_text:
+            try:
+                await sticker_hook(final_text)
+            except Exception:  # noqa: BLE001 —— 发表情包失败绝不能影响说话
+                log.debug("发表情包失败（已忽略）", exc_info=True)
         if error_text:
             await self.bus.publish(
                 "system.error",
@@ -2682,6 +2709,25 @@ class Gateway:
         # 这正是 `attach()` 注释里警告过的同一个坑：状态在谁身上，方法就得在谁身上。
         self.reader = reading_mod.Reader(config)
         self.conversation.reader = self.reader
+        # 🖼 图片/表情包存储（2026-11-02 用户要求：专门一个文件夹）
+        #
+        # 落点是 `<项目根>/pet-media/`，和 `pet-books/` 同级 ——
+        # 用户要能自己去翻、自己往里放表情包。
+        #
+        # ⚠️ `ensure_dirs()` 建好标准目录（含每个情绪的子目录）。
+        #    不做的话用户第一次进去看到空文件夹，不知道该放哪。
+        self.media = media_mod.MediaStore()
+        try:
+            self.media.ensure_dirs()
+        except Exception:  # noqa: BLE001 —— 建目录失败不该让 sidecar 起不来
+            log.warning("pet-media 目录建不出来（图片功能会不可用）", exc_info=True)
+        # 说完话后可能补一张表情包（2026-11-02）。
+        #
+        # ⚠️ 用回调注入而不是让 Conversation 直接持有 media：
+        #    发表情包要用 `media`/`sticker`，那两样在 Gateway 上；
+        #    而"什么时候该发"的时机在 Conversation 的 `_generate` 收尾处。
+        #    直接互相持有会循环依赖（这个项目已经为此栽过好几次）。
+        self.conversation._sticker_sender = self._maybe_send_sticker
         # 工具读完后的回调也一起注入 —— `_tool_list` 在 Conversation 上，
         # 它拿不到 Gateway 的方法，只能靠这里把函数对象递过去。
         self.conversation._reading_on_read = self._reading_note_from_tool
@@ -2731,6 +2777,7 @@ class Gateway:
         #    而书架上没有新章节。这种"看起来做了"比报错难查得多。
         events_mod.bind_handler("reading", "read_novel")
         events_mod.bind_handler("community_chat", "read_community")
+        events_mod.bind_handler("fetch_stickers", "fetch_stickers")
         # 🔴 事件 -> 模块 的映射（2026-11-02）
         #
         # 让「小说阅读」模块关掉时，`reading` 事件在**抽取阶段**就被排除，
@@ -2760,6 +2807,10 @@ class Gateway:
         # 这与 `reading` 那条是同一个道理：**抽取阶段就排除**，
         # 不要抽中了再在 handler 里判。
         self.events.module_of["community_chat"] = "search"
+        # 表情包下载同样绑模块（2026-11-03）：
+        # 模块默认关，关着时事件在抽取阶段就排除 —— 不然会抽中、抢槽、
+        # 进去发现模块关着、什么都不做，白占一个槽。
+        self.events.module_of["fetch_stickers"] = "stickers"
         self.events.module_enabled = self.modules.enabled
         # 🔴 安静档不触发任何事件（2026-11-02 用户要求）
         #
@@ -2796,6 +2847,8 @@ class Gateway:
         self._autosnap_task: Optional[asyncio.Task[None]] = None
         # 状态机循环（2026-10-23）
         self._state_task: Optional[asyncio.Task[None]] = None
+        # 表情包标注循环（2026-11-02）
+        self._sticker_label_task: Optional[asyncio.Task[None]] = None
         # 上一次「截图说话」的时刻（monotonic）。0 = 还没说过。
         # 截图说完 60 秒内不搭话 —— 见 _on_autonomy_speak 里的优先级判断。
         self._last_screen_speak_at: float = 0.0
@@ -3816,6 +3869,32 @@ class Gateway:
             await self._snap_and_chat(req_id)
             return
 
+        if incoming.type == "user.image":
+            """用户发图片给宠物（2026-11-02 用户要求）。
+
+            ## 用户原话
+
+            > 「做图片精准识别解析功能。」
+            > 「可以用图片和用户聊天，比如表情包……」
+
+            ## 流程
+
+                ① 解码 base64 -> 存进 pet-media/images/
+                ② 视觉模型描述它（"精准识别解析"）
+                ③ 把描述当**用户那句话的一部分**喂给对话
+
+            ## 为什么描述要进 user 轮而不是 system
+
+            这是这次「精准识别」的关键：用户发了张图说「你看这个」，
+            宠物必须能接着图说话。而 system 里的内容会被记忆/人设压过去
+            （`stage_direction` 那条注释记的就是这个坑），
+            只有放进 user 轮模型才最当真。
+
+            所以：`user.text` 拼成「[用户发了一张图片：<描述>]\n<用户配的话>」。
+            """
+            await self._on_user_image(incoming)
+            return
+
         if incoming.type == "user.poke":
             # 手动戳一下：跳过意愿与冷却，立刻开口
             await self.bus.publish("user.poke", {"requestId": incoming.request_id})
@@ -4644,6 +4723,19 @@ class Gateway:
                 self._run_state_forever(), name="petstate"
             )
 
+        # 表情包标注循环（2026-11-02）。
+        #
+        # 用户要求：「用户自己放，放完之后让宠物熟悉下，
+        # 自己个图片的内容打标注」。
+        #
+        # ⚠️ 独立任务，且**和自主行为/看屏幕模块无关** ——
+        #    标注是"熟悉素材"，不是"做自己的事"。
+        #    用户关了自主行为，仍然希望它认识自己放的表情包。
+        if self._sticker_label_task is None or self._sticker_label_task.done():
+            self._sticker_label_task = asyncio.get_running_loop().create_task(
+                self._run_sticker_label_forever(), name="stickerlabel"
+            )
+
     async def _run_state_forever(self) -> None:
         """条件事件循环（2026-10-23 建，2026-10-25 改成走事件模块）。
 
@@ -5186,6 +5278,29 @@ class Gateway:
         self._remember_reading(chunk)
         return f"它翻了翻社区杂谈，看到《{chunk.title[:24]}》"
 
+    async def _event_fetch_stickers(self, ctx: dict[str, Any]) -> Optional[str]:
+        """事件「上网给自己找几张表情包」（2026-11-03 用户要求）。
+
+        ## 用户原话
+
+        > 「宠物也拥有能自己上网补充自己的表情包，小黑盒、B站评论区、
+        >   抖音评论区，网上搜索都可以，就是给于它下载的功能，
+        >   这个下载功能也做成模块，搜索模块搜索到之后，
+        >   它自己分辨下载标注就好了」
+
+        ## 这里只负责"下"，不负责"标"
+
+        标注由 `_run_sticker_label_forever` 那个循环做（它一次标一张，
+        不占事件槽）。这样分工的好处：下载很快（几秒），标注很慢
+        （每次一次模型调用）—— 混在一起会让事件占槽很久。
+
+        下载完的新图会进 `stickers/_inbox/`，标注循环下次扫到就处理。
+        """
+        n = await self._fetch_stickers_once()
+        if n <= 0:
+            return None
+        return f"它上网给自己找了 {n} 张表情包"
+
     def _remember_reading(self, chunk: Any) -> None:
         """把"读了什么"写进原文记忆，供检索/提炼使用（2026-11-02 用户要求）。
 
@@ -5633,6 +5748,188 @@ class Gateway:
         self.state.switch(BORED, "催了 10 次仍没开联网，失去耐心")
         return f"它想查「{topic}」，催了你 {len(session.run.nags)} 次没成，最后没耐心了"
 
+    async def _run_sticker_label_forever(self) -> None:
+        """给用户新放进来的表情包打标注（2026-11-02 用户要求）。
+
+        ## 用户原话
+
+        > 「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注，
+        >   这样用的时候就能看标识自己选用了」
+
+        ## 做什么
+
+        每隔一段时间扫一遍 `pet-media/stickers/_inbox/`（以及任何
+        `stickers/` 下**没有标注**的图），逐张：
+          ① 视觉模型看图 -> 分类（happy/sad/speechless/ignore/other）+ 描述
+          ② 写标注
+          ③ 有明确分类就挪进 `stickers/<emotion>/`
+
+        ## ⚠️ 一次只标一张
+
+        每张图都是一次模型调用（有成本）。一次标一堆会：
+          · 烧钱（用户可能一次丢了 200 张）
+          · 占住模型（那期间对话会慢）
+        所以每轮只标一张，隔一段时间再标下一张 —— 慢慢来，不着急。
+
+        ## ⚠️ 没有新图时**什么都不做**
+
+        绝大多数时间 `_inbox` 是空的。那时这个循环应该**零开销**：
+        只读一次索引（内存里的），不发任何请求。
+        """
+        log.info("表情包标注循环启动（有新图才动）")
+        # 启动先等一会：刚开机时视觉模型/SQLite 都在初始化，别抢资源
+        await asyncio.sleep(120)
+
+        while True:
+            try:
+                pending = self.media.unlabeled()
+                # 只看表情包（images/ 下的是对话图，已经有描述了）
+                pending = [it for it in pending if it.path.startswith("stickers/")]
+                if not pending:
+                    await asyncio.sleep(600)
+                    continue
+
+                item = pending[0]
+                path = self.media.root / item.path
+                try:
+                    data = path.read_bytes()
+                except Exception:  # noqa: BLE001
+                    log.info("表情包标注：读不到 %s，跳过", item.path)
+                    await asyncio.sleep(60)
+                    continue
+
+                emo, caption, why = await asyncio.to_thread(
+                    media_vision.label_sticker, data, self.config
+                )
+                if not caption:
+                    # 视觉不可用：留在 _inbox，下次再试（不要标记成已处理）
+                    log.info("表情包标注失败（%s），下次再试", why or "未知")
+                    await asyncio.sleep(900)
+                    continue
+
+                self.media.annotate(item, caption, by="auto")
+                if emo and emo != "other":
+                    self.media.move_to_emotion(item, emo)
+                log.info(
+                    "表情包标注：%s -> %s「%s」",
+                    item.path,
+                    emo or "未分类",
+                    caption[:40],
+                )
+                # 标完一张歇一下：不连着调模型
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                log.info("表情包标注循环已停止")
+                raise
+            except Exception:  # noqa: BLE001 —— 这个循环绝不能死
+                log.exception("表情包标注单轮异常（已忽略）")
+                await asyncio.sleep(600)
+
+    async def _fetch_stickers_once(self) -> int:
+        """上网上找一批表情包下载下来。返回成功下载的张数。
+
+        ## 用户原话
+
+        > 「宠物也拥有能自己上网补充自己的表情包，小黑盒、B站评论区、
+        >   抖音评论区，网上搜索都可以，就是给于它下载的功能，
+        >   这个下载功能也做成模块，搜索模块搜索到之后，
+        >   它自己分辨下载标注就好了」
+
+        ## 流程
+
+            搜索 -> 挑图片 URL -> 下载 -> 标注 -> 入库
+
+        ## ⚠️ 三道闸门，缺一不可
+
+          ① 模块 `stickers` 开着（默认关，用户要显式打开）
+          ② `search` 模块开着（下载要靠 web_search 找图源）
+          ③ 联网真的可用（`_web_enabled`）
+
+        ## ⚠️ 失败要安静
+
+        网上的图源极不稳定（防盗链、404、被墙）。任何一个环节失败
+        都只是"这次没下成"，**不打扰用户** —— 和书源失效同一个取舍。
+        """
+        if not self.modules.enabled("stickers"):
+            log.debug("表情包下载：模块关着")
+            return 0
+        if not self.conversation._web_enabled():
+            log.debug("表情包下载：联网关着")
+            return 0
+
+        import random as _random
+
+        query = _random.choice(sticker_fetch.SEARCH_QUERIES)
+        try:
+            raw = await tools._web_search({"query": query, "limit": 10})
+        except Exception as exc:  # noqa: BLE001
+            log.info("表情包下载：搜索失败（%s）", type(exc).__name__)
+            return 0
+
+        urls = sticker_fetch._image_urls_from(str(raw or ""))
+        if not urls:
+            log.info("表情包下载：「%s」没找到可用链接", query)
+            return 0
+
+        got = 0
+        for url in urls:
+            if got >= sticker_fetch.MAX_PER_ROUND:
+                break
+            # ① 是图片直链 -> 直接下
+            # ② 是网页 -> 抓下来找图，再下找到的第一张
+            #
+            # ⚠️ 实测搜索结果**几乎全是网页**（见 `_image_urls_from` 的说明），
+            #    所以第二条路才是常态，不是例外。
+            try:
+                data, ext, why = await asyncio.to_thread(sticker_fetch.download, url)
+            except Exception as exc:  # noqa: BLE001
+                data, ext, why = b"", "", f"{type(exc).__name__}"
+
+            if not data:
+                # 不是图片（或者是防盗链拦了）-> 当网页处理
+                html = await asyncio.to_thread(sticker_fetch.fetch_page, url)
+                if not html:
+                    log.debug("表情包下载：%s 抓不到（%s）", url[:60], why)
+                    continue
+                inner = sticker_fetch.extract_images_from_html(html, base_url=url)
+                if not inner:
+                    log.debug("表情包下载：%s 页面里没有图片", url[:60])
+                    continue
+                for iu in inner:
+                    if got >= sticker_fetch.MAX_PER_ROUND:
+                        break
+                    d2, e2, w2 = await asyncio.to_thread(
+                        sticker_fetch.download, iu
+                    )
+                    if not d2:
+                        log.debug("表情包下载：%s 没下成（%s）", iu[:60], w2)
+                        continue
+                    item = self.media.add_file(
+                        d2, f"fetched-{got}.{e2}", source="downloaded", origin_url=iu
+                    )
+                    if item is None:
+                        continue
+                    got += 1
+                    log.info(
+                        "表情包下载：✅ %s（%d KB，来自 %s）",
+                        item.path, len(d2) // 1024, iu[:50],
+                    )
+                continue
+
+            item = self.media.add_file(
+                data, f"fetched-{got}.{ext}", source="downloaded", origin_url=url
+            )
+            if item is None:
+                continue
+            got += 1
+            log.info(
+                "表情包下载：✅ %s（%d KB，来自 %s）",
+                item.path, len(data) // 1024, url[:50],
+            )
+        if got:
+            log.info("表情包下载：这轮下了 %d 张，等标注循环处理", got)
+        return got
+
     async def _run_events_forever(self) -> None:
         """
         事件循环：每隔 `tick_s` 抽一次"它要不要做点自己的事"。
@@ -5666,6 +5963,209 @@ class Gateway:
             except Exception:  # noqa: BLE001 —— 事件绝不能拖垮 sidecar
                 log.exception("随机事件单轮异常（已忽略，继续下一轮）")
             await asyncio.sleep(max(1.0, float(self.config.autonomy.get("tick_s", 5.0))))
+
+    async def _maybe_send_sticker(self, reply_text: str) -> None:
+        """回复说完之后，按情绪可能补一张表情包（2026-11-02 用户要求）。
+
+        ## 用户原话
+
+        > 「可以用图片和用户聊天，比如表情包，代替一些开心、悲伤、无语、
+        >   不理你这种简单和常见的状态表情。」
+
+        ## 三个条件（判断在 `sticker.should_attach`，纯函数可测）
+
+          ① 当前情绪能映射到表情包类别
+          ② 回复够短（<= 60 字）—— 长回复自己说得清，再配图显得碎
+          ③ 概率抽中（默认 35%）
+
+        ## 没有素材时安静地不发
+
+        用户可能根本没用过这个功能。那时**不报错、不提示**——
+        提示"请先放表情包"只是打扰。
+        """
+        try:
+            rate = float(
+                (self.config.activity or {}).get("emoji_sticker_rate", 0.35)
+            )
+        except (TypeError, ValueError):
+            rate = 0.35
+        # `emoji_sticker_rate` 是 0~1 的"幅度"参数，不是概率上限 ——
+        # 用它乘一个基准，让用户拖到 0 就是完全不发。
+        rate = max(0.0, min(1.0, rate))
+
+        dominant = str(self.conversation.emotion.dominant or "")
+        if not sticker_mod.should_attach(
+            reply_text=reply_text, dominant=dominant, rate=rate
+        ):
+            return
+
+        item = sticker_mod.pick_for_emotion(self.media, dominant)
+        if item is None:
+            return
+
+        payload = sticker_mod.build_payload(self.media, item)
+        if not payload:
+            return
+
+        await self.bus.publish("pet.sticker", msg("pet.sticker", **payload))
+        try:
+            self.media.mark_used(item)
+        except Exception:  # noqa: BLE001
+            pass
+        # 表情包也要进原文记忆（用户要求：「表情包也能进入原文记忆存放」）
+        #
+        # ⚠️ 只记**引用 + 标注**，不塞 BLOB —— 理由见 `_remember_image_turn`。
+        # ⚠️ 记成 assistant 轮：这确实是"宠物做的事"（它发了一张图），
+        #    下次聊到相关话题它能想起来"我上次发过一个橘猫大笑的表情"。
+        try:
+            if self.memory is not None:
+                self.memory.remember_turn(
+                    self.conversation.session_id,
+                    "assistant",
+                    f"（我回了一张表情包：{item.caption or item.emotion or '没标注'}）"
+                    f"\n[图：{item.path}]",
+                )
+        except Exception:  # noqa: BLE001
+            log.debug("表情包写记忆失败（已忽略）", exc_info=True)
+        log.info(
+            "表情包：发了 %s（%s，%s）",
+            item.path,
+            item.emotion or "未分类",
+            item.caption[:30] or "无标注",
+        )
+
+    async def _on_user_image(self, incoming: Any) -> None:
+        """用户发来一张图片 -> 存盘 + 看懂 + 当作用户那句话送进对话。
+
+        ## 三步缺一不可
+
+            ① 入库   存进 pet-media/images/（用户要求"专门一个文件夹"）
+            ② 看懂   视觉模型描述（用户要求"精准识别解析"）
+            ③ 说话   把描述拼进 user 轮
+
+        ## ⚠️ ②失败也要继续
+
+        视觉模型可能没好（没密钥/限流/余额）。那时**不能沉默** ——
+        用户发了一张图，宠物一声不吭比说"我看不清"糟得多。
+
+        所以失败时用一句「用户发了一张图片（没看清）」占位，
+        让它至少能接话。这和截图对话那条路的取舍一致
+        （见 `_snap_and_chat` 里"看不懂仍然开口"的说明）。
+        """
+        import base64 as _b64
+
+        raw = dict(getattr(incoming, "raw", {}) or {})
+        data_b64 = str(raw.get("data") or "")
+        name = str(raw.get("name") or "image.png")
+        caption = str(getattr(incoming, "text", "") or "").strip()
+
+        try:
+            data = _b64.b64decode(data_b64, validate=False)
+        except Exception:  # noqa: BLE001
+            log.warning("用户图片 base64 解不开（%d 字符）", len(data_b64))
+            await self._say_unreadable_image("图片数据解不开")
+            return
+
+        if not data:
+            await self._say_unreadable_image("图片是空的")
+            return
+
+        log.info("收到用户图片：%s（%d KB）", name, len(data) // 1024)
+
+        # ① 入库（失败不阻断 —— 看图才是主目的）
+        item = None
+        try:
+            item = self.media.add_file(
+                data, name, source="chat", caption="", labeled_by=""
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("图片入库失败（已忽略）", exc_info=True)
+
+        # ② 看懂
+        desc, why = "", ""
+        try:
+            desc, why = await asyncio.to_thread(
+                media_vision.describe_image, data, self.config
+            )
+        except Exception as exc:  # noqa: BLE001
+            why = f"{type(exc).__name__}: {exc}"
+
+        if desc:
+            log.info("图片看懂 %d 字：%s", len(desc), desc[:80].replace("\n", " "))
+            if item is not None:
+                try:
+                    self.media.annotate(item, desc[:200], by="auto")
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            log.info("图片没看懂：%s", why or "未知原因")
+
+        # ③ 拼进 user 轮
+        #
+        # ⚠️ 把描述放在**用户那句话里**（不是 system），理由见 `_on_user_image`
+        #    的调用处注释：system 会被记忆压过去，只有 user 轮模型最当真。
+        if desc:
+            user_text = f"[用户发来一张图片，画面是：{desc}]"
+        else:
+            user_text = (
+                "[用户发来一张图片，但你现在看不清它的内容"
+                f"（{why or '视觉模型不可用'}）—— 如实说没看清，"
+                "不要编造画面里有什么]"
+            )
+        if caption:
+            user_text = f"{user_text}\n用户还说：{caption}"
+
+        log.info("用户消息（图片）：%s", user_text[:100].replace("\n", " "))
+        await self._remember_image_turn(item, user_text)
+        await self.bus.publish(
+            "user.text", {"text": user_text, "requestId": incoming.request_id}
+        )
+
+    async def _remember_image_turn(self, item: Any, user_text: str) -> None:
+        """把"用户发了一张图"写进**原文记忆**（2026-11-02 用户要求）。
+
+        ## 用户原话
+
+        > 「表情包也能进入原文记忆存放。」
+
+        ## 🔴 记忆里存**引用**，不存图片本身
+
+        图片本体已经在 `pet-media/` 里了（用户要求"专门一个文件夹"）。
+        再往 SQLite 里塞一份 BLOB 就是**两份真相**：
+
+          · 用户删了文件夹里的图，记忆里还有（删不掉）
+          · 一个 3 MB 的截图会让记忆库涨 3 MB，几十张就撑爆
+          · 备份/导出记忆库会连带图片一起变大
+
+        所以这里存的是**路径 + 描述**：
+
+            （用户发来一张图片：一只橘猫趴在键盘上）
+            [图：images/20261102-201548-cat.png]
+
+        模型读到这些就知道"它看过一张图、图在哪、画的是什么"，
+        而真正的字节只存一份。
+        """
+        if self.memory is None:
+            return
+        try:
+            path_line = f"\n[图：{item.path}]" if item is not None else ""
+            text = f"{user_text}{path_line}"
+            # ⚠️ `session_id` 在 Conversation 上（已踩过一次）
+            self.memory.remember_turn(self.conversation.session_id, "user", text)
+            log.info("记忆：用户图片已写入原文记忆（%s）", item.path if item else "无文件")
+        except Exception:  # noqa: BLE001 —— 记忆失败不该影响对话
+            log.warning("记忆：用户图片写入失败（已忽略）", exc_info=True)
+
+    async def _say_unreadable_image(self, reason: str) -> None:
+        """图片彻底没法处理时，让宠物说一句话（不要沉默）。"""
+        log.info("用户图片无法处理：%s", reason)
+        await self.bus.publish(
+            "user.text",
+            {
+                "text": f"[用户发来一张图片，但{reason}。如实告诉他没收到/看不清，不要编造内容]",
+                "requestId": "",
+            },
+        )
 
     async def _snap_and_chat(self, req_id: str = "") -> None:
         """
@@ -5847,6 +6347,9 @@ class Gateway:
             #    以 `handler(ctx)` 的形式调用。
             "read_novel": self._event_read_novel,
             "read_community": self._event_read_community,
+            # 表情包下载（2026-11-03）。和上面两个同一个机制：
+            # `bind_handler` 生成的派发器会从 ctx 里取它来调。
+            "fetch_stickers": self._event_fetch_stickers,
         }
         outcome = await self.events.run(spec, ctx)
         if outcome is None:
@@ -5937,7 +6440,21 @@ class Gateway:
                 self.memory.close()
             except Exception:  # noqa: BLE001 —— 关闭失败不该阻塞退出
                 log.exception("记忆库关闭失败（忽略，继续退出）")
-        for task_attr in ("_autonomy_task", "_vision_task", "_voice_task", "_memory_task"):
+        # ⚠️ 这个列表 2026-11-02 补全了：原来只取消 4 个，而实际起的循环有
+        # `_autonomy_task` / `_events_task` / `_autosnap_task` / `_reading_task` /
+        # `_state_task` / `_sticker_label_task` 六个。漏掉的会在关闭后继续跑一轮，
+        # 表现为"退出时日志里还在刷自主评估"。用循环变量拼，避免再漏。
+        for task_attr in (
+            "_autonomy_task",
+            "_vision_task",
+            "_voice_task",
+            "_memory_task",
+            "_events_task",
+            "_autosnap_task",
+            "_reading_task",
+            "_state_task",
+            "_sticker_label_task",
+        ):
             task = getattr(self, task_attr, None)
             if task is None or task.done():
                 continue

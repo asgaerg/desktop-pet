@@ -931,6 +931,46 @@
           }
         }
       }
+    },
+    "user.image": {
+      "direction": "toBrain",
+      "comment": "用户发图片给宠物（2026-11-02）。三条输入路径（选文件/粘贴/拖拽）统一在渲染层读成 dataURL，主进程拆成 mime + data（纯 base64）。拆分在主进程做，是为了让 Python 侧不需要知道 dataURL 这种浏览器写法。",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "data"
+        ],
+        "properties": {
+          "type": {
+            "const": "user.image"
+          },
+          "data": {
+            "type": "string",
+            "minLength": 1,
+            "description": "纯 base64，不带 data: 前缀"
+          },
+          "mime": {
+            "type": "string",
+            "description": "image/png、image/jpeg 等"
+          },
+          "name": {
+            "type": "string",
+            "description": "原始文件名，只用来起存盘名"
+          },
+          "text": {
+            "type": "string",
+            "description": "用户配的一句话（可空）"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "number"
+          }
+        }
+      }
     }
   }
 }

@@ -684,6 +684,63 @@ body {
   display: none !important;
 }
 
+/*
+ * 表情包层（2026-11-02 用户要求）。
+ *
+ * ## 定位
+ *
+ * 贴在宠物**左上角外侧**（`right: 100%` 是相对 `#stage` 的右边），
+ * 这样不挡住宠物本体，也不会盖住对话条。
+ *
+ * ## ⚠️ `pointer-events: none` 不能去掉
+ *
+ * 宠物窗口靠"`#hud` 穿透、`.interactive` 可交互"来让用户点到桌面。
+ * 表情包是纯展示，如果它能接收点击，宠物旁边就会出现一块
+ * "莫名其妙点不动的区域" —— 那正是用户抱怨过的那类问题。
+ *
+ * ## 出现/消失
+ *
+ * 淡入 + 轻微上浮（0.18s），4 秒后淡出。动画短一点：
+ * 表情包是"随手发一张"，不该像正式弹窗那样隆重。
+ */
+.sticker {
+  position: absolute;
+  right: 100%;
+  bottom: 8px;
+  margin-right: 10px;
+  pointer-events: none;
+  user-select: none;
+  z-index: 30;
+  animation: sticker-in 0.18s ease-out;
+  transition: opacity 0.25s ease-out;
+}
+
+.sticker img {
+  display: block;
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 10px;
+  /* 深色/浅色主题下都能看清轮廓，不写死颜色 */
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* 淡出时加这个类（JS 控制时机） */
+.sticker.fading {
+  opacity: 0;
+}
+
+@keyframes sticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 /* 免打扰：整体降饱和，一眼能看出"它现在不说话" */
 body.paused #stage,
 body.paused #dock {
