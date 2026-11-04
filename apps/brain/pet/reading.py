@@ -1048,10 +1048,20 @@ class Reader:
 
     def read_many(
         self, query: str, chapters: int = 1
-    ) -> Optional[tuple[str, int, int, str, list[tuple[str, str]]]]:
+    ) -> Optional[tuple[str, int, int, str, list[tuple[str, str]], str]]:
         """读**若干章**，从上次读到的地方接着读。同步方法（调用方丢线程）。
 
-        返回 `(书名, 本次读了几章, 总字数, 文件路径, [(章名, 片段), ...])`。
+        返回 `(书名, 本次读了几章, 总字数, 文件路径, [(章名, 片段), ...], 本次正文)`。
+
+        ## 🔴 最后那个"本次正文"是 2026-11-04 加的
+
+        用户报「宠物说了两遍看同一章节」。查下来记忆里两条**完全相同**
+        （sha1 一样），因为调用方拿 `path` 去读文件时读的是**整本书**，
+        而 `_remember_reading` 只截前 600 字 —— 那永远是**第 1 章开头**，
+        不管这次实际读的是第几章。
+
+        所以现在把"本次真正下载的那几章正文"直接带出来。
+        调用方拿它写记忆，就不会再出现"每次都记第 1 章"。
 
         ## 用户要求（2026-10-31）
 
@@ -1124,12 +1134,14 @@ class Reader:
                         "网上阅读：《%s》已读完（%d/%d 章）",
                         title, done, len(chaps),
                     )
-                    return (title, 0, 0, str(self._book_path(title)), [])
+                    return (title, 0, 0, str(self._book_path(title)), [], "")
 
                 start_idx = idx
                 total_chars = 0
                 got = 0
                 samples: list[tuple[str, str]] = []
+                # 本次真正下载到的正文（见下面 `fresh.append` 的说明）
+                fresh: list[str] = []
                 last_path = str(self._book_path(title))
 
                 while idx < len(chaps) and got < want:
@@ -1162,6 +1174,22 @@ class Reader:
                     )
                     got += 1
                     total_chars += len(body)
+                    # 🔴 攒下**本次读到的正文**（2026-11-04 加）
+                    #
+                    # ## 为什么在这里攒，而不是让调用方去读文件
+                    #
+                    # 调用方（`reading_tools`）只拿到 `path`。它如果去读文件，
+                    # 读到的是**整本书**（开头永远是第 1 章），于是写进记忆的
+                    # 永远是"第 1 章开头那 600 字" —— 不管这次实际读的是第几章。
+                    #
+                    # 实测（用户报的「宠物说了两遍看同一章节」）：
+                    # 两次读不同章节，记忆里却是**完全相同**的两条
+                    # （sha1 一模一样），因为都截的是文件最前面。
+                    #
+                    # 所以正文在这里攒：**只有本次真正下载的那几章**。
+                    # 章名可能**自带**「第N章」（思兔就是这样），别拼两次前缀
+                    _head = ct if re.match(rf"^\s*第\s*{idx + 1}\s*章", ct) else f"第{idx + 1}章 {ct}"
+                    fresh.append(f"{_head}\n{body}")
                     if len(samples) < 3:
                         snip = re.sub(r"\s+", " ", body[:100]).strip()
                         samples.append((ct[:20], snip))
@@ -1181,7 +1209,7 @@ class Reader:
                     "网上阅读：✅《%s》读了 %d 章（第 %d~%d 章），共 %d 字",
                     title, got, start_idx + 1, start_idx + got, total_chars,
                 )
-                return (title, got, total_chars, last_path, samples)
+                return (title, got, total_chars, last_path, samples, "\n\n".join(fresh))
             except Exception as exc:  # noqa: BLE001
                 log.info(
                     "网上阅读：%s 出错（%s: %s），换源",

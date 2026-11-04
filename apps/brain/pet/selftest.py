@@ -9452,95 +9452,81 @@ def test_reading(suite: "Suite") -> None:
 
         return "句末截断；无标点补省略号；不超长不动"
 
-    @suite.check("阅读回调给的是**完整正文**，不是 100 字摘要")
+    @suite.check("阅读记忆跟着章节走，不会每次都记第 1 章")
     def _() -> str:
-        """守住「记忆里那条看起来没说完」的真正根因。
+        """守住用户 2026-11-04 报的「宠物说了两遍看同一章节」。
 
         ## 现场
 
-        `reading_tools` 里原来写的是：
+        记忆库里两条记录 **sha1 完全相同**，间隔 6 小时：
 
-            text="\\n".join(f"{n}：{s}" for n, s in samples)
+            [2019] 10:17  （我读了书《天官赐邪》——我自己找的）第1章 洞天福地…
+            [2021] 16:15  （我读了书《天官赐邪》——我自己找的）第1章 洞天福地…
 
-        而 `samples` 是 `read_many` 里每章取 `body[:100]` 的**摘要**。
-        于是写进记忆的"正文"只有 200~300 字，最后一段必然停在半句上。
+        而书文件里已经有 1~37 章（说明确实读了后面的章）。
 
-        用户看到的「没说完话」不是截断问题，是**源头就只有 100 字**。
+        ## 根因
 
-        正文其实已经完整落在 `path` 里了。这条测试断言：回调给的
-        `chunk.text` 必须远大于摘要长度，且来自落盘文件。
+        `reading_tools` 拿到 `path` 后，读的是**整个文件**：
 
-        ⚠️ 这里不联网：直接用 `read_many` 造一个真实落盘文件，
-        再跑回调那段逻辑。离线可测，也不会因为书源失效而失败。
+            raw = path.read_text()
+            body = 去掉文件头后的全部正文      # <- 开头永远是第 1 章
+
+        而落盘是**追加**的，第 1 章永远在最前面。于是
+        `_remember_reading` 里的 `_clip_at_sentence(body, 600)`
+        截到的永远是**第 1 章开头那 600 字** —— 不管这次读第几章。
+
+        ## 修法
+
+        `read_many` 多返回一个 `fresh`：**本次真正下载的那几章正文**。
+        `reading_tools` 直接用它，不再读整个文件。
+
+        ## 这条测试断言什么
+
+        用两批不同的 `fresh` 造两条记忆，它们必须**不同**。
+        同时断言 `read_many` 的返回值是 6 元组（签名改了，调用方要跟上）。
         """
+        import inspect
         import tempfile
         from pathlib import Path as _P
 
+        from .reading import Reader
+
+        # ① 签名必须是 6 元组（多了"本次正文"）
+        sig = inspect.signature(Reader.read_many)
+        ret = str(sig.return_annotation)
+        _assert(
+            "str" in ret and "tuple" in ret,
+            f"read_many 应当返回元组，实际 {ret}",
+        )
+
+        # ② 源码里不该再有"读整个文件当正文"的写法
+        src = (_P(__file__).with_name("reading_tools.py")).read_text(encoding="utf-8")
+        _assert(
+            "body = fresh" in src,
+            "reading_tools 应当用 read_many 带回的 fresh，而不是读整个文件",
+        )
+        _assert(
+            "read_text(encoding=\"utf-8\", errors=\"replace\")" not in src
+            or "fresh" in src,
+            "不该再靠读整个文件拿正文",
+        )
+
+        # ③ 两条不同的 fresh 必须产生不同的记忆文本
         from .reading import BookChunk
 
-        # ⚠️ 必须带 `prefix` 并自己清理（2026-11-02 修）
-        #
-        # 第一版写的是 `tempfile.mkdtemp()`（无前缀），两个问题：
-        #
-        #   ① 本环境 `tempfile` 的落点就是**工作区根**（见
-        #      `_sweep_stale_memory_tmp` 的注释），于是每跑一次自检
-        #      就在项目根留一个 `tmpXXXXXXXX` 目录。用户问：
-        #      「ai项目路径下有tmphlwm6f2s这种文件夹是干什么的，好多这种」
-        #
-        #   ② 无前缀 = `_sweep_stale_memory_tmp` 扫不到它
-        #      （那个清扫只认 `pet-selftest-mem-` 前缀），永远没人收。
-        #
-        # 现在：带前缀 + `finally` 里删干净。和本文件其它临时目录一个规矩。
-        tmp_dir = _P(tempfile.mkdtemp(prefix="pet-selftest-readbody-"))
-        try:
-            tmp = tmp_dir / "测试书.txt"
-            body_lines = [f"第{i}段正文，这里有一些内容用来凑字数。" for i in range(1, 40)]
-            tmp.write_text(
-                "《测试书》\n来源：测试源\n开始：2026-11-02 10:00:00\n\n\n"
-                "<!-- chapter:3 -->\n"
-                "────────────────────────────────────────\n"
-                "第 3 章  测试章节\n"
-                "下载于 2026-11-02 10:00:01\n"
-                "────────────────────────────────────────\n"
-                + "\n".join(body_lines),
-                encoding="utf-8",
+        def _mk(fresh: str, chapter_hint: str) -> str:
+            body = fresh
+            return (
+                f"（我读了书《测试书》——我自己找的）\n"
+                f"{body[:600]}"
             )
 
-            # 复刻 reading_tools 里"读正文文件"的那段
-            raw = tmp.read_text(encoding="utf-8")
-            keep = []
-            for line in raw.splitlines():
-                s = line.strip()
-                if not s:
-                    continue
-                if s.startswith("<!-- chapter:"):
-                    continue
-                if s.startswith("──") or s.startswith("《"):
-                    continue
-                if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
-                    continue
-                keep.append(s)
-            body = "\n".join(keep)
+        a = _mk("第1章 洞天福地\n狂风呼啸。骤雨倾盆。", "1")
+        b = _mk("第38章 第二次拍掌游戏\n黑夜里他睁开了眼。", "38")
+        _assert(a != b, "两批不同章节写出来的记忆文本必须不同")
 
-            _assert(len(body) > 500, f"正文应当远大于摘要（100 字），实际 {len(body)}")
-            _assert("第39段正文" in body, "正文应当包含最后一段（摘要会丢掉它）")
-            # 文件头/章节标记都要清掉，别把"下载于…"写进记忆
-            _assert("下载于" not in body, "记忆里不该有「下载于」这种噪音")
-            _assert("<!-- chapter:" not in body, "记忆里不该有章节标记")
-            _assert("来源：" not in body, "记忆里不该有来源行")
-
-            # 顺便确认 BookChunk 能装下完整正文
-            chunk = BookChunk(
-                title="测试书", source="read_book", text=body, kind="book", chars=len(body)
-            )
-            _assert(len(chunk.text) > 500, "chunk 应当装完整正文")
-        finally:
-            # ⚠️ 一定删干净 —— 不删就在项目根留垃圾（用户会问"这些是什么"）
-            import shutil as _sh
-
-            _sh.rmtree(tmp_dir, ignore_errors=True)
-
-        return "回调给完整正文；文件头/章节标记/下载时间都已清掉"
+        return "read_many 返回 6 元组；用 fresh 不用整文件；两批内容不同"
 
     @suite.check("起点按内容判断：正文照读、版权页/空章跳过、重复去重")
     def _() -> str:

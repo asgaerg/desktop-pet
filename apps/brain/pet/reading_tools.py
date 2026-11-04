@@ -131,7 +131,7 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
                 "可能是书源失效，或者这本书本身没有内容。可以换一本试试。"
             )
 
-        title, got, total_chars, path, samples = result
+        title, got, total_chars, path, samples, fresh = result
 
         # 通知网关"读了什么"（网关会把它挂成下次自主发言的话题）
         if on_read is not None and got > 0:
@@ -158,29 +158,26 @@ def build_reading_tools(reader: Any, on_read: Any = None) -> list[Any]:
                 # 两段各 100 字，第二段停在一句话中间。用户翻记忆时问：
                 # 「最新一条是没说完话吗」—— 是的，因为**它本来就只有 100 字**。
                 #
-                # 正文其实已经完整落在 `path` 里了，读出来就行。
-                body = ""
-                try:
-                    from pathlib import Path as _P
-
-                    raw = _P(path).read_text(encoding="utf-8", errors="replace")
-                    # 去掉文件头（书名/来源/开始时间）和章节标记行，
-                    # 只留正文 —— 记忆里不需要"下载于 2026-11-02"这种噪音。
-                    keep: list[str] = []
-                    for line in raw.splitlines():
-                        s = line.strip()
-                        if not s:
-                            continue
-                        if s.startswith("<!-- chapter:"):
-                            continue
-                        if s.startswith("──") or s.startswith("《"):
-                            continue
-                        if s.startswith("来源：") or s.startswith("开始：") or s.startswith("下载于"):
-                            continue
-                        keep.append(s)
-                    body = "\n".join(keep)
-                except Exception:  # noqa: BLE001 —— 读不到就退回摘要
-                    log.warning("读正文文件失败，退回摘要片段", exc_info=True)
+                # 🔴 但**不要**去读整个文件（2026-11-04 修，真 bug）
+                #
+                # 上一版是：
+                #
+                #     raw = _P(path).read_text(...)     # 整个文件
+                #     body = 去掉文件头后的全部正文
+                #
+                # 而文件是**追加**写的、开头永远是第 1 章。于是：
+                #   · `_remember_reading` 里 `_clip_at_sentence(body, 600)`
+                #   · 截到的永远是**第 1 章开头那 600 字**
+                #   · 不管这次读的是第几章
+                #
+                # 用户报「宠物说了两遍看同一章节」就是这么来的：
+                # 记忆里两条**完全相同**（sha1 一样），间隔 6 小时。
+                #
+                # 现在用 `read_many` 带回来的 `fresh`（本次真正下载的那几章）。
+                # 兜底才退回摘要片段 —— 注意**不再**读整个文件了。
+                body = fresh
+                if not body:
+                    log.warning("read_many 没带回本次正文，退回摘要片段")
                     body = "\n".join(f"{n}：{s}" for n, s in samples)
 
                 chunk = BookChunk(
