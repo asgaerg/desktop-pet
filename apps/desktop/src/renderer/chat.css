@@ -97,26 +97,8 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/*
- * 状态点：7px 的小圆点。
- * 保留它是为了"一眼看出连上没有"，鼠标悬停才显示详情（title）。
- */
-.dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  margin-left: 3px;
-  border-radius: 50%;
-  background: var(--text-dim);
-}
 
-.dot[data-level='ok'] {
-  background: var(--ok);
-}
 
-.dot[data-level='bad'] {
-  background: var(--bad);
-}
 
 /* ------------------------------------------------------------------ */
 /* 拖拽抓手（2026-10-12 修「拖不动」）                                  */
@@ -181,9 +163,6 @@ body {
   background: var(--text-dim);
 }
 
-.dot[data-level='warn'] {
-  background: var(--warn);
-}
 
 .input {
   flex: 1 1 auto;

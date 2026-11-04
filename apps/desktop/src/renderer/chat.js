@@ -6,18 +6,22 @@
  *
  * ---- 它管什么 ----
  *
- * 只管道一根对话条：输入、发送、一个状态点。
+ * 只管道一根对话条：输入、发送、发图。
  * **窗口位置完全由主进程决定**（见 chatWindow.ts）—— 渲染层不参与定位，
  * 否则又会出现"两边都在算位置"的经典问题（这个项目在点击穿透上踩过一次）。
+ *
+ * 🔴 2026-11-04：状态点（`#dot`）已按用户要求删除。
+ *    原来这里有 `paintDot()` 按状态文本给圆点着色，还有一条 `chat:status`
+ *    订阅专为它服务 —— 两者**都删掉了**。
+ *
+ *    ⚠️ 为什么不把 `lastStatus` 留着"以后可能有用"：它只写不读，
+ *       是纯粹的死后代码。留着会让人以为"这里还有状态显示"。
+ *       真要再显示状态，去主进程要 `chat:status` 就是（通道还在）。
  */
 
 const el = (id) => document.getElementById(id);
 const input = el('input');
 const send = el('send');
-const dot = el('dot');
-
-/** 由 pet.on('pet:message') 收到的运行状态，用来给状态点着色 */
-let lastStatus = '正在启动…';
 let busy = false;
 
 function setBusy(next) {
@@ -26,18 +30,6 @@ function setBusy(next) {
   send.textContent = next ? '…' : '发送';
 }
 
-function paintDot() {
-  if (!dot) return;
-  // 免打扰 / 未连接 都从状态文本里判断 —— 主进程已经把状态收敛成一个字符串，
-  // 再让渲染层自己推导一套状态机只会两边不一致。
-  const text = String(lastStatus || '');
-  let level = 'info';
-  if (/在线|已连接|就绪|mock/.test(text)) level = 'ok';
-  else if (/失败|错误|断开|离线/.test(text)) level = 'bad';
-  else if (/免打扰|暂停|连接中/.test(text)) level = 'warn';
-  dot.dataset.level = level;
-  dot.title = text;
-}
 
 function submit() {
   const text = input.value.trim();
@@ -122,10 +114,6 @@ function sendImageFile(file) {
 function toast(text) {
   const old = input.placeholder;
   input.placeholder = text;
-  if (dot) {
-    dot.dataset.level = 'bad';
-    setTimeout(paintDot, 2500);
-  }
   setTimeout(() => {
     input.placeholder = old;
   }, 2500);
@@ -186,22 +174,11 @@ document.addEventListener('drop', (event) => {
   }
 });
 
-// 运行状态：只用来着色那个小圆点
-window.pet.on('chat:status', (payload) => {
-  lastStatus = String((payload && payload.text) || '');
-  paintDot();
-});
-
 // 收到宠物回复（或错误）就解除忙碌态
 window.pet.on('pet:message', (message) => {
   const type = message && message.type;
   if (type === 'pet.reply' || type === 'error' || type === 'pet.toast') setBusy(false);
-  if (type === 'ready' || type === 'pet.status') {
-    lastStatus = String((message.payload && message.payload.status) || lastStatus);
-    paintDot();
-  }
 });
 
-paintDot();
 // 打开时就聚焦：用户点进来就是为了打字
 input.focus();
