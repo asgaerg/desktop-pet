@@ -57,6 +57,40 @@ window.pet.on('chat:focus-input', () => {
   input.focus();
 });
 
+/*
+ * 鼠标移入 -> 告诉主进程（2026-11-05）。
+ *
+ * ## 为什么需要它
+ *
+ * 对话条闲置 2 分钟后会滑出屏幕，只留左边 22px 的抓手可见。
+ * 但窗口是 `showInactive` 开的 —— 鼠标移上去**不会触发 focus**，
+ * 得真点一下才行。那样用户看到一个 22px 竖条，点了才回来，手感很差。
+ *
+ * 所以这里把"鼠标进来了"转给主进程，让它立刻滑回。
+ *
+ * ## ⚠️ 用 `mouseover` 而不是 `mouseenter`
+ *
+ * `mouseenter` **不冒泡**，挂在 `document` 上根本不触发（它只对
+ * "有子元素边界"的元素有意义）。实测确认过：挂 `document` 的
+ * `mouseenter` 一次都不会来。
+ *
+ * 用 `mouseover`（会冒泡）代替，然后自己去重：只在"上一次不在窗口内"
+ * 时才发一条，否则鼠标每划过一个小元素都会发一次。
+ *
+ * ⚠️ 主进程那边**只在滑出去状态**才理它；正常状态下鼠标划过不算操作，
+ *    不会重置 2 分钟计时（否则鼠标停在旁边它就永远不滑了）。
+ */
+let pointerInside = false;
+document.addEventListener('mouseover', () => {
+  if (pointerInside) return;
+  pointerInside = true;
+  window.pet.notifyActivity();
+});
+document.addEventListener('mouseout', (event) => {
+  // relatedTarget 为 null = 真的离开窗口（不是移到子元素上）
+  if (!event.relatedTarget) pointerInside = false;
+});
+
 /* --------------------------------------------------------------- 发图片 */
 /*
  * 2026-11-02 用户要求：「可以用图片和用户聊天」。

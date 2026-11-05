@@ -226,6 +226,48 @@ export class ChatWindow {
    */
   private programmaticMove = false;
 
+  /**
+   * 「闲置后缩到屏幕右边」（2026-11-05 用户要求）。
+   *
+   * ## 用户原话
+   *
+   * > 「对话框现在设置累计2分钟聚焦不在对话框，不进行对话框中的操作时，
+   * >   将对话框X轴位置移至右边，像我现在对话框的位置，平移，加个动画，
+   * >   Y轴不变」
+   *
+   * ## 行为
+   *
+   * ```
+   * 累计 2 分钟没有聚焦 / 没有操作  -> 向右滑到贴边（X 变，Y 不变）
+   * 一旦聚焦或点击              -> 滑回原位
+   * ```
+   *
+   * ## 为什么"累计"而不是"连续"
+   *
+   * 用户说的是「累计 2 分钟」。鼠标划过去一下不算"操作"
+   * （那只产生 hover，不产生 focus/click），所以计时不会被清零 ——
+   * 只有**真的聚焦或点了**才重置。
+   */
+  private idleTimer: NodeJS.Timeout | null = null;
+  /** 滑出去之前的 X（滑回来时要回到这里） */
+  private parkedFromX: number | null = null;
+  /** 现在是不是"已经滑到右边" */
+  private parked = false;
+  /** 滑动动画的定时器（中途要改方向得能取消） */
+  private slideTimer: NodeJS.Timeout | null = null;
+
+  /** 闲置多久后滑出去：用户指定 **2 分钟** */
+  private static readonly IDLE_PARK_MS = 2 * 60 * 1000;
+  /** 滑动动画时长（毫秒）。约 14 帧，顺滑又不至于慢得让人等 */
+  private static readonly SLIDE_MS = 220;
+  /**
+   * 抓手宽度（像素）—— 必须和 `chat.css` 的 `.grip { width: 22px }` 一致。
+   *
+   * 用户要求「只往外移出三条杠的图标」：滑出去之后屏幕上只剩这 22px。
+   * ⚠️ 改 CSS 时记得同步这里，否则要么留白条、要么把三条杠切掉一半。
+   */
+  private static readonly GRIP_WIDTH_PX = 22;
+
   /** 自己挪窗口（`moved` 事件据此忽略），并在稍后解除闸门 */
   private moveProgrammatically(rect: Rect): void {
     const window = this.window;
@@ -243,6 +285,25 @@ export class ChatWindow {
     setTimeout(() => {
       this.programmaticMove = false;
     }, 120);
+  }
+
+  /**
+   * 动画专用：只挪不重设定时器（2026-11-05 加）。
+   *
+   * ## 为什么不能直接用 `moveProgrammatically`
+   *
+   * 它每次都会挂一个 120ms 的 `setTimeout`。滑边动画有 14 帧，
+   * 那就是 14 个定时器 —— 而且**先挂的那个会先把闸门松开**，
+   * 于是后面几帧的 `moved` 会被当成"用户拖的"，
+   * 把动画中间位置记进 `userPosition`（下次启动就跑到那里去了）。
+   *
+   * 所以动画期间闸门**一直保持 true**，由动画结束时统一放开。
+   */
+  private nudgeForSlide(x: number, y: number, width: number, height: number): void {
+    const window = this.window;
+    if (!window || window.isDestroyed()) return;
+    this.programmaticMove = true;
+    window.setBounds({ x, y, width, height });
   }
 
   /** 从设置里恢复上次的位置（启动时调一次） */
@@ -468,6 +529,39 @@ export class ChatWindow {
     // 初始位置（实测 617,382 —— 屏幕中间偏上），而且日志里连一条定位诊断都没有。
     // 这类"字段没赋值 -> 方法静默早退"最难查：链路上每一环看起来都对。
     this.window = window;
+
+    /*
+     * 🔴 闲置滑边的两个挂钩（2026-11-05）
+     *
+     * ## 什么时候重置计时
+     *
+     * 用户说的是「累计 2 分钟**聚焦不在对话框**、**不进行对话框中的操作**」。
+     *
+     * 所以只有**真的用它**才重置：
+     *   · `focus`  —— 窗口拿到焦点（点进来、Ctrl+Alt+L 聚焦）
+     *   · `blur`   —— 失焦也重置一次：用户刚用完离开，计时该从**这一刻**开始，
+     *                 而不是从他进来那一刻（否则用久了会刚一放手就滑走）
+     *
+     * ⚠️ **不**监听 hover/mousemove：那只是鼠标划过，不算操作。
+     *    否则用户鼠标放在旁边就永远不滑，功能等于没有。
+     *
+     * ## 🔴 但"滑出去之后"鼠标移入要立刻滑回（2026-11-05 实测补）
+     *
+     * 实测发现：滑出去后屏幕上只剩 22px 抓手，而窗口是 `showInactive`
+     * 开的 —— 鼠标移上去**不会触发 `focus`**（要真点一下才行）。
+     *
+     * 结果就是用户看到一个 22px 的竖条，得先点它、窗口才回来，
+     * 而点的那一刻窗口还在屏幕外，点击落空感很强。
+     *
+     * 所以滑出状态下额外监听鼠标移入（由渲染层的 `mouseenter`
+     * 经 `chat:user-activity` 转过来）——**只在滑出时才理它**，
+     * 正常状态下鼠标划过不算操作，不重置计时器。
+     */
+    window.on('focus', () => this.resetIdlePark());
+    window.on('blur', () => this.armIdlePark());
+    // 创建时先起一次计时（首次启动 2 分钟后如果没人碰它就滑出去）
+    this.armIdlePark();
+
     return window;
   }
 
@@ -504,6 +598,49 @@ export class ChatWindow {
   anchorToCorner(corner: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' = 'bottom-right'): void {
     const window = this.window;
     if (!window || window.isDestroyed()) return;
+    /*
+     * 🔴 重新定位前先放弃"滑出去"的**位置状态**（2026-11-05）
+     *
+     * 如果它正滑在屏幕外（只剩抓手可见），而这里又把窗口挪到某个角，
+     * 那个"滑出去的 X"就失效了 —— 之后用户一碰，它会按旧的 `parkedFromX`
+     * 滑回一个**过时的位置**（可能是别的分辨率下的坐标）。
+     *
+     * ⚠️ **只清位置，不清计时器**（这一点踩过一次）。
+     *
+     * `anchorToCorner()` 会被**高频调用**（宠物一挪动就触发
+     * `onLayoutChanged` -> `syncChat()`）。如果这里把闲置计时器也清掉，
+     * 那个计时器**永远走不到 2 分钟**——表现就是"滑边功能完全没生效"，
+     * 而且日志里什么都看不到（因为计时器根本没到点）。
+     *
+     * 所以拆成两个方法：
+     *   `cancelIdlePark()`  只清位置状态（这里用）
+     *   `stopIdlePark()`    清位置 + 停计时器（隐藏时用）
+     */
+    /*
+     * 🔴 **已经滑出去了就不再重新定位**（2026-11-05）
+     *
+     * `anchorToCorner` 由 `onLayoutChanged` 触发（宠物一挪动就来一次），
+     * 频率不低。如果每次都把窗口挪回原位，滑边就等于**立刻被撤销** ——
+     * 用户看到的会是"刚滑出去又弹回来"，或者干脆看不到滑动。
+     *
+     * 所以：滑出去状态优先，谁来定位都不动它。
+     * 用户一碰（focus）走 `resetIdlePark()` 滑回来，那时才恢复自动定位。
+     */
+    if (this.parked) {
+      // ⚠️ 这里**不打日志**：`anchorToCorner` 由 `onLayoutChanged` 高频触发
+      //    （宠物一动就来一次），打日志会把 startup.log 刷爆 ——
+      //    实测一秒十几条。排查期临时打过，确认没问题后去掉了。
+      return;
+    }
+    /*
+     * ⚠️ 动画进行中也跳过（2026-11-05）。
+     *
+     * 滑回（`parked=false`）的那 220ms 里，如果 `anchorToCorner` 插进来，
+     * 它会按"右下角"重新算位置 —— 而滑回的目标是 `parkedFromX`（用户
+     * 自己摆的位置）。两个目标打架，表现是"滑回来但位置不对"。
+     */
+    if (this.slideTimer !== null) return;
+    this.cancelIdlePark();
     /*
      * ⚠️ **用户亲手摆过位置就不再自动钉角**（2026-10-12）。
      *
@@ -572,7 +709,270 @@ export class ChatWindow {
     // 它又冒出来了。用户要的是"我不想看它"，所以这个意愿必须优先。
     // （想让它回来就再用菜单切换一次。）
     if (!this.userHidden) this.show();
+    // 聚焦 = 用户开始用它了 -> 立刻滑回原位、重置闲置计时
+    this.resetIdlePark();
     window.webContents.send('chat:focus-input');
+  }
+
+  /* ---------------------------------------------------------------- 闲置滑边 */
+  /*
+   * 用户 2026-11-05：「累计 2 分钟聚焦不在对话框，不进行对话框中的操作时，
+   * 将对话框 X 轴位置移至右边，像我现在对话框的位置，平移，加个动画，
+   * Y 轴不变」。
+   *
+   * ## 三个入口
+   *
+   *   `armIdlePark()`    开始/重置计时（窗口创建后、每次聚焦/点击时调）
+   *   `resetIdlePark()`  立刻滑回 + 重新计时（用户碰它了）
+   *   `parkAsync()`      真正执行滑动
+   *
+   * ## ⚠️ 为什么用"贴边"而不是"某个固定 X"
+   *
+   * 用户的对话条现在在 x=1262（屏幕 1536），已经很靠右了。
+   * 如果写死一个新的 X，换分辨率就错位。贴边是**相对屏幕**的，
+   * 任何分辨率下都成立。
+   *
+   * ## 🔴 2026-11-05 补充：滑**出屏幕**，只留三条杠
+   *
+   * 用户原话：
+   *
+   * > 「设置绝对定位方便不同分辨率的屏幕自适应，设定在屏幕右边
+   * >   只往外移出三条杠的图标。」
+   *
+   * 所以目标不是"贴右边缘"，而是**窗口左侧留 GRIP_WIDTH 可见**：
+   *
+   *     targetX = 屏幕右缘 - 抓手宽度
+   *
+   * 这样对话条本体整个滑出屏幕外，屏幕上只剩那 22px 的抓手
+   * （三条小横线），一眼能看出"这里收着一个输入框"。
+   *
+   * ⚠️ 抓手宽度必须和 `chat.css` 里的 `.grip { width: 22px }` **一致**。
+   *    改 CSS 忘了改这里的话，要么留一条空白、要么把三条杠也切掉一半。
+   */
+
+  /** 记下"用户最近一次操作"的时刻，重新开始 2 分钟倒计时 */
+  armIdlePark(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      // ⚠️ 到点时打个日志：这个功能"什么都没发生"是最难查的形态
+      //    （计时器没起 / 被重置 / 到点了但没动，三种表现一模一样）
+      this.onDiagnostic?.('[对话条] 闲置 2 分钟，准备滑到右边');
+      this.parkAsync();
+    }, ChatWindow.IDLE_PARK_MS);
+  }
+
+  /** 用户碰它了：滑回原位 + 重新计时 */
+  resetIdlePark(): void {
+    if (this.parked) this.parkAsync(false);
+    this.armIdlePark();
+  }
+
+  /**
+   * 渲染层报告"鼠标进/出窗口"（2026-11-05 实测补）。
+   *
+   * ## 只在**滑出状态**下理它
+   *
+   * 滑出去后屏幕上只剩 22px 抓手，而窗口是 `showInactive` 开的 ——
+   * 鼠标移上去**不会触发 `focus`**（得真点一下）。那样用户看到一个
+   * 竖条，点了才回来，手感很差。
+   *
+   * 所以滑出时鼠标一进入就滑回。
+   *
+   * ⚠️ **正常状态下鼠标划过不算"操作"**，不重置计时器 ——
+   *    否则用户的鼠标只要停在旁边，它就永远不滑出去，功能等于没有。
+   */
+  onPointerEnter(): void {
+    if (!this.parked) return;
+    // 动画没走完不算（见 `shouldUnparkForCursor` 的说明）
+    if (this.slideTimer !== null) return;
+    this.onDiagnostic?.('[对话条] 鼠标移入，滑回原位');
+    this.parkAsync(false);
+    this.armIdlePark();
+  }
+
+  /**
+   * 用**屏幕坐标**判断鼠标是否落在可见的抓手区域上（2026-11-05 实测补）。
+   *
+   * ## 为什么不能靠渲染层的事件
+   *
+   * 实测：滑出去之后渲染层**收不到 `mouseover`**。
+   * 因为窗口有 300px 宽、其中绝大部分已经推出屏幕外了，
+   * 鼠标停在屏幕上那 22px 时，下面根本没有可命中的 DOM 元素
+   * （`.grip` 在文档流最左边，位置对，但 Chromium 不认为
+   *  一个"大部分在屏幕外"的窗口有可交互区域）。
+   *
+   * 所以只能由主进程拿着**屏幕绝对坐标**自己比：
+   *   滑出后窗口矩形是 (screenRight - GRIP, y, GRIP, height)，
+   *   鼠标落进去就算"回来了"。
+   */
+  shouldUnparkForCursor(cursor: { x: number; y: number }): boolean {
+    if (!this.parked) return false;
+    /*
+     * ⚠️ **动画没走完不算**（2026-11-05 实测修）
+     *
+     * 滑出动画有 220ms，期间窗口正从右往左/往右扫过屏幕。如果这期间
+     * 就判命中，鼠标刚好停在**路过路径**上就会把它拽回来 ——
+     * 实测现象：日志里"闲置 2 分钟，准备滑到右边"之后 185ms
+     * 紧跟一条"鼠标移入，滑回原位"，而鼠标其实一直在 (200,200)
+     * （窗口扫过去时正好压过它）。
+     *
+     * 所以要等 `parked` 真正落位（动画结束）才接受命中判定。
+     */
+    if (this.slideTimer !== null) return false;
+    const window = this.window;
+    if (!window || window.isDestroyed()) return false;
+    const b = window.getBounds();
+    // 可见部分：窗口最左边那 GRIP_WIDTH_PX 宽的一条
+    const left = b.x;
+    const right = b.x + ChatWindow.GRIP_WIDTH_PX;
+    return (
+      cursor.x >= left &&
+      cursor.x <= right &&
+      cursor.y >= b.y &&
+      cursor.y <= b.y + b.height
+    );
+  }
+
+  /**
+   * 只清"滑出去的位置状态"，**不动计时器**。
+   *
+   * 显式定位（`anchorToCorner`）前调 —— 那个方法会被高频调用，
+   * 清计时器的话滑边永远不触发（见 `anchorToCorner` 里的说明）。
+   *
+   * ⚠️ 它**不移动窗口**，调用方紧接着会自己把窗口放到目标位置。
+   */
+  cancelIdlePark(): void {
+    if (this.slideTimer) {
+      clearInterval(this.slideTimer);
+      this.slideTimer = null;
+    }
+    this.parked = false;
+    this.parkedFromX = null;
+    this.programmaticMove = false;
+  }
+
+  /**
+   * 彻底停掉滑边：位置状态 + 计时器都清（隐藏/销毁时用）。
+   *
+   * 藏起来的东西不需要"闲置 2 分钟"，而且它下次显示时如果还挂着
+   * 旧计时器，会**一出来就滑走**。
+   */
+  stopIdlePark(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.cancelIdlePark();
+  }
+
+  /**
+   * 滑到右边（`toParked=true`）或滑回原位（`false`）。
+   *
+   * ## 为什么是逐帧挪而不是直接 `setBounds`
+   *
+   * 用户要「加个动画」。Electron 的 `setBounds` 是**瞬移**，没有过渡 ——
+   * 直接调会显得很突兀（像窗口闪了一下）。
+   *
+   * 所以这里按 220ms / 约 14 帧把 X 拆成小步，每帧 `setPosition`。
+   * ⚠️ 只改 X，Y 一律不动（用户明确要求）。
+   *
+   * ⚠️ 每一步都要过 `programmaticMove` 闸门：否则 `moved` 事件会
+   *    把动画中间的那一帧记成"用户摆的位置"。
+   */
+  parkAsync(toParked: boolean = true): void {
+    const window = this.window;
+    if (!window || window.isDestroyed()) return;
+    if (this.parked === toParked && this.slideTimer !== null) return;
+
+    /*
+     * 🔴 `parked` 要在**动画开始时**就置上，不能等动画结束（2026-11-05 实测修）
+     *
+     * 动画有 220ms。如果这期间 `anchorToCorner()` 被调用（`onLayoutChanged`
+     * 在宠物一动时就触发，实测一秒能来好几次），而那时 `parked` 还是 false，
+     * 守卫就不生效 —— 窗口被拽回原位，动画白跑。
+     *
+     * 实测现象：日志说"滑到右边 x=1514"，但 2 秒后查窗口发现它在 x=1373。
+     * 表现就是"滑过去了又弹回来"。
+     *
+     * 滑回（`toParked=false`）时反过来：**立刻**清掉，否则动画期间
+     * 鼠标轮询还以为它在滑出状态，会重复触发 `onPointerEnter`。
+     */
+    this.parked = toParked;
+
+    const bounds = window.getBounds();
+    // 目标 X：滑出屏幕只留抓手 / 回到滑出去之前的位置
+    let targetX: number;
+    if (toParked) {
+      if (this.parkedFromX === null) this.parkedFromX = bounds.x;
+      /*
+       * 🔴 目标位置 = **屏幕右缘 - 抓手宽度**（2026-11-05 用户要求）
+       *
+       * 用户原话：「设定在屏幕右边只往外移出三条杠的图标」。
+       *
+       * 也就是窗口往右推出屏幕外，只让最左边那 22px（抓手）留在屏幕上。
+       *
+       * ⚠️ 用 `workArea` 而不是 `bounds`：屏幕底部有任务栏时，
+       *    `bounds` 会把任务栏那块也算进来，贴边会跑到任务栏下面。
+       *
+       * ⚠️ 用 `screen.getDisplayMatching(bounds)` 而不是主显示器：
+       *    多显示器时对话条可能在副屏上，贴的应该是它所在那块屏的边。
+       */
+      const work = screen.getDisplayMatching(bounds).workArea;
+      targetX = work.x + work.width - ChatWindow.GRIP_WIDTH_PX;
+    } else {
+      if (this.parkedFromX === null) return;   // 没滑出去过，不用滑回
+      targetX = this.parkedFromX;
+    }
+
+    const fromX = bounds.x;
+    const deltaX = targetX - fromX;
+    if (Math.abs(deltaX) < 1) {
+      this.parked = toParked;
+      if (!toParked) this.parkedFromX = null;
+      return;
+    }
+
+    // 取消上一个动画（中途改方向时）
+    if (this.slideTimer) {
+      clearInterval(this.slideTimer);
+      this.slideTimer = null;
+    }
+
+    const frames = 14;
+    const stepMs = Math.max(8, Math.round(ChatWindow.SLIDE_MS / frames));
+    let frame = 0;
+    // 缓动：ease-out（先快后慢，停得自然）
+    const easeOut = (t: number): number => 1 - Math.pow(1 - t, 3);
+
+    this.slideTimer = setInterval(() => {
+      frame += 1;
+      const w = this.window;
+      if (!w || w.isDestroyed()) {
+        if (this.slideTimer) clearInterval(this.slideTimer);
+        this.slideTimer = null;
+        this.programmaticMove = false;
+        return;
+      }
+      const t = Math.min(1, frame / frames);
+      const x = Math.round(fromX + deltaX * easeOut(t));
+      const b = w.getBounds();
+      // ⚠️ 只改 X，Y/宽/高原样带过去
+      this.nudgeForSlide(x, b.y, b.width, b.height);
+      if (t >= 1) {
+        if (this.slideTimer) clearInterval(this.slideTimer);
+        this.slideTimer = null;
+        this.parked = toParked;
+        if (!toParked) this.parkedFromX = null;
+        // 动画结束才放开闸门（见 `nudgeForSlide` 的说明）
+        setTimeout(() => {
+          this.programmaticMove = false;
+        }, 120);
+        this.onDiagnostic?.(
+          `[对话条] ${toParked ? '滑到右边' : '滑回原位'}（x=${x}）`,
+        );
+      }
+    }, stepMs);
   }
 
   /**
@@ -583,8 +983,15 @@ export class ChatWindow {
    */
   setUserHidden(hidden: boolean): void {
     this.userHidden = hidden;
-    if (hidden) this.hide();
-    else this.show();
+    if (hidden) {
+      // 隐藏时停掉滑边计时：藏起来的东西不需要"闲置 2 分钟"。
+      // 而且它下次显示时如果还挂着旧计时，会**一出来就滑走**。
+      this.stopIdlePark();
+      this.hide();
+    } else {
+      this.show();
+      this.armIdlePark();
+    }
   }
 
   get hiddenByUser(): boolean {

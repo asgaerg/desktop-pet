@@ -5310,6 +5310,90 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
   check('对话条初始没有"用户位置"（走默认钉角）', mk().hasUserPosition === false,
     '一上来就当成"用户摆过"，会导致它永远不自动定位');
 
+  /*
+   * ---- 闲置 2 分钟滑到屏幕右边，只留三条杠（2026-11-05 用户要求）----
+   *
+   * 用户原话：
+   *
+   * > 「对话框现在设置累计2分钟聚焦不在对话框，不进行对话框中的操作时，
+   * >   将对话框X轴位置移至右边，像我现在对话框的位置，平移，加个动画，
+   * >   Y轴不变」
+   * > 「设置绝对定位方便不同分辨率的屏幕自适应，设定在屏幕右边
+   * >   只往外移出三条杠的图标。」
+   *
+   * ## 断言什么
+   *
+   * 这几条都是"改了看不出错、错了很难查"的点：
+   *   · 抓手宽度必须和 CSS 一致（不一致就是留白条或切掉三条杠）
+   *   · 闲置时长必须是 2 分钟（用户指定）
+   *   · 目标 X 是**屏幕右缘 - 抓手宽**（不是窗口宽，也不是某个固定值）
+   *   · 只改 X、不改 Y（用户明确要求）
+   */
+  {
+    const src = readFileSync(path.join(here, '..', 'src', 'main', 'chatWindow.ts'), 'utf-8');
+    const css = readFileSync(path.join(here, '..', 'src', 'renderer', 'chat.css'), 'utf-8');
+
+    // 抓手宽度：TS 常量与 CSS 必须一致
+    const tsGrip = /GRIP_WIDTH_PX\s*=\s*(\d+)/.exec(src);
+    const cssGrip = /\.grip\s*\{[^}]*width:\s*(\d+)px/s.exec(css);
+    check(
+      '对话条：抓手宽度在 TS 与 CSS 里一致',
+      Boolean(tsGrip && cssGrip) && tsGrip[1] === cssGrip[1],
+      `TS=${tsGrip?.[1] ?? '缺失'} CSS=${cssGrip?.[1] ?? '缺失'}（不一致会导致留白条或切掉三条杠）`,
+    );
+
+    check(
+      '对话条：闲置时长是 2 分钟',
+      /IDLE_PARK_MS\s*=\s*2\s*\*\s*60\s*\*\s*1000/.test(src),
+      '用户明确指定 2 分钟',
+    );
+
+    check(
+      '对话条：滑出去的目标是「屏幕右缘 - 抓手宽」',
+      /work\.x\s*\+\s*work\.width\s*-\s*ChatWindow\.GRIP_WIDTH_PX/.test(src),
+      '不是窗口宽、也不是固定 X —— 那样换分辨率就错位',
+    );
+
+    check(
+      '对话条：滑动只改 X，Y 原样带过去',
+      /this\.nudgeForSlide\(x,\s*b\.y,\s*b\.width,\s*b\.height\)/.test(src),
+      '用户要求「Y轴不变」',
+    );
+
+    check(
+      '对话条：动画用 ease-out（不是线性瞬移）',
+      /easeOut/.test(src) && /setInterval/.test(src),
+      '用户要求「加个动画」；setBounds 直接调是瞬移',
+    );
+
+    check(
+      '对话条：聚焦会重置闲置计时',
+      /window\.on\('focus',\s*\(\)\s*=>\s*this\.resetIdlePark\(\)\)/.test(src),
+      '不重置的话，用户正用着它也会滑走',
+    );
+
+    check(
+      '对话条：显式定位前放弃滑边状态',
+      // ⚠️ 上限要留够：那段说明注释本身就有几百字符（实测相隔 416）
+      /anchorToCorner[\s\S]{0,900}this\.cancelIdlePark\(\)/.test(src),
+      '不清的话再定位会按过时的 parkedFromX 滑回错位置',
+    );
+
+    check(
+      '对话条：隐藏时停掉滑边计时',
+      // ⚠️ 用的是 `stopIdlePark`（清位置 + 停计时器），不是 `cancelIdlePark`
+      //    （只清位置）—— 隐藏时必须连计时器一起停，否则它下次显示会「一出来就滑走」
+      /setUserHidden[\s\S]{0,400}stopIdlePark/.test(src),
+      '不停的话它下次显示会「一出来就滑走」',
+    );
+
+    check(
+      '对话条：鼠标移入能滑回（滑出状态下）',
+      /onPointerEnter\(\)[\s\S]{0,300}if \(!this\.parked\) return;/.test(src),
+      '滑出后只剩 22px 抓手，而 showInactive 不触发 focus —— 没有这条用户得先点一下',
+    );
+  }
+
   {
     const w = mk();
     w.restorePosition({ x: 100, y: 200 });

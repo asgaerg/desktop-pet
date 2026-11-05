@@ -392,6 +392,15 @@ let sidecar: SidecarManager | null = null;
 let fullscreenWatcher: FullscreenWatcher | null = null;
 /** 对话条窗口（输入框 + 发送按钮，独立于宠物窗口） */
 let chatWindow: ChatWindow | null = null;
+/**
+ * 鼠标位置轮询定时器（2026-11-05）。
+ *
+ * 用途：对话条滑出屏幕只剩抓手时，鼠标移上去要能滑回来。
+ * 必须轮询 —— 那种状态下渲染层收不到 `mouseover`（见 `startCursorWatch` 的说明）。
+ *
+ * ⚠️ 退出时要 `clearInterval`，否则定时器会让进程退不掉。
+ */
+let cursorWatchTimer: ReturnType<typeof setInterval> | null = null;
 /** 文字弹窗：独立窗口，浮在宠物头顶上方 */
 let bubbleWindow: BubbleWindow | null = null;
 /**
@@ -1513,6 +1522,37 @@ async function main(): Promise<void> {
   chatWindow.setPeeking(false);
   window.on('resize', syncChat);
   syncChat();
+
+  /*
+   * 🔴 轮询鼠标位置：滑出去的对话条，鼠标移上去要能滑回来（2026-11-05）
+   *
+   * ## 为什么必须轮询，而不是监听事件
+   *
+   * 实测：滑出去之后渲染层**收不到 `mouseover`** —— 窗口有 300px 宽，
+   * 其中绝大部分推出屏幕外了，鼠标停在屏幕上那 22px 时，
+   * 下面没有可命中的 DOM 元素（Chromium 不认为这种窗口有可交互区域）。
+   *
+   * 所以只能由主进程拿屏幕绝对坐标自己比。
+   *
+   * ## 为什么要节流到 150ms
+   *
+   * `screen.getCursorScreenPoint()` 是同步调系统 API。每 16ms 调一次
+   * （跟帧）没必要 —— 人要 "移过去 -> 感觉到" 有 150ms 延迟完全察觉不到，
+   * 而且这只在**滑出状态**下才真正做事（`shouldUnparkForCursor` 先判状态）。
+   *
+   * ⚠️ 空闲时（没滑出去）这个轮询每 150ms 只做一次布尔判断，开销可忽略，
+   *    但它确实一直在跑 —— 所以 `chatWindow.destroy()` 时要停掉。
+   */
+  cursorWatchTimer = setInterval(() => {
+    if (!chatWindow) return;
+    try {
+      if (chatWindow.shouldUnparkForCursor(screen.getCursorScreenPoint())) {
+        chatWindow.onPointerEnter();
+      }
+    } catch {
+      /* 取坐标失败（远程桌面等）就这一轮跳过，下一轮再试 */
+    }
+  }, 150);
   // `pet:quit-request` 是 petWindow 自己 emit 的**自定义事件**（不是 Electron 的
   // 标准窗口事件），TS 的 BrowserWindow 类型只列了标准事件名，所以这里显式转换。
   // 不加转换会报 "not assignable to parameter of type 'will-resize'"。
@@ -3607,6 +3647,21 @@ function registerChatIpc(): void {
 
   // 前端问"现在什么状态"（小圆点着色用）
   ipcMain.handle('chat:status', () => statusText);
+
+  /*
+   * 鼠标进入对话条窗口（2026-11-05）。
+   *
+   * 用途只有一个：对话条滑出屏幕、只剩 22px 抓手时，鼠标一移上去
+   * 就立刻滑回来（否则用户得先点一下，而那时窗口还在屏幕外）。
+   *
+   * ⚠️ 这个 IPC 通道**保留但不再是主路径** —— 实测滑出后渲染层收不到
+   *    `mouseover`（窗口大部分在屏幕外，鼠标下方没有 DOM 元素）。
+   *    现在靠主进程轮询鼠标位置（见 `startCursorWatch`）。
+   *    留着它是因为"窗口重新滑进来"之后，这条通道就又能用了。
+   */
+  ipcMain.on('chat:pointer-enter', () => {
+    chatWindow?.onPointerEnter();
+  });
 }
 
 /**
@@ -7900,6 +7955,17 @@ async function quit(): Promise<void> {
   // 退出流程里再冒出来一个会拖慢关闭、也可能变成孤儿进程。
   fullscreenWatcher?.stop();
   fullscreenWatcher = null;
+  /*
+   * 停掉鼠标位置轮询（2026-11-05）。
+   *
+   * ⚠️ 不停的话它每 150ms 醒一次，而 Node 的定时器**会让事件循环保持活跃** ——
+   *    表现是"退出卡一会儿"或者干脆退不掉（Electron 已经关窗了但进程还在）。
+   *    和上面 `fullscreenWatcher` 是同一类问题。
+   */
+  if (cursorWatchTimer) {
+    clearInterval(cursorWatchTimer);
+    cursorWatchTimer = null;
+  }
   globalShortcut.unregisterAll();
   socket?.close();
   try {
