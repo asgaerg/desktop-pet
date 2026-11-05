@@ -6611,6 +6611,80 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
     /message\.autonomy\.muted !== paused/.test(src),
     'sidecar 读文件后回报，主进程据此同步 —— 三处不能各存一份',
   );
+
+  /*
+   * ---- 免打扰要"立刻"到位，不等 sidecar 冷启动（2026-11-05）----
+   *
+   * 用户原话：「所以就主进程先读文件顶上，让UI先变，这样跟真正的免打扰
+   * 就一模一样了」。
+   *
+   * ## 为什么需要
+   *
+   * sidecar 冷启动实测 **4.7 秒**（Python 解释器 + 模型 + 记忆库）。
+   * 原来免打扰状态要等 sidecar `ready` 消息回报才恢复 ——
+   * 那 4.7 秒里界面勾选没变、对话框还显示着、语音还开着。
+   */
+  check(
+    '免打扰：主进程启动时自己读 autonomy.muted（不等 sidecar）',
+    /readDeepScalar\(CONFIG_ROOT,\s*\['autonomy',\s*'muted'\]/.test(src),
+    '等 sidecar 要 4.7 秒，那期间 UI 还是"没免打扰"的样子',
+  );
+
+  /*
+   * 🔴 读 `autonomy.muted` 必须传**严格锚定**（第三参数 `true`）。
+   *
+   * `persona.yaml` 里 `autonomy:` 出现两次：
+   *
+   *      444:  '  autonomy:'    <- modules 段下的子键（缩进 2，影子键）
+   *      458:  'autonomy:'      <- 真正的顶层（缩进 0）
+   *
+   * 不传 `true` 会先撞上影子键、读到 null —— 表现是"文件里明明是
+   * `muted: true`，启动时却读不到"，免打扰恢复**静默失效**。
+   *
+   * 我第一版就是忘了传，实测日志里连一条「免打扰」都没有。
+   */
+  check(
+    '免打扰：读 autonomy.muted 时传严格锚定（躲开影子键）',
+    /readDeepScalar\(CONFIG_ROOT,\s*\['autonomy',\s*'muted'\],\s*true\)/.test(src),
+    'persona.yaml 里 autonomy 出现两次，不严格锚定会读到影子键',
+  );
+
+  /*
+   * ---- 免打扰时收起对话框、关闭语音（用户明确要求）----
+   *
+   * 用户原话：「免打扰时不说话，不出声，所以对话框也要禁止，自动隐藏，
+   * 语音对话也要关闭。关闭免打扰的时候再回来就好了」。
+   */
+  check(
+    '免打扰：进入时收起对话框',
+    /chatHiddenByMute\s*=\s*chatWindow\?\.isVisible\(\)/.test(src) &&
+      /if \(chatHiddenByMute\) chatWindow\?\.setUserHidden\(true\)/.test(src),
+    '留一个输入框在那儿就是"还能聊"，不符合免打扰语义',
+  );
+
+  check(
+    '免打扰：退出时只还原"我们藏的"对话框',
+    /if \(chatHiddenByMute\) \{\s*chatWindow\?\.setUserHidden\(false\)/.test(src),
+    '无条件 show 会把用户自己藏的对话框也拉出来',
+  );
+
+  check(
+    '免打扰：进入时关闭语音采集',
+    /setVoiceCaptureForMute\(false\)/.test(src),
+    '用户明确说"不出声"',
+  );
+
+  check(
+    '免打扰：启动时若开着，立刻收起对话框',
+    /if \(paused\) \{\s*chatHiddenByMute = true;[\s\S]{0,300}setUserHidden\(true\)/.test(src),
+    '不等 sidecar 那 4.7 秒',
+  );
+
+  check(
+    '免打扰：启动完成后再压一次语音（渲染层可能晚就绪）',
+    /await startSidecarAndConnect\(\);[\s\S]{0,400}setVoiceCaptureForMute\(false\)/.test(src),
+    'webContents.send 不排队，早了会丢',
+  );
 }
 
 /* ------------------------------------------------------------------ 收尾 */

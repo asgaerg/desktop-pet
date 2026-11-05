@@ -10692,6 +10692,86 @@ def test_reading(suite: "Suite") -> None:
 
         return "不合成语音；说话被抑制；仍然截图；关掉后立刻用待用图开口"
 
+    @suite.check("免打扰：状态冻结，但精力/心情照常变（关掉后继续）")
+    def _() -> str:
+        """用户 2026-11-05 要求。
+
+        > 「免打扰下宠物状态会固定，但是注意力、心情等参数不固定，
+        >   只是跟状态有固定关系的参数固定，比如精力影响的安静状态，
+        >   关闭免打扰之后继续」
+
+        ## 拆成两件事
+
+        ① **状态**（安静/无聊/好奇/自言自语）在免打扰期间**不动**
+           —— 否则"30 分钟没聊天转无聊"会自己跳，那就不是免打扰了
+        ② **主观层参数**（精力、心情、亲近度）照常推进
+           —— 所以免打扰结束时如果精力已掉到门槛下，下一轮正常转安静
+
+        ## 怎么测
+
+        `subjectivity.tick()` 之后看精力变没变；
+        再看状态循环里那个 `continue` 的位置对不对（跑循环要等 30 秒，不划算）。
+        """
+        import tempfile
+        import time as _t
+        from pathlib import Path as _P
+
+        from .config import Config
+        from .gateway import Gateway
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-dndfreeze-"))
+        try:
+            import os as _os
+
+            old = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                cfg = Config()
+                cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
+                gw = Gateway(cfg)
+            finally:
+                if old is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old
+
+            # ── ② 主观层照常推进（免打扰时也要 tick）──
+            emo = gw.conversation.emotion
+            before_energy = emo.energy
+            before_mood = emo.mood
+            emo._last_update = _t.time() - 300      # 造一个"5 分钟过去了"
+            gw.scheduler.set_muted(True)
+            gw.conversation.subjectivity.tick()
+            _assert(
+                emo.energy != before_energy or emo.mood != before_mood,
+                "免打扰期间主观层参数必须照常变（用户要求参数不固定）",
+            )
+
+            # ── ① 状态冻结：muted 时跳过条件规则，且 tick 在跳过之前 ──
+            import inspect
+
+            src = inspect.getsource(Gateway._run_state_forever)
+            _assert(
+                "self.conversation.subjectivity.tick()" in src,
+                "循环里必须先推进主观层",
+            )
+            _assert(
+                "if self.scheduler.muted:" in src,
+                "免打扰时要跳过条件规则（否则状态会自己跳）",
+            )
+            tick_at = src.index("self.conversation.subjectivity.tick()")
+            mute_at = src.index("if self.scheduler.muted:")
+            _assert(
+                tick_at < mute_at,
+                "主观层 tick 必须在跳过规则之前 —— 否则免打扰期间参数也冻住了",
+            )
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "主观层照常 tick；状态规则被跳过；tick 在跳过之前"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(

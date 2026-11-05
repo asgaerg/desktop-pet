@@ -447,10 +447,43 @@ class Conversation:
         # ⚠️ 初始状态是**无聊**而不是安静：刚启动时精力是 0.7（>0.4），
         #    如果从安静开始，会因为"安静粘滞"永远出不来 —— 表现是
         #    "宠物启动后一整天都很安静，怎么都不理人"。
+        #
+        # 🔴 2026-11-05 改：从 `activity.overall` **推导**初始状态
+        #
+        # 用户原话：「现在活泼度不会自动记住，重启之后会自动变成无聊」。
+        #
+        # ## 根因（比"没读文件"更绕）
+        #
+        # 主进程那边确实读了 `persona.yaml`（我上一版修的），但**读了没用** ——
+        # 因为紧接着这里把状态机初始化成 `bored`，然后
+        # `_sync_activity_to_state()` 又把 `bored` **反向写回**
+        # `activity.overall`，把文件里的 0.1 覆盖成 0.5。
+        #
+        # 实测日志：
+        #
+        #     10:56:39  已加载配置 persona.yaml           <- 读到了 0.1
+        #     10:56:41  状态同步：bored -> overall=0.5   <- 立刻被覆盖
+        #     10:56:43  sidecar 就绪 … overall=0.50      <- 已经是 0.5 了
+        #
+        # 所以真正要修的是"状态机的初始状态"：用户上次选了什么档，
+        # 就用那个档对应的状态，而不是无条件 `bored`。
+        #
+        # ⚠️ 上面那条"防安静粘滞"的顾虑仍然成立 —— 但它只适用于
+        #    **精力真的低**的时候。`tiers.nearest()` 已经处理了这个：
+        #    它按 overall 找最近档，用户手动选"安静"时 overall=0.1
+        #    对应 quiet，那是他自己的选择，不该被我们改掉。
+        initial_state = self._initial_state_from_activity()
         self.state = StateMachine(
             energy_provider=lambda: self.emotion.energy,
-            initial=BORED,
+            initial=initial_state,
         )
+        if initial_state != BORED:
+            log.info(
+                "状态：从 activity.overall=%.2f 恢复为「%s」（而不是默认的无聊）",
+                float(config.activity.get("overall", 0.5)),
+                initial_state,
+            )
+
         # brain 可以由外部注入：Gateway 需要把**同一个实例**同时交给对话与记忆提炼，
         # 两处各建一个会出现"提炼用的模型和对话用的不是同一个"这种诡异问题。
         self.brain: Brain = brain or build_brain(config, self.emotion)
@@ -502,6 +535,46 @@ class Conversation:
             log.exception("灌回对话历史失败（从空历史开始）")
 
     # ------------------------------------------------------ 人格主观层（2026-10-17）
+
+    def _initial_state_from_activity(self) -> str:
+        """把 `activity.overall` 翻译成状态机的初始状态（2026-11-05 加）。
+
+        ## 为什么需要它
+
+        用户报「重启之后会自动变成无聊」。根因是状态机无条件 `initial=BORED`，
+        然后 `_sync_activity_to_state()` 又把 bored 反向写回 `activity.overall`，
+        把用户上次选的档位覆盖掉。
+
+        所以启动时要**先**按文件里的 overall 定初始状态，那个同步就不会
+        再"改"什么（`_sync_activity_to_state` 里有一致性检查，相同就不写）。
+
+        ## 映射用 `tiers.nearest`
+
+        不自己写 if/elif：档位定义在 `tiers.py`（四档的阈值、间隔、文案都在那），
+        这里再写一份必然漂移 —— 这个项目已经为此栽过好几次。
+
+        ⚠️ 拿不到 overall 时退回 `BORED`（保持原行为，不要因为缺配置就变安静）。
+
+        ⚠️ 这里**刻意不引用** `Gateway._STATE_ACTIVITY` —— 那是 `Gateway` 的
+           类属性，而本方法在 `Conversation` 里（两个不同的类），访问不到。
+           第一版就是这么写错的：
+           `AttributeError: 'Conversation' object has no attribute '_STATE_ACTIVITY'`。
+           `tiers.nearest()` 返回的 key 本来就只可能是那四个状态名之一，
+           所以直接返回就行。
+        """
+        try:
+            overall = float(self.config.activity.get("overall", 0.5))
+        except (TypeError, ValueError):
+            return BORED
+        try:
+            from . import tiers
+
+            tier = tiers.nearest(overall)
+        except Exception:  # noqa: BLE001 —— 档位解析失败就退回原行为
+            log.debug("初始状态：档位解析失败，退回无聊", exc_info=True)
+            return BORED
+        # `tiers` 的 key 就是状态机的合法状态名（quiet/bored/curious/monologue）
+        return str(getattr(tier, "key", "") or "") or BORED
 
     @property
     def emotion(self) -> EmotionState:
@@ -4798,7 +4871,26 @@ class Gateway:
                 #
                 # ⚠️ 用 `self.conversation.subjectivity`，不是 `self.subjectivity` ——
                 #    主观层住在 Conversation 里，Gateway 没有这个属性。
+                #
+                # 🔴 免打扰期间**照样推进**（2026-11-05 用户要求）
+                #
+                # 用户原话：「免打扰下宠物状态会固定，但是注意力、心情等参数
+                # 不固定，只是跟状态有固定关系的参数固定，比如精力影响的安静状态，
+                # 关闭免打扰之后继续」。
+                #
+                # 所以：**主观层参数继续变**（精力该掉就掉、心情该回归就回归），
+                # 只是"按状态推导出来的那部分"不动 —— 见下面那个 if。
                 self.conversation.subjectivity.tick()
+                # 🔴 免打扰期间**冻结状态切换**（同上）
+                #
+                # 用户要的是"状态固定"。如果不冻结，30 分钟没聊天会自己
+                # 转无聊 —— 那就不是免打扰了，是"安静地自己变来变去"。
+                #
+                # ⚠️ 但**精力仍在变**（上面那行）。所以免打扰结束时
+                #    如果精力已经掉到门槛下，下一轮就会正常转安静 ——
+                #    这正是用户说的"关闭免打扰之后继续"。
+                if self.scheduler.muted:
+                    continue
                 await self._check_condition_rules()
             except asyncio.CancelledError:
                 log.info("条件事件循环已停止")

@@ -1215,6 +1215,49 @@ async function main(): Promise<void> {
     }
   }
 
+  /*
+   * 🔴 免打扰也要在启动时**立刻**读一次（2026-11-05 用户要求）
+   *
+   * 用户原话：「所以就主进程先读文件顶上，让UI先变，这样跟真正的免打扰
+   * 就一模一样了」。
+   *
+   * ## 为什么不能等 sidecar
+   *
+   * 原来的恢复路径是：sidecar 起来 -> 它读文件 -> `ready` 消息里回报
+   * `autonomy.muted` -> 主进程据此设 `paused`。
+   *
+   * 而 sidecar 冷启动实测要 **4.7 秒**（Python 解释器 + 模型 + 记忆库）。
+   * 那 4.7 秒里：界面上的勾选没变、对话框还显示着、语音还开着 ——
+   * 用户看到的就是"免打扰要等一会儿才生效"。
+   *
+   * 所以主进程自己先读一次，让 UI 立刻到位。sidecar 起来之后会回报
+   * 同一个值，那时 `paused` 已经一致，不会再闪。
+   *
+   * ⚠️ 这里**只改 `paused` 和 UI**，不发 `config.update` ——
+   *    sidecar 还没起来，发了也没人收；它自己会从文件读到同样的值。
+   */
+  {
+    /*
+     * ⚠️ 第三参数 `true` = **严格锚定缩进**，必须传。
+     *
+     * `persona.yaml` 里 `autonomy:` 出现了**两次**：
+     *
+     *     444:  '  autonomy:'    <- modules 段下的子键（缩进 2，影子键）
+     *     458:  'autonomy:'      <- 真正的顶层（缩进 0）
+     *
+     * 不传 `true` 时会先撞上影子键、进错分支，读到 null ——
+     * 表现就是"文件里明明是 `muted: true`，启动时却读不到"。
+     * （这个坑 `personaStore.ts` 的注释里写着，我第一版忘了传。）
+     */
+    const savedMuted = readDeepScalar(CONFIG_ROOT, ['autonomy', 'muted'], true);
+    if (savedMuted === true) {
+      paused = true;
+      startupNote('免打扰：从 persona.yaml 恢复为「开启」（不等 sidecar）');
+    } else {
+      startupNote(`免打扰：读取结果为 ${JSON.stringify(savedMuted)}（不开启）`);
+    }
+  }
+
   // 离线版的模型复制放后台，别让 1.5GB 挡住启动
   void ensureBundledModels();
 
@@ -1367,6 +1410,35 @@ async function main(): Promise<void> {
     }
   }
   chatWindow.create();
+  /*
+   * 🔴 启动时如果免打扰开着，**立刻把对话框藏起来**（2026-11-05 用户要求）
+   *
+   * 用户原话：「免打扰时不说话，不出声，所以对话框也要禁止，自动隐藏，
+   * 语音对话也要关闭。关闭免打扰的时候再回来就好了」。
+   *
+   * ⚠️ 放在 `create()` 之后、`ready-to-show` 之前：那个事件里会
+   *    `showInactive()` 把窗口显示出来。这里先标记 + hide，
+   *    但 `showInactive` 还是会跑 —— 所以要在 `ready-to-show` 里再挡一次
+   *    （见下面 `paused` 的判断）。
+   *
+   * 记 `chatHiddenByMute` 是为了让"恢复免打扰"知道这是**我们藏的**，
+   * 而不是用户自己藏的。
+   */
+  if (paused) {
+    chatHiddenByMute = true;
+    /*
+     * ⚠️ 用 `setUserHidden(true)` 而不是 `hide()`。
+     *
+     * `hide()` 只是当前隐藏，而 `ready-to-show` 里会 `showInactive()`
+     * 把它又显示出来。`setUserHidden(true)` 设的是**意愿标记**，
+     * 那个标记会让后续的自动显示路径都跳过 —— 正是我们要的"保持藏起来"。
+     *
+     * 代价：它同时算"用户意愿"。所以恢复免打扰时必须显式
+     * `setUserHidden(false)`，靠 `chatHiddenByMute` 判断该不该还原。
+     */
+    chatWindow.setUserHidden(true);
+    startupNote('免打扰：启动时即收起对话框');
+  }
   /*
    * 文字弹窗：**独立窗口**，浮在宠物头顶上方。
    *
@@ -1815,6 +1887,20 @@ async function main(): Promise<void> {
   void runScreenshotProbe();
 
   await startSidecarAndConnect();
+
+  /*
+   * 🔴 免打扰开着时，启动完成后再压一次语音（2026-11-05）
+   *
+   * 为什么不能只在前面那处压：语音开关走 `pet:set-voice`，而宠物窗口的
+   * 渲染层要**先就绪**才收得到。前面那处调用时它可能还没挂好监听，
+   * 消息就丢了（`webContents.send` 不排队）。
+   *
+   * 这里在 sidecar 连上之后（渲染层肯定已就绪）再补一次。
+   */
+  if (paused) {
+    setVoiceCaptureForMute(false);
+    log('免打扰：启动完成，语音保持关闭');
+  }
 }
 
 /**
@@ -7874,7 +7960,18 @@ function providerNameFor(baseUrl: string, fallback: string): string {  try {
   return fallback || 'default';
 }
 
+/**
+ * 「对话框是被免打扰藏起来的」标记（2026-11-05）。
+ *
+ * ⚠️ 必须区分「因为免打扰而藏」和「用户自己藏了」：
+ *    恢复时只把前者放出来。否则用户藏了对话框，一开关免打扰它又冒出来。
+ */
+let chatHiddenByMute = false;
+
 function setPausedInternal(value: boolean, minutes: number): void {
+  // ⚠️ 先记旧值：下面第一行就把 `paused` 覆盖了，
+  //    而后面"是不是刚切换"的判断要用到它
+  const pausedBefore = paused;
   paused = value;
   if (pauseTimer) {
     clearTimeout(pauseTimer);
@@ -7916,7 +8013,63 @@ function setPausedInternal(value: boolean, minutes: number): void {
     log(`免打扰：写盘失败（${saved.message}），本次仅内存生效`);
   }
 
+  /*
+   * 🔴 免打扰时**收起对话框 + 关掉语音**（2026-11-05 用户要求）
+   *
+   * 用户原话：
+   *
+   * > 「下载的免打扰时不说话，不出声，所以对话框也要禁止，自动隐藏，
+   * >   语音对话也要关闭。关闭免打扰的时候再回来就好了」
+   *
+   * ## 三件事，都是"看起来像真免打扰"的一部分
+   *
+   *   ① 对话框   藏起来 —— 留一个输入框在那儿就是"还能聊"，不符合语义
+   *   ② 语音对话 关掉 —— 用户明确说"不出声"，麦克风也不该开着
+   *   ③ 气泡     已由 `decideBubble` 的 `muted` 参数挡住（那边改过）
+   *
+   * ## ⚠️ 恢复时要**还原成用户原来的意愿**
+   *
+   * 不能简单 `show()`：用户可能本来就把对话框藏了（`hiddenByUser`）。
+   * 那种情况恢复免打扰也不该把它拉出来 —— 否则"我藏了它，一开关免打扰
+   * 它又冒出来了"。
+   *
+   * 所以只处理"因为免打扰而藏起来"的那一份，用 `hiddenByMute` 记着。
+   */
+  if (value && !pausedBefore) {
+    // 进免打扰：藏对话框（记下"是不是本来就没显示"，恢复时据此决定）
+    chatHiddenByMute = chatWindow?.isVisible() ?? false;
+    if (chatHiddenByMute) chatWindow?.setUserHidden(true);
+    setVoiceCaptureForMute(false);
+    log('免打扰：已收起对话框、关闭语音');
+  } else if (!value && pausedBefore) {
+    // 出免打扰：只在"是我们藏起来的"时候才恢复
+    if (chatHiddenByMute) {
+      chatWindow?.setUserHidden(false);
+      chatHiddenByMute = false;
+    }
+    setVoiceCaptureForMute(true);
+    log('免打扰：已恢复对话框与语音');
+  }
+
   petWindow?.sendToRenderer('pet:paused', { paused: value, minutes });
+}
+
+/**
+ * 免打扰时开关语音采集（2026-11-05 用户要求）。
+ *
+ * ## 为什么要单独一个函数
+ *
+ * "开/关语音"在这条链路上有两个入口：用户的「按住说话」开关、
+ * 设置页的语音总开关。免打扰是**第三个**——临时压制，不改配置。
+ *
+ * 所以这里只发一条运行期消息，**不动配置文件** —— 免打扰结束就恢复，
+ * 用户的语音设置原样保留。
+ *
+ * ⚠️ 走 `pet:set-voice` 而不是改配置：那条通道本来就是"设置页开关语音
+ *  -> 主进程转给宠物窗口"用的，语义一致。
+ */
+function setVoiceCaptureForMute(allowed: boolean): void {
+  petWindow?.sendToRenderer('pet:set-voice', { enabled: allowed });
 }
 
 async function reloadConfig(): Promise<void> {
