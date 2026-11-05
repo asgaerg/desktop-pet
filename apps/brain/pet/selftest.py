@@ -10113,7 +10113,48 @@ def test_reading(suite: "Suite") -> None:
                 f"{[x.path for x in dup_hits]}",
             )
 
-            return "目录/入库/去重/标注/归类/挑选/中文目录/重复图 全部正确"
+            # ⑨ 用户自建目录就是新类别（2026-11-05 用户要求）
+            #
+            # 「你现在可以把宠物的图片表情种类扩充，就是按照图片种类来新开文件夹」
+            #
+            # 所以要钉住：**用户建什么目录，就有什么类别**，不需要改代码。
+            # 而 `categories()` 只算"有图"的目录 —— 空文件夹只是占位。
+            for cat in ("猫猫", "无语到极致", "生气"):
+                d = s.root / "stickers" / cat
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{cat}.png").write_bytes(f"\x89PNG-content-{cat}".encode())
+            # 空目录：不该算类别
+            (s.root / "stickers" / "空目录占位").mkdir(parents=True, exist_ok=True)
+
+            got3 = s.scan()
+            cats = s.categories()
+            for cat in ("猫猫", "无语到极致", "生气"):
+                _assert(
+                    cat in cats,
+                    f"用户自建的「{cat}」目录应当成为一个类别，实际 {sorted(cats)}",
+                )
+                hit = [x for x in got3.values() if x.emotion == cat]
+                _assert(hit, f"「{cat}」目录里的图应当归到该类别")
+            _assert(
+                "空目录占位" not in cats,
+                "空目录不算类别 —— 否则模型会分到一个永远没素材的类",
+            )
+
+            # ⑩ 非法目录名不当类别（防越界/垃圾目录）
+            for bad in ("CON", "_internal"):
+                (s.root / "stickers" / bad).mkdir(parents=True, exist_ok=True)
+                (s.root / "stickers" / bad / "x.png").write_bytes(b"\x89PNG-bad")
+            got4 = s.scan()
+            _assert(
+                not any("CON" == x.emotion for x in got4.values()),
+                "Windows 保留名不该成为类别",
+            )
+            _assert(
+                not any("_internal" == x.emotion for x in got4.values()),
+                "下划线开头的是内部目录，不该成为类别",
+            )
+
+            return "目录/入库/去重/标注/归类/挑选/中文目录/重复图/动态类别 全部正确"
         finally:
             import shutil as _sh
 

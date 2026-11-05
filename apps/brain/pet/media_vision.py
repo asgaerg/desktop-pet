@@ -181,7 +181,11 @@ def _request_via_extractor(
     return text[:max_chars], ""
 
 
-def _parse_label(text: str) -> tuple[str, str]:
+def _parse_label(
+    text: str,
+    *,
+    letter_map: Optional[dict[str, str]] = None,
+) -> tuple[str, str]:
     """从模型回复里解析出 `(emotion_key, caption)`。
 
     ## 三层兜底（2026-11-02 实测出来的）
@@ -191,13 +195,24 @@ def _parse_label(text: str) -> tuple[str, str]:
 
     现在三层：
 
-      ① 有「类别：」-> 解析它（可能给字母 A~E，也可能给中文名）
+      ① 有「类别：」-> 解析它（可能给字母，也可能给中文名）
       ② 没有 -> 在**整段文字**里找情绪关键词（"它看起来很开心" -> happy）
       ③ 还找不到 -> `other`（不是空！空会让它留在 _inbox 反复被识别）
+
+    ## 参数 `letter_map`（2026-11-05 加）
+
+    类别改成**用户自定义目录**之后，字母表不再是固定的 A~E ——
+    所以由 `build_label_prompt()` 返回、这里传进来。
+
+    ⚠️ 不传时退回内置 `_LETTER_TO_KEY`（默认那 5 类），
+       这样旧调用点和测试还能跑。
 
     ⚠️ ③ 用 `other` 而不是空串：空串在 `media.unlabeled()` 里算"没标注"，
        下次扫描又会被拿去识别一遍，反复烧钱。
     """
+    # 动态字母表优先；没给就用内置的
+    letters = letter_map if letter_map else _LETTER_TO_KEY
+
     emotion = ""
     caption = ""
 
@@ -210,8 +225,8 @@ def _parse_label(text: str) -> tuple[str, str]:
             value = s.split("：", 1)[-1] if "：" in s else s.split(":", 1)[-1]
             value = value.strip().strip("。 ，,.、")
             # 可能是字母
-            if value[:1].upper() in _LETTER_TO_KEY:
-                emotion = _LETTER_TO_KEY[value[:1].upper()]
+            if value[:1].upper() in letters:
+                emotion = letters[value[:1].upper()]
             else:
                 for cn, key in _LABEL_TO_KEY.items():
                     if cn in value:
@@ -220,9 +235,13 @@ def _parse_label(text: str) -> tuple[str, str]:
         elif s.startswith("描述") and ("：" in s or ":" in s):
             caption = (s.split("：", 1)[-1] if "：" in s else s.split(":", 1)[-1]).strip()
 
-    # ② 关键词兜底
+    # ② 关键词兜底（只在动态表里**有**那个类别时才用，否则归 other）
+
     if not emotion:
+        allowed = set(letters.values()) if letter_map else None
         for words, key in _KEYWORD_TO_KEY:
+            if allowed is not None and key not in allowed:
+                continue
             if any(w in text for w in words):
                 emotion = key
                 break
@@ -238,20 +257,88 @@ def _parse_label(text: str) -> tuple[str, str]:
     return emotion, caption[:200]
 
 
-def label_sticker(image_bytes: bytes, config: Any) -> tuple[str, str, str]:
+def build_label_prompt(categories: Optional[dict[str, str]] = None) -> tuple[str, dict[str, str]]:
+    """按**磁盘上实际存在的类别**生成分类提示词（2026-11-05 加）。
+
+    ## 🔴 为什么分类不再是写死的 A~E
+
+    用户要求「按图片种类新开文件夹」，所以类别是**他自己建的目录**
+    （见 `media.MediaStore.categories()`）。写死 A~E 的话，
+    用户建的 `stickers/猫猫/` 永远不会被分到。
+
+    ## 返回
+
+    `(提示词, {字母: 类别key})` —— 字母表要一起返回，解析时才对得上。
+
+    ## 字母分配
+
+    按 **key 排序**后分配 A、B、C…，保证同一份类别列表每次生成
+    同样的字母表（否则模型这次选 L、下次 L 是别的类别）。
+
+    ⚠️ 只取前 20 个（A~T）。类别太多模型一定选错 ——
+       实测 5 类时准确率就不算高，20 是"还能分清"的上限。
+    """
+    from .media import EMOTIONS
+
+    cats = categories if categories else dict(EMOTIONS)
+    ordered = sorted(cats.items(), key=lambda kv: str(kv[0]))[:20]
+
+    letters = "ABCDEFGHIJKLMNOPQRST"
+    rows: list[str] = []
+    letter_map: dict[str, str] = {}
+    for i, (key, label) in enumerate(ordered):
+        letter = letters[i]
+        letter_map[letter] = str(key)
+        rows.append(f"  {letter} {label}")
+
+    table = "\n".join(rows)
+    last = letters[len(ordered) - 1] if ordered else "A"
+    prompt = (
+        "这是一个表情包。请回答两个问题。\n"
+        "\n"
+        "问题一：它最接近下面哪一类？**只选一个**。\n"
+        "\n"
+        f"{table}\n"
+        "\n"
+        "问题二：用一句话（不超过 30 字）说清它画的是什么、什么情绪。\n"
+        "\n"
+        "回答格式（严格两行）：\n"
+        f"类别：<A~{last} 中的一个字母>\n"
+        "描述：<一句话>"
+    )
+    return prompt, letter_map
+
+
+def label_sticker(
+    image_bytes: bytes,
+    config: Any,
+    *,
+    categories: Optional[dict[str, str]] = None,
+) -> tuple[str, str, str]:
     """给表情包分类 + 标注。返回 `(emotion_key, caption, 失败原因)`。
 
-    `emotion_key` 是 `media.EMOTIONS` 的键（`happy` / `sad` / …）。
+    ## 参数
+
+    `categories`：**磁盘上实际存在的**类别 `{key: 标签}`（2026-11-05 加）。
+    不传则用 `media.EMOTIONS` 的默认五个。
+
+    ⚠️ 分类是**用户自己建的目录**，所以调用方（标注循环）必须把
+       `store.categories()` 传进来 —— 否则模型会往一个不存在的类别里分。
+
+    ## 返回值
+
+    `emotion_key` 是 `categories` 里的键（或 `other`）。
     失败（**网络/模型不可用**）时返回 `("", "", 原因)` —— 这种情况调用方
     应该保留原图在 `_inbox`，下次再试。
 
     ⚠️ 和"分类不确定"要区分开：不确定时返回 `("other", 描述, "")`，
        那也是一次**成功**（有描述就能用，只是归到其它）。
     """
+    prompt, letter_map = build_label_prompt(categories)
     text, why = describe_image(
-        image_bytes, config, prompt=LABEL_PROMPT, max_chars=400
+        image_bytes, config, prompt=prompt, max_chars=400
     )
     if not text:
         return "", "", why
-    emotion, caption = _parse_label(text)
+    emotion, caption = _parse_label(text, letter_map=letter_map)
     return emotion, caption, ""

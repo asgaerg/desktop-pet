@@ -6073,8 +6073,20 @@ class Gateway:
                     await asyncio.sleep(60)
                     continue
 
+                # 🔴 把**磁盘上实际存在的类别**传进去（2026-11-05）
+                #
+                # 用户要求「按图片种类新开文件夹」，所以类别是他自己建的目录。
+                # 不传的话模型只知道内置那 5 个，用户建的 `stickers/猫猫/`
+                # 永远不会被分到 —— 图片会全堆在 other 里。
+                #
+                # ⚠️ `categories()` 只返回**有图**的目录：用户建的空文件夹
+                #    不算一个类别（否则模型会分到一个永远没素材的类）。
+                known_cats = self.media.categories()
                 emo, caption, why = await asyncio.to_thread(
-                    media_vision.label_sticker, data, self.config
+                    media_vision.label_sticker,
+                    data,
+                    self.config,
+                    categories=known_cats,
                 )
                 if not caption:
                     # 视觉不可用：留在 _inbox，下次再试（不要标记成已处理）

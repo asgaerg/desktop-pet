@@ -70,6 +70,44 @@ EMOTIONS: dict[str, str] = {
     "other": "其它",
 }
 
+#: 类别名的长度上限。
+#:
+#: ⚠️ 自定义类别会变成**目录名**，太长会撞上 Windows 的路径长度限制
+#:    （260 字符）。24 足够表达（"无语到极致"只有 5 个字）。
+MAX_CATEGORY_LEN = 24
+
+
+def _is_valid_category(name: str) -> bool:
+    """这个名字能不能当类别（= 目录名）。
+
+    ## 🔴 2026-11-05 加：类别不再写死
+
+    用户要求「按图片种类新开文件夹」，所以**用户建什么目录就有什么类别**，
+    代码里不该有一个"允许列表"。
+
+    要挡的只有**不像话**的名字：
+
+        ""                空
+        "_inbox"          下划线开头 = 内部目录
+        "a/b"            路径分隔符（能逃出 stickers/）
+        "a\\b"            同上（Windows）
+        超长              Windows 路径上限
+        "CON"/"NUL"      Windows 保留名（见 `_safe_name` 同样的坑）
+
+    ⚠️ 中文**必须**允许 —— 用户很可能就建 `stickers/开心/`。
+    """
+    s = str(name or "").strip()
+    if not s or len(s) > MAX_CATEGORY_LEN:
+        return False
+    if s.startswith("_"):
+        return False
+    if "/" in s or "\\" in s:
+        return False
+    # Windows 保留设备名（大小写不敏感）
+    if s.upper().split(".")[0] in {"CON", "PRN", "AUX", "NUL"}:
+        return False
+    return True
+
 #: 允许的图片扩展名（大小写不敏感）。
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 
@@ -356,22 +394,97 @@ class MediaStore:
 
     @staticmethod
     def _emotion_from_path(rel: str) -> str:
-        """从路径推情绪：`stickers/happy/x.png` -> `happy`。
+        """从路径推类别：`stickers/happy/x.png` -> `happy`。
 
-        推不出来（在 `_inbox` 或 `images/` 里）就返回空。
+        ## 🔴 2026-11-05 改成**动态识别**（用户要求"按图片种类新开文件夹"）
+
+        用户原话：
+
+        > 「你现在可以把宠物的图片表情种类扩充，就是按照图片种类来新开文件夹」
+        > 「不用，等我图片放进去，你再一个个分类开具体种类就好了」
+
+        所以分类**不该写死在代码里** —— 用户会自己建文件夹，建什么就有什么。
+
+        规则：
+
+            ① 已知的 key（`EMOTIONS` 里的）           -> 直接用它
+            ② 已知的中文标签（"开心"）                -> 反查成 key
+            ③ **其它任何合法的文件夹名**               -> 原样当类别用
+            ④ 以下划线开头（`_inbox` 等）             -> 空（= 未分类）
+            ⑤ 不在 `stickers/` 下（`images/` 等）      -> 空
+
+        ③ 是关键：用户建了 `stickers/猫猫/`、`stickers/无语到极致/`，
+        图片就归到那个类别，不需要改代码。模型看图分类时也能选它
+        （前提是那个类别已经存在 —— 见 `media_vision.known_categories`）。
         """
         parts = rel.split("/")
         if len(parts) >= 3 and parts[0] == "stickers":
-            name = parts[1]
-            if name in EMOTIONS:
-                return name
+            name = parts[1].strip()
+            if not name:
+                return ""
             if name.startswith("_"):
                 return ""       # _inbox 之类
-            # 用户可能自己建了中文目录（`stickers/开心/`）-> 反查
+            # ① 已知 key
+            if name in EMOTIONS:
+                return name
+            # ② 已知中文标签 -> 反查
             for key, label in EMOTIONS.items():
                 if name == label:
                     return key
+            # ③ 用户自定义目录：原样当类别。
+            #
+            # ⚠️ 用 `_is_valid_category` 而不是自己写一堆判断 ——
+            #    同样的规则在 `add_file` / `move_to_emotion` 也要用，
+            #    三处各写一份必然漂移（这个项目已经栽过好几次）。
+            if _is_valid_category(name):
+                return name
         return ""
+
+    def categories(self) -> dict[str, str]:
+        """**磁盘上实际存在的**类别 -> 中文标签。
+
+        ## 为什么需要它
+
+        分类是用户自己建的文件夹，所以"有哪些类别"只能看磁盘。
+        模型分类（`media_vision.label_sticker`）也要知道这个列表 ——
+        否则它会往一个不存在的类别里分。
+
+        ## 返回
+
+            已知 key/标签   -> 用 `EMOTIONS` 里的中文标签
+            自定义目录名     -> 用它自己当标签（`猫猫` -> `猫猫`）
+
+        ⚠️ 只统计**非空**目录：用户建了空文件夹只是占位，不算一个类别
+           （否则模型会分到一个永远没素材的类）。
+        """
+        out: dict[str, str] = {}
+        base = self.root / "stickers"
+        if not base.is_dir():
+            return out
+        try:
+            entries = sorted(base.iterdir())
+        except Exception:  # noqa: BLE001
+            return out
+        for d in entries:
+            if not d.is_dir():
+                continue
+            name = d.name.strip()
+            if not name or name.startswith("_"):
+                continue
+            # 只算**有图**的目录
+            try:
+                has_image = any(
+                    f.is_file() and f.suffix.lower() in IMAGE_EXTS for f in d.iterdir()
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if not has_image:
+                continue
+            key = name if name in EMOTIONS else (
+                next((k for k, v in EMOTIONS.items() if v == name), name)
+            )
+            out[key] = EMOTIONS.get(key, name)
+        return out
 
     # ------------------------------------------------------------ 增删改
 
@@ -419,7 +532,9 @@ class MediaStore:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
         name = f"{stamp}-{stem[:40]}{ext}"
 
-        if emotion and emotion in EMOTIONS:
+        # 指定了类别就直接进那类目录（2026-11-05：不再限制必须是已知 key，
+        # 用户自己建的文件夹也是合法类别 —— 见 `_emotion_from_path`）
+        if emotion and _is_valid_category(emotion):
             target = self.stickers_dir(emotion) / name
         elif source == "chat":
             target = self.images_dir() / name
@@ -436,7 +551,7 @@ class MediaStore:
         item = MediaItem(
             path=rel,
             sha1=sha,
-            emotion=emotion if emotion in EMOTIONS else "",
+            emotion=emotion if _is_valid_category(emotion) else "",
             caption=caption,
             labeled_by=labeled_by,
             source=source,
@@ -457,7 +572,9 @@ class MediaStore:
         下次识别又会把它当"未标注"处理一遍 —— 白花钱。
         挪进 `stickers/<emotion>/` 之后，`_emotion_from_path` 就能认出来。
         """
-        if emotion not in EMOTIONS:
+        # ⚠️ 2026-11-05：不再要求"必须是已知 key"。用户自己建的类别
+        #    也是合法的（他已经把图放那个目录里了，只是没标注）。
+        if not _is_valid_category(emotion):
             return False
         src = self.root / item.path
         if not src.is_file():
