@@ -61,8 +61,17 @@ log = logging.getLogger("pet.sticker_fetch")
 #: 单张下载上限。表情包一般 < 500 KB，给 4 MB 已经很宽松。
 MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024
 
+#: 边长下限（像素）。小于这个的不是表情包，是图标。
+#:
+#: 实测：用「deepseek 蓝色女仆 表情包」搜，下回来一张 36×36 的 PNG ——
+#: 那是网站 favicon，不是表情包。而它通过了协议检查、magic bytes 检查、
+#: 大小检查（1.4 KB 远低于上限）。
+#:
+#: 120 是"发出去能看清"的下限。常见表情包都是 200~500px。
+MIN_IMAGE_SIDE = 120
+
 #: 一次最多下载几张（防止"一口气下 200 张"）。
-MAX_PER_ROUND = 3
+MAX_PER_ROUND = 5
 
 #: 允许的图片 magic bytes -> 扩展名。
 #:
@@ -77,15 +86,43 @@ _MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"BM", "bmp"),
 )
 
-#: 搜索时用的查询词模板（挑"表情包"类的结果）。
+#: 默认搜索词（挑"表情包"类的结果）。
 #:
-#: ⚠️ 刻意**不带具体情绪词**：让搜索先拿到一批泛化的表情包，
-#:    具体归哪一类交给视觉模型判断（那是它的活）。
+#: ## ⚠️ 刻意**不带具体情绪词**
+#:
+#: 让搜索先拿到一批泛化的表情包，具体归哪一类交给视觉模型判断
+#: （那是它的活，见 `media_vision.label_sticker`）。
+#:
+#: ## 🔴 但**可以**带风格/形象词（2026-11-05 用户要求）
+#:
+#: 用户原话：「找找 deepseek 的蓝色女仆形态可爱的表情包」。
+#:
+#: 所以搜索词允许描述"想要什么形象"——那不是情绪，是**素材风格**，
+#: 属于用户偏好，模型判断不了（它不知道用户喜欢什么画风）。
 SEARCH_QUERIES: tuple[str, ...] = (
     "表情包 搞笑 图片",
     "表情包 无语 图片",
     "沙雕表情包 高清",
 )
+
+
+def search_queries(extra: Optional[list[str]] = None) -> list[str]:
+    """算出这一轮用哪些搜索词。
+
+    ## 优先级
+
+        ① 配置里用户自己写的词（`autonomy.sticker_search_queries`）
+        ② 上面那组默认词
+
+    ⚠️ **不合并**：用户明确写了自己的词，说明他就想要那些，
+       再混进默认的"沙雕表情包"会稀释他的意图。
+
+    ⚠️ 空列表 / 全是空白 -> 退回默认值（不要因为配置写错就一张都搜不到）。
+    """
+    cleaned = [str(q).strip() for q in (extra or []) if str(q).strip()]
+    if cleaned:
+        return cleaned
+    return list(SEARCH_QUERIES)
 
 #: 判定"这个 URL 像图片"的后缀（搜索结果的链接常常不是图片本身）。
 _IMAGE_EXT = re.compile(r"\.(png|jpe?g|gif|webp|bmp)(\?|#|$)", re.I)
@@ -177,7 +214,7 @@ def _image_urls_from(search_text: str, limit: int = 8) -> list[str]:
     return (direct + pages)[:limit]
 
 
-def extract_images_from_html(html: str, base_url: str = "", limit: int = 6) -> list[str]:
+def extract_images_from_html(html: str, base_url: str = "", limit: int = 12) -> list[str]:
     """从一个网页里找出图片直链。
 
     ## 为什么需要它
@@ -338,4 +375,68 @@ def download(url: str, timeout_s: float = 15.0) -> tuple[bytes, str, str]:
         # ⚠️ 这里是最重要的一道：服务端说 image/png，实际返回一段 HTML
         #    （防盗链/登录页）的情况非常常见。magic bytes 不会撒谎。
         return b"", "", "内容不是图片（可能被防盗链拦了）"
+
+    # 🔴 尺寸太小 = 不是表情包（2026-11-05 实测加的）
+    #
+    # ## 踩到的现象
+    #
+    # 用「deepseek 蓝色女仆 表情包」去搜，下回来一张 **36×36** 的 PNG ——
+    # 那是网站的 favicon / 按钮图标，不是表情包。而它通过了所有已有的检查：
+    # 协议是 https、magic bytes 是 PNG、大小 1.4 KB 也没超上限。
+    #
+    # 结果：素材库里塞满小图标，宠物"发了一张表情包"其实是个 36px 的方块。
+    #
+    # ## 判据
+    #
+    # 表情包没有小于 120px 的 —— 那是"发出去能看清"的下限。
+    # 读宽高要解码头，标准库做不到（PIL 是可选依赖），所以只对
+    # **能便宜读出来**的格式做检查：PNG / GIF / WEBP / BMP 的头部都有固定字段。
+    w, h = _image_size(data)
+    if w and h and (w < MIN_IMAGE_SIDE or h < MIN_IMAGE_SIDE):
+        return b"", "", f"图片太小（{w}x{h}，表情包至少 {MIN_IMAGE_SIDE}px）"
     return data, ext, ""
+
+
+def _image_size(data: bytes) -> tuple[int, int]:
+    """从文件头读图片宽高。读不出来返回 `(0, 0)`。
+
+    ⚠️ 不引入 PIL 依赖（它在这个项目里是**可选**的，视觉链路上才用）。
+       这里只需要几个字节的解析，纯标准库够。
+
+    支持的格式：PNG / GIF / BMP / WEBP(VP8X 与 VP8)。
+    JPEG 的尺寸解析要扫段，比较啰嗦 —— 而 JPEG 表情包很少是图标，
+    所以直接跳过（返回 0,0 = 不检查）。
+    """
+    try:
+        # PNG: 8 字节签名 + 4 字节长度 + "IHDR" + 宽(4) + 高(4)，大端
+        if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return w, h
+        # GIF: "GIF87a"/"GIF89a" + 宽(2, 小端) + 高(2, 小端)
+        if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+            w = int.from_bytes(data[6:8], "little")
+            h = int.from_bytes(data[8:10], "little")
+            return w, h
+        # BMP: "BM" + 文件头 14 字节，其中 18..22 宽 / 22..26 高（小端，有符号）
+        if data.startswith(b"BM") and len(data) >= 26:
+            w = int.from_bytes(data[18:22], "little", signed=True)
+            h = abs(int.from_bytes(data[22:26], "little", signed=True))
+            return w, h
+        # WEBP: "RIFF" + size + "WEBP" + 子块类型
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP" and len(data) >= 30:
+            fourcc = data[12:16]
+            if fourcc == b"VP8X":
+                # VP8X: 24 位宽减一 / 高减一（小端），位于 24..30
+                w = int.from_bytes(data[24:27], "little") + 1
+                h = int.from_bytes(data[27:30], "little") + 1
+                return w, h
+            if fourcc == b"VP8 ":
+                # VP8 有损：帧头里 0x9d012a 之后是 14 位宽/高
+                if len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+                    w = int.from_bytes(data[26:28], "little") & 0x3FFF
+                    h = int.from_bytes(data[28:30], "little") & 0x3FFF
+                    return w, h
+    except Exception:  # noqa: BLE001 —— 解析失败就当"不知道尺寸"
+        pass
+    return 0, 0

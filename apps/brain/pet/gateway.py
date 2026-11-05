@@ -6134,11 +6134,69 @@ class Gateway:
 
         import random as _random
 
-        query = _random.choice(sticker_fetch.SEARCH_QUERIES)
+        # 🔴 搜索词可以配置（2026-11-05 用户要求）
+        #
+        # 「找找 deepseek 的蓝色女仆形态可爱的表情包」—— 这种"想要什么形象"
+        # 是**用户偏好**，模型判断不了（它不知道用户喜欢什么画风）。
+        # 所以做成配置项 `autonomy.sticker_search_queries`。
+        #
+        # ⚠️ 配了就用配的，没配才用默认那三条泛化词（见 `search_queries`）。
+        try:
+            custom_queries = self.config.autonomy.get("sticker_search_queries") or []
+            if not isinstance(custom_queries, list):
+                custom_queries = []
+        except Exception:  # noqa: BLE001
+            custom_queries = []
+        candidates = sticker_fetch.search_queries(custom_queries)
+        # 🔴 多个搜索词**都试一遍**，不是随机挑一个（2026-11-05 实测改）
+        #
+        # ## 原来的问题
+        #
+        # 随机选一个词，而实测每个词只返回 **2 个 URL**，其中大多是
+        # 抖音/B站那种动态渲染的页面（抓不到图）。于是：
+        #
+        #     选中能抓到图的词 -> 下到几张
+        #     选中抓不到的词   -> 0 张，这一轮白跑
+        #
+        # 命中率只有 1/3 左右。而"补充表情包"这件事本来就是慢慢攒的，
+        # 每次白跑一轮要等 6 小时（事件冷却）。
+        #
+        # ## 现在
+        #
+        # 按顺序试每个词，**够了就停**。词通常只有 2~3 个，
+        # 多搜一两次的代价远小于"白跑一轮"。
+        #
+        # ⚠️ 顺序也重要：先试用户**自己写的**词（他现在最想要那些），
+        #    再退到默认词（如果配的词都搜不到）。
+        got = 0
+        tried_queries: list[str] = []
+        for query in candidates:
+            if got >= sticker_fetch.MAX_PER_ROUND:
+                break
+            tried_queries.append(query)
+            got += await self._fetch_from_query(query, got)
+        if got:
+            log.info(
+                "表情包下载：这轮下了 %d 张（试过：%s），等标注循环处理",
+                got, "、".join(tried_queries),
+            )
+        else:
+            log.info(
+                "表情包下载：这轮一张都没下到（试过：%s）",
+                "、".join(tried_queries),
+            )
+        return got
+
+    async def _fetch_from_query(self, query: str, already: int) -> int:
+        """用一个搜索词找一批图下载。返回新下到的张数。
+
+        从 `_fetch_stickers_once` 里拆出来的 —— 那个函数要循环多个词，
+        每个词的逻辑独立，混在一起会变成一个两百行的大函数。
+        """
         try:
             raw = await tools._web_search({"query": query, "limit": 10})
         except Exception as exc:  # noqa: BLE001
-            log.info("表情包下载：搜索失败（%s）", type(exc).__name__)
+            log.info("表情包下载：搜索「%s」失败（%s）", query[:20], type(exc).__name__)
             return 0
 
         urls = sticker_fetch._image_urls_from(str(raw or ""))
@@ -6148,7 +6206,7 @@ class Gateway:
 
         got = 0
         for url in urls:
-            if got >= sticker_fetch.MAX_PER_ROUND:
+            if already + got >= sticker_fetch.MAX_PER_ROUND:
                 break
             # ① 是图片直链 -> 直接下
             # ② 是网页 -> 抓下来找图，再下找到的第一张
@@ -6170,8 +6228,16 @@ class Gateway:
                 if not inner:
                     log.debug("表情包下载：%s 页面里没有图片", url[:60])
                     continue
+                # 🔴 一个页面里的图**尽量多试几张**（2026-11-05 实测改进）
+                #
+                # 一个图库页面可能有几十张缩略图，而前几张常常是 logo、
+                # 广告位或者 36×36 的图标。实测「deepseek 蓝色女仆 表情包」
+                # 搜到的图库页面，前 6 张里有 1 张是 favicon。
+                #
+                # 所以 `extract_images_from_html` 那边多返回一些（见它的 limit），
+                # 这里则试到够数为止 —— 反正下不成的会被尺寸/类型检查挡掉。
                 for iu in inner:
-                    if got >= sticker_fetch.MAX_PER_ROUND:
+                    if already + got >= sticker_fetch.MAX_PER_ROUND:
                         break
                     d2, e2, w2 = await asyncio.to_thread(
                         sticker_fetch.download, iu

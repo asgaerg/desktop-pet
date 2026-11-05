@@ -449,6 +449,19 @@ modules:
     enabled: true
   search:
     enabled: true
+  # 表情包下载（2026-11-05 用户要求打开）。
+  #
+  # 用户原话：「找找 deepseek 的蓝色女仆形态可爱的表情包」。
+  #
+  # ⚠️ 默认是**关**的（主动联网行为，要用户点头）。这里显式打开
+  #    等于用户点头了。想关掉就改回 false。
+  #
+  # ⚠️ 它依赖 search：联网搜索关掉时这个自动关（依赖闭包）。
+  stickers:
+    enabled: true
+  # 信息存储（2026-11-05 加）。默认开：它不发请求，只整理已搜到的东西。
+  knowledge:
+    enabled: true
   sprite:
     enabled: true
   ui.windows:
@@ -459,6 +472,20 @@ autonomy:
   enabled: true                # false = 关掉自动找机会说话（手动戳它仍会回应）
   tick_s: 5                    # 多久评估一次意愿
   muted: true                 # 用户免打扰。托盘与界面按钮会改它，重启后保留
+
+  # 自己上网补充表情包时搜什么（2026-11-05 用户指定）。
+  #
+  # 用户原话：「找找 deepseek 的蓝色女仆形态可爱的表情包」。
+  #
+  # 留空（或删掉这几行）= 用内置的三条泛化词
+  # （"表情包 搞笑 图片" / "表情包 无语 图片" / "沙雕表情包 高清"）。
+  #
+  # ⚠️ 这里的词是**素材风格**，不是情绪 —— 具体归到 happy/sad/speechless
+  #    由视觉模型看图决定（见 media_vision.label_sticker）。
+  sticker_search_queries:
+    - "deepseek 蓝色女仆 表情包"
+    - "蓝发女仆 可爱 表情包"
+    - "女仆装 二次元 表情包 可爱"
 
   # 开口阈值：意愿分超过它才说话。数值越大越不容易开口。
   speak_threshold: 0.55

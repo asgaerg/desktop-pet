@@ -10095,7 +10095,25 @@ def test_reading(suite: "Suite") -> None:
             _assert(hit, "扫描应当发现用户自己建的目录")
             _assert(hit[0].emotion == "happy", f"中文目录应当映射成 happy，实际 {hit[0].emotion!r}")
 
-            return "目录/入库/去重/标注/归类/挑选/中文目录 全部正确"
+            # ⑧ 用户一次丢进两张内容相同的图 -> 只入库一张（2026-11-05 实测修）
+            #
+            # 实测 bug：`by_sha` 只含**索引里已有**的条目，所以同一轮里
+            # 先遇到的两张相同图都会入库。表现是"我明明只放了一张"，
+            # 而 `pick_sticker` 按用得最少挑 -> 那张图权重翻倍。
+            dup_dir = s.root / "stickers" / "_inbox" / "下载包"
+            dup_dir.mkdir(parents=True, exist_ok=True)
+            same = b"\x89PNG-same-content-for-dedup"
+            (dup_dir / "a.png").write_bytes(same)
+            (dup_dir / "b.png").write_bytes(same)
+            got2 = s.scan()
+            dup_hits = [x for x in got2.values() if x.sha1 and x.path.startswith("stickers/_inbox/下载包/")]
+            _assert(
+                len(dup_hits) == 1,
+                f"同内容的两个文件只该入库一张，实际 {len(dup_hits)} 张："
+                f"{[x.path for x in dup_hits]}",
+            )
+
+            return "目录/入库/去重/标注/归类/挑选/中文目录/重复图 全部正确"
         finally:
             import shutil as _sh
 

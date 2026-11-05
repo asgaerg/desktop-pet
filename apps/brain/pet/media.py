@@ -292,6 +292,24 @@ class MediaStore:
             it.sha1: it for it in self._items.values() if it.sha1
         }
         found: dict[str, MediaItem] = {}
+        # 🔴 记住这一轮**已经见过**的 sha1（2026-11-05 实测修）
+        #
+        # ## 踩到的坑
+        #
+        # `by_sha` 只包含**索引里已有的**条目。所以用户一次丢进两张
+        # 内容相同的图（下载包里很常见：同一张图存了 .png 和 .jpg 两份）
+        # 时，第二个文件在 `by_sha` 里查不到 —— 于是**两个都进了库**。
+        #
+        # 实测：5 个文件里 1 对重复，结果 total=5 而不是 4。
+        #
+        # ## 为什么必须修
+        #
+        # `pick_sticker` 按"用得最少"挑。同一张图存两份 = 它的权重翻倍，
+        # 会比其他图更频繁被选中。而且用户看到的是"我明明只放了一张"。
+        #
+        # ⚠️ 保留**先遇到的那个**（`_iter_files` 是稳定顺序），
+        #    后面的直接跳过 —— 不删用户的文件，只是不登记。
+        seen_sha: set[str] = set()
         for path in self._iter_files():
             rel = path.relative_to(self.root).as_posix()
             try:
@@ -299,6 +317,11 @@ class MediaStore:
             except Exception:  # noqa: BLE001
                 continue
             sha = _sha1(data)
+            if sha in seen_sha:
+                # 这个内容本轮已经登记过了，跳过（不重复入库）
+                log.info("扫描：跳过重复图 %s（与已登记的同一张）", rel)
+                continue
+            seen_sha.add(sha)
             # 认回旧标注（按 sha1）
             old = by_sha.get(sha)
             emotion = self._emotion_from_path(rel)
