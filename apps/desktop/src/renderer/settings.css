@@ -433,6 +433,66 @@ input[type='text'].narrow-num {
 }
 
 /*
+ * 按宠物大小分档调探头偏移（2026-11-05 用户要求）。
+ *
+ * 折叠块：默认收起，想细调的人才展开 —— 大多数人只用上面那个输入框。
+ */
+.peek-by-scale {
+  margin: 6px 0 2px;
+  padding: 0 2px;
+}
+
+.peek-by-scale > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  user-select: none;
+  padding: 4px 0;
+}
+
+.peek-by-scale > summary:hover {
+  color: var(--text);
+}
+
+.peek-scale-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 4px 14px;
+}
+
+.peek-scale-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * ⚠️ 标签要**固定宽度**：四行的数字框左边缘才会对齐。
+ *    不固定的话每行按文字长度缩进，看起来很乱。
+ */
+.peek-scale-row > label {
+  flex: 0 0 auto;
+  width: 108px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.peek-scale-row > .suffix {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.peek-scale-hint {
+  margin: 0;
+  padding-left: 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/*
  * 记忆列表的按钮不能被压窄。
  *
  * 踩过：搜索行是 `flex`，输入框带 `width: 100%`（来自 `input[type='text']` 那条

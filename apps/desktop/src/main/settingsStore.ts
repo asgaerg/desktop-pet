@@ -28,6 +28,8 @@ import { dirname, join } from 'node:path';
 import { userDataDir } from './credentials.js';
 import {
   clampPeekOffset,
+  // 🔴 按档位归一化 scale 键（2026-11-05）
+  scaleKey,
   clampEdgeSnap,
   PEEK_OFFSET_DEFAULT_PX,
   EDGE_SNAP_DEFAULT_PX,
@@ -37,6 +39,41 @@ import {
 export interface PetSettings {
   /** 边缘探头时窗口伸出屏幕的像素数 */
   peekOffsetPx: number;
+  /**
+   * 🔴 按宠物大小**分别**存的探头平移距离（2026-11-05 用户要求）。
+   *
+   * ## 用户原话
+   *
+   * > 「我打算将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的
+   * >   调整只能调整一部分，四个都能调整就都能完美达成想要的探头效果，
+   * >   当然，参数作用还是和现在的效果一样，只是在宠物的四个大小时都能
+   * >   自动根据参数变化，不那么死板了」
+   *
+   * ## 为什么单个值不够
+   *
+   * 四个档位的立绘尺寸差一倍（150px vs 300px），而探头时要让开的
+   * "留白"是**跟尺寸成正比**的。所以同一个 `peekOffsetPx`：
+   *
+   *     150px 档  调好了
+   *     300px 档  同一个值就探得太少（看起来像没探出去）
+   *
+   * 反过来也一样。这就是他说的"只能调整一部分"。
+   *
+   * ## 结构
+   *
+   * 键是**档位 scale 的字符串**（"0.6" / "0.88" / "1" / "1.2"），
+   * 值是那个档位的平移距离（像素）。
+   *
+   *     { "0.6": 30, "0.88": 48, "1": 56, "1.2": 68 }
+   *
+   * ⚠️ 用字符串键而不是数字键：JSON 对象的键本来就是字符串，
+   *    用数字键会得到 `{ "0.6": ... }` 而代码里查 `map[0.6]` —— 靠
+   *    JS 的隐式转换恰好能对上，但那太脆（`1` 和 `1.0` 就是同一个键，
+   *    而 `0.60` 和 `0.6` 也是）。显式转换更安全。
+   *
+   * ⚠️ 缺某个档位时退回 `peekOffsetPx`（老配置没有这个字段）。
+   */
+  peekOffsetByScale?: Record<string, number>;
   /**
    * 拖拽结束时，离屏幕边缘多少像素算"贴边"（触发侧身探头）。
    *
@@ -403,6 +440,37 @@ export function settingsPath(): string {
 }
 
 /**
+ * 洗一遍"按档位的探头偏移"（2026-11-05）。
+ *
+ * ## 为什么要洗
+ *
+ * 这份数据来自 `settings.json`，可能被手工改过、可能是旧版本留下的、
+ * 也可能字段干脆不是对象。不洗的话：
+ *
+ *     `{ "0.6": "abc" }`   -> `clampPeekOffset("abc")` 返回默认值，能兜住
+ *     `{ "0.6": {} }`      -> `Number({})` 是 NaN，也兜住
+ *     非对象（字符串）       -> `Object.entries` 会炸
+ *
+ * ## 规则
+ *
+ * ① 不是"普通对象"就返回 `{}`（调用方会退回全局值）
+ * ② 只保留**键能解析成数字、值能夹进合法范围**的项
+ * ③ 键统一走 `scaleKey()` 归一化（`0.60` 和 `0.6` 合并成同一个）
+ */
+function sanitizePeekOffsetByScale(raw: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const scale = Number(k);
+    if (!Number.isFinite(scale)) continue;
+    const n = Number(v);
+    if (!Number.isFinite(n)) continue;
+    out[scaleKey(scale)] = clampPeekOffset(n);
+  }
+  return out;
+}
+
+/**
  * 读取偏好设置。
  *
  * 依次在候选路径里找**第一个存在的**；解析失败或没找到都回退默认值。
@@ -426,6 +494,18 @@ export function readSettings(): PetSettings {
           raw?.peekOffsetTuned === true ? (raw?.peekOffsetPx ?? DEFAULTS.peekOffsetPx) : DEFAULTS.peekOffsetPx,
         ),
         peekOffsetTuned: raw?.peekOffsetTuned === true,
+        /*
+         * 🔴 按宠物大小分别存的偏移（2026-11-05 用户要求）。
+         *
+         * ⚠️ 这里**不做 `peekOffsetTuned` 那套门禁**。那个门禁是为了
+         *    "改了默认值却对老用户无效"——因为老配置里存的是旧默认 0。
+         *    而这个字段是**新加的**，老配置里根本没有它，不存在"旧默认
+         *    污染"的问题。
+         *
+         * ⚠️ 坏值（负数、非数字、超范围）一律过滤掉，而不是整块丢弃 ——
+         *    用户可能只调了其中一档，其余三档还是没值的。
+         */
+        peekOffsetByScale: sanitizePeekOffsetByScale(raw?.peekOffsetByScale),
         edgeSnapPx: clampEdgeSnap(raw?.edgeSnapPx ?? DEFAULTS.edgeSnapPx),
         edgePeekEnabled:
           typeof raw?.edgePeekEnabled === 'boolean' ? raw.edgePeekEnabled : DEFAULTS.edgePeekEnabled,
@@ -501,6 +581,16 @@ export function writeSettings(patch: Partial<PetSettings>): SettingsWriteResult 
      */
     peekOffsetTuned:
       patch.peekOffsetPx !== undefined ? true : (patch.peekOffsetTuned ?? current.peekOffsetTuned),
+    /*
+     * 🔴 按宠物大小分别存的偏移（2026-11-05 用户要求）。
+     *
+     * ⚠️ `sanitize` 而不是直接赋值：这份数据要写进磁盘，
+     *    坏值写下去下次读就带着坏值跑（而且不会有任何报错）。
+     */
+    peekOffsetByScale:
+      patch.peekOffsetByScale !== undefined
+        ? sanitizePeekOffsetByScale(patch.peekOffsetByScale)
+        : current.peekOffsetByScale,
     edgeSnapPx: patch.edgeSnapPx !== undefined ? clampEdgeSnap(patch.edgeSnapPx) : current.edgeSnapPx,
     edgePeekEnabled:
       typeof patch.edgePeekEnabled === 'boolean' ? patch.edgePeekEnabled : current.edgePeekEnabled,

@@ -6178,6 +6178,104 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
   );
 }
 
+/* ------------------------------------------------- 探头偏移：按宠物大小分档 */
+/*
+ * 🔴 2026-11-05 用户要求：
+ *
+ * > 「将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的调整
+ * >   只能调整一部分，四个都能调整就都能完美达成想要的探头效果，
+ * >   参数作用还是和现在的效果一样，只是在宠物的四个大小时都能自动
+ * >   根据参数变化，不那么死板了」
+ *
+ * ## 为什么要钉死这几条
+ *
+ * 「按档位取值」这个逻辑改错了**不会报错**，只会让探头位置不对 ——
+ * 而用户看到的是"我明明调好了，换个大小又歪了"，很难定位。
+ *
+ * 特别是 `scaleKey`：`0.6` / `0.60` / `Number("0.6")` 在 JS 里
+ * 可能生成不同的字符串键，对不上就静默退回全局值。
+ */
+{
+  const {
+    peekOffsetFor,
+    setPeekOffsetFor,
+    scaleKey,
+    PEEK_OFFSET_DEFAULT_PX,
+    PEEK_OFFSET_MIN_PX,
+    PEEK_OFFSET_MAX_PX,
+  } = requireCjs(target('petLayout'));
+
+  // ---- scaleKey：归一化 ----
+  check(
+    '探头皮偏：scaleKey 把 0.6 / 0.60 / "0.6" 归一成同一个键',
+    scaleKey(0.6) === '0.6' &&
+      scaleKey(0.6) === scaleKey(Number('0.60')) &&
+      scaleKey(1) === '1' &&
+      scaleKey(1.0) === '1',
+    `0.6->${scaleKey(0.6)} 1->${scaleKey(1)} 1.2->${scaleKey(1.2)}`,
+  );
+
+  // ---- 有值就用值，没值退回全局 ----
+  const byScale = { '0.6': 30, '1': 56 };
+  check(
+    '探头偏移：某档有值就用它的',
+    peekOffsetFor(0.6, byScale, 68) === 30 && peekOffsetFor(1, byScale, 68) === 56,
+    `0.6->${peekOffsetFor(0.6, byScale, 68)} 1->${peekOffsetFor(1, byScale, 68)}`,
+  );
+  check(
+    '探头偏移：某档没值就退回全局（老配置只有全局值）',
+    peekOffsetFor(0.88, byScale, 68) === 68 && peekOffsetFor(1.2, byScale, 68) === 68,
+    `0.88->${peekOffsetFor(0.88, byScale, 68)} 1.2->${peekOffsetFor(1.2, byScale, 68)}`,
+  );
+  check(
+    '探头偏移：整张表缺失时全部退回全局',
+    peekOffsetFor(0.6, undefined, 68) === 68 && peekOffsetFor(0.6, null, 68) === 68,
+    '老配置没有这个字段，必须能正常跑',
+  );
+
+  // ---- 写回只改一档，其余保留 ----
+  const after = setPeekOffsetFor(byScale, 0.88, 44);
+  check(
+    '探头偏移：写一档时其余档位保持原样',
+    after['0.6'] === 30 && after['1'] === 56 && after['0.88'] === 44,
+    `实际 ${JSON.stringify(after)}（调 0.88 不该动 0.6 和 1）`,
+  );
+  check(
+    '探头偏移：写回的值也会被夹进合法范围',
+    setPeekOffsetFor({}, 0.6, 99999)['0.6'] === PEEK_OFFSET_MAX_PX &&
+      setPeekOffsetFor({}, 0.6, -99999)['0.6'] === PEEK_OFFSET_MIN_PX,
+    `上限 ${PEEK_OFFSET_MAX_PX} 下限 ${PEEK_OFFSET_MIN_PX}`,
+  );
+  check(
+    '探头偏移：非法输入退回默认值',
+    peekOffsetFor(0.6, { '0.6': NaN }, 68) === 68 &&
+      peekOffsetFor(0.6, { '0.6': 'abc' }, 68) === 68,
+    '设置文件可能被手工改坏，不能让它算出 NaN',
+  );
+
+  // ---- 源码层面：确认运行时真的用了分档取值 ----
+  const petWinSrc = readFileSync(path.join(here, '..', 'src', 'main', 'petWindow.ts'), 'utf-8');
+  check(
+    '探头偏移：运行时按当前档位取值（不是读全局量）',
+    /const userShift = this\.peekOffset;/.test(petWinSrc),
+    '读 peekOffsetPx 就退回了"四个大小共用一个值"',
+  );
+  check(
+    '探头偏移：换宠物大小时重排探头',
+    // ⚠️ 上限要留够：setPetScale 里那段说明注释本身有几百字符
+    /setPetScale\(scale: number\)[\s\S]{0,1500}repositionEdgePeek\(\)/.test(petWinSrc),
+    '不重排的话换大小后平移距离还是旧档位的',
+  );
+
+  const idxSrc = readFileSync(path.join(here, '..', 'src', 'main', 'index.ts'), 'utf-8');
+  check(
+    '探头偏移：启动时灌整张表（不写单个槽位）',
+    /setPeekOffsetsByScale\(stored\.peekOffsetByScale\)/.test(idxSrc) &&
+      !/petWindow\.setPeekOffset\(stored\.peekOffsetPx\)/.test(idxSrc),
+    '启动时调 setPeekOffset 会覆盖当前档位的精调值',
+  );
+}
+
 /* ------------------------------------------------------------------ 收尾 */
 
 /* ------------------------------------------------------------------ *

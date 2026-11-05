@@ -326,8 +326,19 @@ const api = {
     return ipcRenderer.invoke(CHANNEL.peekOffset);
   },
 
-  setPeekOffset(value: number): Promise<unknown> {
-    return ipcRenderer.invoke(CHANNEL.setPeekOffset, { value });
+  /**
+   * 设置探头偏移。
+   *
+   * @param value 像素（可为负）
+   * @param scale 宠物大小档位（0.6 / 0.88 / 1 / 1.2）。
+   *              🔴 2026-11-05：**不传 = 改当前档位**。
+   *              传了就改那一档（设置页的四个输入框用）。
+   */
+  setPeekOffset(value: number, scale?: number): Promise<unknown> {
+    return ipcRenderer.invoke(
+      CHANNEL.setPeekOffset,
+      scale === undefined ? { value } : { value, scale },
+    );
   },
 
   /**

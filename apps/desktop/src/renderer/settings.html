@@ -342,6 +342,56 @@
               <span class="suffix">px</span>
             </div>
           </div>
+          <!--
+            🔴 四个宠物大小分别调（2026-11-05 用户要求）
+
+            用户原话：
+
+            > 「将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的
+            >   调整只能调整一部分……只是在宠物的四个大小时都能自动根据
+            >   参数变化，不那么死板了」
+
+            ## 为什么要分开
+
+            四个档位的立绘是 150 / 220 / 250 / 300 px —— **差一倍**。
+            而探头要让开的"留白"跟尺寸成正比，所以一个统一值必然顾此失彼：
+            按 150px 调好的值放到 300px 上显得"几乎没探出去"。
+
+            ## 为什么默认折叠
+
+            大多数人只会调当前用的那个大小（上面那个输入框）。
+            四个都摊开会把这一页撑得很长，而"我就是想微调一下"的人
+            会被一大堆数字劝退。
+          -->
+          <details class="peek-by-scale">
+            <summary>按宠物大小分别调整（四个档位各管各的）</summary>
+            <div class="peek-scale-rows">
+              <div class="peek-scale-row">
+                <label for="peek-offset-0.6">150px（0.6x）</label>
+                <input id="peek-offset-0.6" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.6" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-0.88">220px（0.88x）</label>
+                <input id="peek-offset-0.88" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.88" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-1">250px（1.0x）</label>
+                <input id="peek-offset-1" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="1" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-1.2">300px（1.2x）</label>
+                <input id="peek-offset-1.2" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="1.2" />
+                <span class="suffix">px</span>
+              </div>
+            </div>
+            <p class="setting-desc peek-scale-hint">
+              上面那个输入框改的是<strong>当前宠物大小</strong>这一档；
+              这里可以给每一档单独设值。没设过的档位沿用上面那个值。
+            </p>
+          </details>
         </section>
 
         <!-- ============================ AI ============================ -->

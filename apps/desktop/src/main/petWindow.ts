@@ -33,6 +33,9 @@ import {
   PEEK_OFFSET_DEFAULT_PX,
   EDGE_SNAP_DEFAULT_PX,
   BUBBLE_LINGER_DEFAULT_MS,
+  // 🔴 按宠物大小分别取探头平移距离（2026-11-05 用户要求）
+  peekOffsetFor,
+  setPeekOffsetFor,
   petSizeFor,
   artSizeFor,
   artShiftFor,
@@ -177,6 +180,15 @@ export class PetWindow {
    */
   private peekOffsetPx = PEEK_OFFSET_DEFAULT_PX;
   /**
+   * 🔴 按宠物大小分别存的探头平移距离（2026-11-05 用户要求）。
+   *
+   * 键是 scale 的字符串形式（见 `scaleKey`），值是那一档的像素数。
+   *
+   * ⚠️ 存"每档一个值"而不是"统一值"：四个档位的立绘差一倍
+   *    （150px vs 300px），一个值必然顾此失彼 —— 见 `peekOffsetFor`。
+   */
+  private peekOffsetByScale: Record<string, number> = {};
+  /**
    * 拖拽结束时，离屏幕边缘多少像素算"贴边"（用户可调）。
    *
    * 用户要求："我好自己设置靠近屏幕边缘多少像素自动侧身"。
@@ -191,13 +203,39 @@ export class PetWindow {
     return this.edgeSnapPx;
   }
 
+  /**
+   * 设置**当前宠物大小档位**的探头平移距离（2026-11-05）。
+   *
+   * ⚠️ 只改当前档位那一个值，其它档位保持原样 —— 用户调 150px 档时
+   *    300px 档的值必须留着（`setPeekOffsetFor` 负责合并）。
+   */
   setPeekOffset(px: number): void {
-    this.peekOffsetPx = clampPeekOffset(px);
+    const scale = this.petScale;
+    this.peekOffsetByScale = setPeekOffsetFor(this.peekOffsetByScale, scale, px);
     // 正在探头就立刻重排，让用户边拖滑杆边看到效果
     if (this.edgePeek) this.repositionEdgePeek();
   }
 
+  /** 一次性灌入全部档位的值（启动时从 settings 恢复） */
+  setPeekOffsetsByScale(map: Record<string, number> | undefined | null): void {
+    const out: Record<string, number> = {};
+    if (map && typeof map === 'object') {
+      for (const [k, v] of Object.entries(map)) {
+        const n = Number(v);
+        if (Number.isFinite(n)) out[k] = clampPeekOffset(n);
+      }
+    }
+    this.peekOffsetByScale = out;
+    if (this.edgePeek) this.repositionEdgePeek();
+  }
+
+  /** 当前档位实际生效的值（没单独设过就退回全局值） */
   get peekOffset(): number {
+    return peekOffsetFor(this.petScale, this.peekOffsetByScale, this.peekOffsetPx);
+  }
+
+  /** 全局兜底值（老配置只有它；也用于"恢复默认"） */
+  get peekOffsetGlobal(): number {
     return this.peekOffsetPx;
   }
 
@@ -441,7 +479,15 @@ export class PetWindow {
     //
     // ⚠️ 这一项**以前完全没被消费**：`setPeekOffset` 只存了值、没人读，
     // 所以那个滑杆是"空滑杆"（拖了没反应）。现在接上了。
-    const userShift = this.peekOffsetPx;
+    // 🔴 2026-11-05：按**当前宠物大小档位**取值，不再是全局一个数
+    //
+    // 用户要求「四个大小的探头平移距离都能调整」。150px 和 300px 档的
+    // 立绘差一倍，一个统一值必然顾此失彼 —— 详见 `peekOffsetFor`。
+    //
+    // ⚠️ 用 getter `this.peekOffset`（它内部走 `peekOffsetFor`），
+    //    不要直接读 `this.peekOffsetPx` —— 那是全局兜底值，
+    //    只在某档没单独设过时才该生效。
+    const userShift = this.peekOffset;
     /*
      * ## 横向 = 用户设定的值（已回退到这里）
      *
@@ -2383,6 +2429,24 @@ export class PetWindow {
     const clamped = clampScale(scale);
     this.petScale = clamped;
     this.applyLayout(`大小 ${clamped.toFixed(2)}x`);
+
+    /*
+     * 🔴 正在探头时换大小 -> **必须重排探头**（2026-11-05）
+     *
+     * 用户要求「四个大小时都能自动根据参数变化」。原来这里只调
+     * `applyLayout`（常态布局），探头状态下换大小就会：
+     *
+     *     ① 平移到旧档位的距离（`peekOffsetFor` 按新档位取值，但没被调用）
+     *     ② 立绘尺寸变了，而"贴边让开的留白"没重算 —— 看着像没贴到边
+     *
+     * 所以换完大小要立刻按**新档位**重排一次探头。
+     *
+     * ⚠️ 放在 `applyLayout` 之后：`applyLayout` 会改窗口尺寸，
+     *    而 `repositionEdgePeek` 依赖实测立绘矩形，顺序反了会算错。
+     */
+    if (this.edgePeek) {
+      this.repositionEdgePeek();
+    }
   }
 
   get currentPetScale(): number {

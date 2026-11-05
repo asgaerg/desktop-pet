@@ -1077,6 +1077,95 @@ export function clampPeekOffset(value: unknown): number {
 }
 
 /**
+ * 🔴 按宠物大小取探头平移距离（2026-11-05 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * > 「将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的调整
+ * >   只能调整一部分……参数作用还是和现在的效果一样，只是在宠物的四个
+ * >   大小时都能自动根据参数变化，不那么死板了」
+ *
+ * ## 为什么必须分开存
+ *
+ * 四个档位的立绘是 150 / 220 / 250 / 300 px —— **差一倍**。
+ * 而探头要让开的"留白"跟尺寸成正比（约 = 立绘 × 0.17）。
+ *
+ * 所以一个统一值必然顾此失彼：
+ *
+ *     按 150px 调好（比如 40）  ->  300px 档显得"几乎没探出去"
+ *     按 300px 调好（比如 80）  ->  150px 档探过头，整只跑出屏幕
+ *
+ * 这就是他说的"只能调整一部分"。
+ *
+ * ## 取值优先级
+ *
+ * ```
+ * ① 该档位明确存了的        -> 用它（用户精调过）
+ * ② 没存过                 -> 退回 `basePx`（全局值，老配置只有它）
+ * ```
+ *
+ * ⚠️ **不做"按比例自动推算"**。听起来聪明，但会让用户调 A 档时
+ *    B 档也跟着变 —— 而他明确要"四个都能调整"，那意味着
+ *    **各管各的**。推算出来的值他既没设过、也预料不到。
+ *
+ * ⚠️ `basePx` 兜底保证老配置行为不变（那时只有 `peekOffsetPx`）：
+ *    四个档位全用它，和改动前一模一样。
+ *
+ * @param scale  当前宠物大小档位（0.6 / 0.88 / 1 / 1.2）
+ * @param byScale 按档位存的值（键是 scale 的字符串形式）
+ * @param basePx  全局兜底值
+ */
+export function peekOffsetFor(
+  scale: number,
+  byScale: Record<string, number> | undefined | null,
+  basePx: number,
+): number {
+  const base = clampPeekOffset(basePx);
+  if (!byScale || typeof byScale !== 'object') return base;
+  // 用**同一个**归一化函数生成键，避免 0.6 / 0.60 / 1 / 1.0 对不上
+  const key = scaleKey(scale);
+  const raw = byScale[key];
+  if (raw === undefined || raw === null) return base;
+  return clampPeekOffset(raw);
+}
+
+/**
+ * scale 的字符串键（唯一真源）。
+ *
+ * ⚠️ 为什么要专门一个函数：`0.6` 和 `0.6000000000000001` 在 JS 里
+ *    是不同的键但"看起来一样"（浮点误差）。统一走 `toFixed(2)`
+ *    再去掉尾零，保证 `String(0.6)`、`0.6`、`0.60` 都得到 `"0.6"`。
+ */
+export function scaleKey(scale: number): string {
+  const n = Number(scale);
+  if (!Number.isFinite(n)) return '1';
+  // 两小数足够（档位是 0.6 / 0.88 / 1 / 1.2），再把尾零去掉
+  const fixed = n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return fixed || '0';
+}
+
+/**
+ * 写回时的合并：只改**一个档位**，其余保持原样。
+ *
+ * ⚠️ 不能整个覆盖 —— 用户调 150px 档时，300px 档的值必须留着。
+ */
+export function setPeekOffsetFor(
+  byScale: Record<string, number> | undefined | null,
+  scale: number,
+  value: number,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (byScale && typeof byScale === 'object') {
+    for (const [k, v] of Object.entries(byScale)) {
+      const num = Number(v);
+      if (Number.isFinite(num)) out[k] = clampPeekOffset(num);
+    }
+  }
+  out[scaleKey(scale)] = clampPeekOffset(value);
+  return out;
+}
+
+/**
  * 右下角锚定地重排窗口位置。
  *
  * 宠物默认待在右下角，所以放大或切换到紧凑形态时应当**向左上方向长**，

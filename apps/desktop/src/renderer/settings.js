@@ -934,6 +934,76 @@ bindNumberField(
 );
 
 /*
+ * 🔴 四个宠物大小分别调探头偏移（2026-11-05 用户要求）
+ *
+ * ## 和上面那个输入框的关系
+ *
+ *     上面那个     改**当前宠物大小**这一档
+ *     下面四个     每一档单独改
+ *
+ * 它们读写的是同一个后端字段 `peekOffsetByScale`，所以改了一个，
+ * 另一个要立刻同步（否则用户看到两个地方数字不一样）。
+ *
+ * ## ⚠️ 为什么用 `change` 而不是 `input`
+ *
+ * `input` 会在用户每敲一个数字时就触发（敲 "9" 是 9，敲 "95" 是 95）——
+ * 那样中途的 9 也会被写盘、被应用。`change` 在失焦/回车时才触发，
+ * 是我们想要的"改完就算"。
+ */
+const peekScaleInputs = Array.from(
+  document.querySelectorAll('input[data-scale]'),
+);
+
+/** 把后端给的 byScale 灌进四个输入框 */
+function paintPeekByScale(byScale) {
+  if (!byScale || typeof byScale !== 'object') return;
+  for (const input of peekScaleInputs) {
+    const scale = String(input.dataset.scale);
+    const value = byScale[scale];
+    // 只改**没在编辑**的框：用户正在输入的框不能被他自己的旧值盖掉
+    if (document.activeElement === input) continue;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      input.value = String(value);
+    }
+  }
+}
+
+for (const input of peekScaleInputs) {
+  input.addEventListener('change', async () => {
+    const scale = Number(input.dataset.scale);
+    const value = Number(input.value);
+    if (!Number.isFinite(scale) || !Number.isFinite(value)) return;
+    const r = await api.setPeekOffset(value, scale);
+    if (r && r.saved === false) {
+      // 落盘失败要让用户知道 —— 否则会变成"看起来改了、重启回默认"
+      console.warn('探头偏移保存失败：', r.error || '未知原因');
+    }
+    // 把夹过的真实值写回（可能被限幅）
+    if (r && Number.isFinite(Number(r.peekOffsetPx))) {
+      input.value = String(Number(r.peekOffsetPx));
+    }
+    // 上面那个"当前大小"的框也要跟着刷新（如果改的正好是当前档位）
+    if (r && r.byScale) {
+      paintPeekByScale(r.byScale);
+      const current = await api.peekOffset();
+      if (current && Number.isFinite(Number(current.current))) {
+        ui.peekOffset.value = String(Number(current.current));
+      }
+    }
+  });
+}
+
+// 启动时拉一次四档的值
+void (async () => {
+  try {
+    const r = await api.peekOffset();
+    if (r && r.byScale) paintPeekByScale(r.byScale);
+  } catch {
+    /* 读不到就不填，用户自己输入即可 */
+  }
+})();
+
+/*
  * ───────────────────────────────────────────────────────────────────────────
  * 语言层 / 性格层旋钮（2026-10-22）
  * ───────────────────────────────────────────────────────────────────────────

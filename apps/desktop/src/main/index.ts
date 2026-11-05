@@ -84,6 +84,17 @@ import { brainStatusLabel } from './brainProvider.js';
 // 宠物大小的**档位清单**与像素换算：设置页下拉框、托盘菜单、右键菜单
 // 三处都从这里取，避免出现"三份硬编码清单互相不一致"（改之前就是这样）。
 import { PET_SCALE_PRESETS, petSizeFor } from './petLayout.js';
+// 🔴 探头平移距离：按宠物大小分别取值/存值（2026-11-05 用户要求）
+import {
+  peekOffsetFor,
+  setPeekOffsetFor,
+  scaleKey,
+  clampPeekOffset,
+  clampScale,
+  nearestScalePreset,
+  PEEK_OFFSET_MIN_PX,
+  PEEK_OFFSET_MAX_PX,
+} from './petLayout.js';
 import {
   LOG_MAX_BYTES,
   logFileBytes,
@@ -1294,7 +1305,18 @@ async function main(): Promise<void> {
      */
     process.env.PET_CREDENTIALS_FILE = activeCredentialsPath();
     const stored = readSettings();
-    petWindow.setPeekOffset(stored.peekOffsetPx);
+    /*
+     * 🔴 恢复**四档各自的**探头偏移（2026-11-05）
+     *
+     * ⚠️ 这里**不能**调 `setPeekOffset(stored.peekOffsetPx)` ——
+     *    那个方法会写进"当前档位"的槽位。启动时当前档位可能还没确定
+     *    （`setPetScale` 在下面才调），一旦写错，就把用户 300px 档的
+     *    精调值覆盖成了全局值，而且**没有任何提示**。
+     *
+     * 正确做法：整张表灌进去（`setPeekOffsetsByScale`），
+     * 全局值 `peekOffsetPx` 由 `peekOffsetFor` 在"某档没有值时"兜底。
+     */
+    petWindow.setPeekOffsetsByScale(stored.peekOffsetByScale);
     petWindow.setEdgeSnap(stored.edgeSnapPx);
     // 开关和活泼度也一起恢复 —— 以前只存在内存里，重启就回默认，
     // 用户会以为"设置没生效"。
@@ -3388,22 +3410,83 @@ function registerRendererIpc(): void {
   });
 
   // ---- 边缘探头参数（设置窗口里可调）----
-  ipcMain.handle('settings:peek-offset', () =>
-    petWindow ? petWindow.peekOffset : readSettings().peekOffsetPx,
-  );
-  ipcMain.handle('settings:set-peek-offset', (_event, payload: { value?: unknown }) => {
-    const result = writeSettings({ peekOffsetPx: Number(payload?.value) });
-    petWindow?.setPeekOffset(result.settings.peekOffsetPx);
-    // 回给设置窗口"真正生效的值"（可能被夹到范围内），
-    // 否则滑杆显示的数和实际用的数会不一致
+  /*
+   * 🔴 2026-11-05：改成**按宠物大小分别读/写**（用户要求）
+   *
+   * > 「将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的调整
+   * >   只能调整一部分……只是在宠物的四个大小时都能自动根据参数变化」
+   *
+   * ## 返回的不只是一个数
+   *
+   * 设置页要显示"这一档当前多少"，还要能把四档都列出来让用户逐个调。
+   * 所以返回 `{ current, scale, byScale, scales }`：
+   *
+   *     current  当前档位实际生效的值（滑杆的位置）
+   *     scale    当前是哪一档（用户可能刚换了大小）
+   *     byScale  四档各自的值（`{ "0.6": 30, ... }`）
+   *     scales   档位清单（给设置页画四个滑杆用）
+   */
+  ipcMain.handle('settings:peek-offset', () => {
+    const st = readSettings();
+    const scale = petWindow ? petWindow.currentPetScale : nearestScalePreset(st.petScale);
+    const byScale: Record<string, number> = {};
+    for (const preset of PET_SCALE_PRESETS) {
+      byScale[scaleKey(preset.scale)] = peekOffsetFor(
+        preset.scale,
+        st.peekOffsetByScale,
+        st.peekOffsetPx,
+      );
+    }
     return {
-      peekOffsetPx: result.settings.peekOffsetPx,
-      path: result.path,
-      // 落盘失败必须让界面知道 —— 否则会变成"看起来保存了、重启却回默认"
-      saved: result.ok,
-      error: result.error,
+      current: peekOffsetFor(scale, st.peekOffsetByScale, st.peekOffsetPx),
+      scale,
+      byScale,
+      scales: PET_SCALE_PRESETS.map((p) => ({ scale: p.scale, label: p.label })),
+      min: PEEK_OFFSET_MIN_PX,
+      max: PEEK_OFFSET_MAX_PX,
     };
   });
+  /*
+   * 写值。`scale` 不传 = 改**当前**宠物大小那一档。
+   *
+   * ⚠️ 只改目标那一档，其余保留 —— 用户调 150px 时 300px 的值必须留着
+   *    （合并逻辑在 `setPeekOffsetFor`）。
+   */
+  ipcMain.handle(
+    'settings:set-peek-offset',
+    (_event, payload: { value?: unknown; scale?: unknown }) => {
+      const current = readSettings();
+      // 目标档位：显式给的，或者当前宠物大小
+      const targetScale = Number.isFinite(Number(payload?.scale))
+        ? clampScale(Number(payload?.scale))
+        : petWindow
+          ? petWindow.currentPetScale
+          : nearestScalePreset(current.petScale);
+      const merged = setPeekOffsetFor(
+        current.peekOffsetByScale,
+        targetScale,
+        clampPeekOffset(payload?.value),
+      );
+      const result = writeSettings({ peekOffsetByScale: merged });
+      // 让运行时立刻用上新值（不重启）
+      petWindow?.setPeekOffsetsByScale(result.settings.peekOffsetByScale);
+      // 回给设置窗口"真正生效的值"（可能被夹到范围内），
+      // 否则滑杆显示的数和实际用的数会不一致
+      return {
+        peekOffsetPx: peekOffsetFor(
+          targetScale,
+          result.settings.peekOffsetByScale,
+          result.settings.peekOffsetPx,
+        ),
+        scale: targetScale,
+        byScale: result.settings.peekOffsetByScale,
+        path: result.path,
+        // 落盘失败必须让界面知道 —— 否则会变成"看起来保存了、重启却回默认"
+        saved: result.ok,
+        error: result.error,
+      };
+    },
+  );
 
   // ---- 语言层 / 性格层旋钮（2026-10-22）----
   //
