@@ -1174,6 +1174,47 @@ async function main(): Promise<void> {
   startupNote('app.whenReady() 已就绪');
   // 打包后：可写目录 + 默认配置复制（开发态只建目录，什么都不复制）
   ensureRuntimeDirs();
+
+  /*
+   * 🔴 从 persona.yaml 恢复活泼度 / 档位（2026-11-05 用户报的 bug）
+   *
+   * 用户原话：「现在活泼度不会自动记住，重启之后会自动变成无聊」。
+   *
+   * ## 根因
+   *
+   * `let activity = 0.5` 是个**硬编码初值**，而启动流程里**从来没有
+   * 读过 `activity.overall`** —— 只有 `setActivity()` 会写它。
+   *
+   * 于是重启后：
+   *
+   *     主进程   activity = 0.5        （硬编码）
+   *     sidecar  从 persona.yaml 读 0.1 （文件里是真的）
+   *
+   * 两边不一致。用户上次选的是「安静」(0.1)，重启后主进程拿着 0.5
+   * 往界面/托盘推，看起来就是"变成无聊了"（0.5 最近档是无聊）。
+   *
+   * ## 为什么放在 `ensureRuntimeDirs()` 之后
+   *
+   * 那个函数负责把默认配置复制到可写目录（打包后 `CONFIG_ROOT` 是
+   * `userData`，文件可能还不存在）。早读会读到一个空配置。
+   *
+   * ⚠️ `persist: false` —— 这是"把文件值读进内存"，不是用户改的，
+   *    不能再写回文件（否则每次启动都白写一次）。
+   */
+  {
+    // ⚠️ 不给第三参数（fallback）：那个位置的类型是 `boolean | undefined`
+    //    （为 `readDeepScalar(CONFIG_ROOT, [...], true)` 那种布尔开关设计的）。
+    //    这里要的是数字，拿返回值自己判 `Number.isFinite` 就行。
+    const rawOverall = readDeepScalar(CONFIG_ROOT, ['activity', 'overall']);
+    const savedOverall = Number(rawOverall);
+    if (rawOverall !== undefined && rawOverall !== null && Number.isFinite(savedOverall)) {
+      setActivity(savedOverall, { persist: false });
+      startupNote(`活泼度：从 persona.yaml 恢复为 ${savedOverall}`);
+    } else {
+      startupNote('活泼度：persona.yaml 里没有 activity.overall，用默认值');
+    }
+  }
+
   // 离线版的模型复制放后台，别让 1.5GB 挡住启动
   void ensureBundledModels();
 
@@ -7851,6 +7892,29 @@ function setPausedInternal(value: boolean, minutes: number): void {
   // 不停生成并推送" —— 既费 token，也让"免打扰"名不副实。
   // 现在它落成 autonomy.muted 配置项，调度器直接不再开口。
   send({ type: 'config.update', patch: { autonomy: { muted: value } } });
+
+  /*
+   * 🔴 免打扰要**落盘**（2026-11-05 用户报的 bug：「免打扰也不会好像」）
+   *
+   * ## 根因
+   *
+   * 上面那条 `config.update` 只改 sidecar **内存里**的配置
+   * （`apply_patch` 不写文件）。所以：
+   *
+   *     打开免打扰 -> 内存 true  -> 重启 -> 文件里还是 false -> 失效
+   *
+   * 而 `persona.yaml` 里 `autonomy.muted` 那行的注释写着
+   * 「托盘与界面按钮会改它，**重启后保留**」—— 说明设计意图是要持久化的，
+   * 只是实现漏了这一步。
+   *
+   * ## 为什么用 writeDeepScalar 而不是 writeScalar
+   *
+   * `muted` 在 `autonomy:` 段里（不是顶层），要走能按路径下钻的那个。
+   */
+  const saved = writeDeepScalar(CONFIG_ROOT, ['autonomy', 'muted'], value);
+  if (!saved.ok) {
+    log(`免打扰：写盘失败（${saved.message}），本次仅内存生效`);
+  }
 
   petWindow?.sendToRenderer('pet:paused', { paused: value, minutes });
 }

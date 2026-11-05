@@ -6554,6 +6554,65 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
     /this\.playbackGain = null/.test(vioSrc));
 }
 
+/*
+ * ---- 活泼度 / 免打扰必须**跨重启记住**（2026-11-05 用户报的两个 bug）----
+ *
+ * 用户原话：
+ *
+ * > 「现在活泼度不会自动记住，重启之后会自动变成无聊」
+ * > 「免打扰也不会好像，你看看」
+ *
+ * ## 两个 bug 是同一个形态：写内存不写文件
+ *
+ * ```
+ * 活泼度   启动时 `let activity = 0.5` 硬编码，从不读 persona.yaml
+ *          -> 重启后主进程 0.5、sidecar 读文件 0.1，两边不一致
+ * 免打扰   只发 config.update 给 sidecar（改内存），从不写文件
+ *          -> 重启后文件里还是 false，失效
+ * ```
+ *
+ * ## 为什么用"读源码"而不是跑起来测
+ *
+ * 这类 bug 的行为差异只在**重启**时才显现，单元测试跑一次启动是看不到的。
+ * 而它本质是"某一行写没写"的问题 —— 直接钉源码最可靠，也最快。
+ *
+ * ⚠️ 断言写得具体到函数名/字段名：将来有人重构掉这段，测试会红，
+ *    那时他必须确认"持久化还在"，而不是不小心删掉。
+ */
+{
+  const src = readFileSync(path.join(here, '..', 'src', 'main', 'index.ts'), 'utf-8');
+
+  check(
+    '活泼度：启动时从 persona.yaml 读回 activity.overall',
+    /readDeepScalar\(CONFIG_ROOT,\s*\['activity',\s*'overall'\]\)/.test(src),
+    '不读的话重启后主进程拿硬编码 0.5，和 sidecar 读到的文件值不一致',
+  );
+
+  check(
+    '活泼度：启动恢复用 persist:false（不回写文件）',
+    /setActivity\(savedOverall,\s*\{\s*persist:\s*false\s*\}\)/.test(src),
+    '启动时回写会让每次开机都白写一次文件',
+  );
+
+  check(
+    '活泼度：手动切换会落盘',
+    /writeScalar\(CONFIG_ROOT,\s*'activity',\s*'overall',\s*clamped\)/.test(src),
+    'setActivity 内部写文件 —— 手动切档与自动回落都靠它',
+  );
+
+  check(
+    '免打扰：切换时写进 persona.yaml 的 autonomy.muted',
+    /writeDeepScalar\(CONFIG_ROOT,\s*\['autonomy',\s*'muted'\],\s*value\)/.test(src),
+    '只发 config.update 只改内存，重启就丢',
+  );
+
+  check(
+    '免打扰：启动时以 sidecar 回报的 autonomy.muted 为准',
+    /message\.autonomy\.muted !== paused/.test(src),
+    'sidecar 读文件后回报，主进程据此同步 —— 三处不能各存一份',
+  );
+}
+
 /* ------------------------------------------------------------------ 收尾 */
 
 console.log('');
