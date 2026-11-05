@@ -10772,6 +10772,177 @@ def test_reading(suite: "Suite") -> None:
 
         return "主观层照常 tick；状态规则被跳过；tick 在跳过之前"
 
+    @suite.check("知识归档：同一本书累加版本，按章号能定位到对应那版")
+    def _() -> str:
+        """用户 2026-11-05 的两个要求。
+
+        > 「后续如果搜索联网数据有更新也可以在里面更新，不断添加，
+        >   这样怎么做数据结构好呢」
+        > 「主要是让宠物想找某一个事件的时候要有自己搜索寻找到的功能，
+        >   不用用户说继续下去才一级一级找到相关信息」
+
+        ## 这条守住三件**改了看不出错**的事
+
+        ① 同一本书读两次 = **1 个实体 2 个版本**（不是 2 个孤立记录）
+        ② 按章号能落到**覆盖那一章**的版本（不是永远给最新）
+        ③ 文件真的落盘了
+
+        ## 为什么 ② 特别重要
+
+        用户问「取两次读取的中间章节回看会怎么样」。如果只保留最新版，
+        问第 2 章时会拿到"第 4~10 章"那版 —— 答非所问，而且**看起来像对的**
+        （有内容、有条理，只是章节对不上）。这种错误最难被发现。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .knowledge import KnowledgeStore, normalize_key
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-know-"))
+        try:
+            store = KnowledgeStore(tmp / "pet-knowledge")
+
+            # ① 同一本书读两批
+            key = normalize_key("测试书")
+            store.upsert(
+                key=key, title="测试书", category="reading",
+                scope="第 1~3 章", chapter_from=1, chapter_to=3,
+                analysis="前情：主角在找人。", thoughts="我猜是同事干的。",
+                body="章节内容" * 400, tags=["悬疑"],
+            )
+            store.upsert(
+                key=key, title="测试书", category="reading",
+                scope="第 4~10 章", chapter_from=4, chapter_to=10,
+                analysis="线索指向另一个人。", thoughts="我猜错了。",
+                body="后续内容" * 400, tags=["悬疑"],
+            )
+
+            st = store.stats()
+            _assert(
+                st["entities"] == 1,
+                f"同一本书应当是 1 个实体，实际 {st['entities']}（说明 key 没归一化）",
+            )
+            _assert(
+                st["revisions"] == 2,
+                f"两次读应当累加成 2 版，实际 {st['revisions']}",
+            )
+
+            # ② 按章号定位
+            r2 = store.revision_at(key, 2)
+            r7 = store.revision_at(key, 7)
+            _assert(
+                r2 is not None and r2.n == 1,
+                f"第 2 章应当落到第 1 版，实际 {r2.n if r2 else 'None'}",
+            )
+            _assert(
+                r7 is not None and r7.n == 2,
+                f"第 7 章应当落到第 2 版，实际 {r7.n if r7 else 'None'}",
+            )
+            # 越界章号退回最新版（至少给个参考，不是 None）
+            r99 = store.revision_at(key, 99)
+            _assert(
+                r99 is not None and r99.n == 2,
+                "超出范围的章号应当退回最新版，而不是返回 None",
+            )
+
+            # ③ 能按关键词搜到
+            hits = store.recall("猜错")
+            _assert(hits, "搜「猜错」应当能找到（它在第 2 版的想法里）")
+            _assert(hits[0]["versions"] == 2, "搜索结果该告诉我们它有几版")
+
+            # ④ 轨迹能看出想法变化（这才是"留版本"的意义）
+            tl = store.timeline(key)
+            _assert(len(tl) == 2, f"轨迹应当有 2 条，实际 {len(tl)}")
+            _assert(
+                tl[0]["thoughts"] != tl[1]["thoughts"],
+                "两版的想法必须不同 —— 否则看不出变化，留版本就白留了",
+            )
+
+            # ⑤ 文件真的落盘了（用户要"放项目下的文件夹"）
+            files = list((tmp / "pet-knowledge").rglob("v*.md"))
+            _assert(len(files) == 2, f"应当写出 2 个 md，实际 {len(files)}")
+            text = files[0].read_text(encoding="utf-8")
+            _assert("## 我的分析" in text, "md 里该有分析段")
+            _assert("## 我的想法" in text, "md 里该有想法段")
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "1 实体 2 版本；按章号定位到对应版；能搜；轨迹看得到想法变化"
+
+    @suite.check("知识检索：宠物有自己翻档案的工具（不用用户一级级引导）")
+    def _() -> str:
+        """用户 2026-11-05：
+
+        > 「主要是让宠物想找某一个事件的时候要有自己搜索寻找到的功能，
+        >   不用用户说继续下去才一级一级找到相关信息」
+
+        ## 三个工具的分工
+
+            search_knowledge  不知道在哪 -> 按关键词找
+            recall_knowledge  知道是哪本 -> 看完整轨迹
+            read_knowledge    要细节     -> 读全文
+
+        ⚠️ 这条守的是"工具真的挂上去了"。
+           `_tool_list()` 里任何一个 AttributeError 都会被外层 except 吞掉，
+           表现是**所有工具一起消失** —— 这个项目踩过好几次。
+        """
+        import asyncio
+        import tempfile
+        from pathlib import Path as _P
+
+        from . import knowledge as _km
+        from .config import Config
+        from .gateway import Gateway
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-ktools-"))
+        try:
+            import os as _os
+
+            old = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                cfg = Config()
+                cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
+                gw = Gateway(cfg)
+            finally:
+                if old is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old
+
+            # 换到临时库，避免污染项目里的 pet-knowledge/
+            gw.knowledge = _km.KnowledgeStore(tmp / "pet-knowledge")
+            gw.conversation.knowledge = gw.knowledge
+            gw.conversation._tools = None
+
+            tools = {t.name: t for t in gw.conversation._tool_list()}
+            for name in ("search_knowledge", "recall_knowledge", "read_knowledge"):
+                _assert(name in tools, f"缺少工具 {name}（工具表：{sorted(tools)}）")
+
+            # 空档案时给的是**可操作的提示**，不是空白
+            text = asyncio.run(tools["search_knowledge"].handler({"query": "随便"}))
+            _assert(
+                "空" in text or "还没有" in text,
+                f"空档案该明说，实际：{text[:60]!r}",
+            )
+
+            # 加一条，再搜得到
+            gw.knowledge.upsert(
+                key="测试条目", title="测试条目", category="search",
+                analysis="这是测试用的分析。", thoughts="这是测试用的想法。",
+                body="正文" * 100,
+            )
+            text2 = asyncio.run(tools["search_knowledge"].handler({"query": "测试"}))
+            _assert("测试条目" in text2, f"应当搜到，实际：{text2[:80]!r}")
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "三个工具都挂上了；空档案给提示；有内容能搜到"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(
@@ -10786,11 +10957,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 建新的临时库之前，先收掉上次崩溃留下的（见 `_sweep_stale_memory_tmp`）
     _sweep_stale_memory_tmp()
     tmp_mem = _isolate_memory_writes()
+    # 📚 知识归档也要隔离（2026-11-05 加）。
+    #
+    # ⚠️ 理由和记忆库那条**完全一样**：自检里十几处 `Gateway(cfg)`，
+    #    每个都建 `KnowledgeStore`。不隔离就会往用户真实的
+    #    `F:\ai\pet-knowledge` 里写 `reading/测试书/v1-*.md`。
+    #
+    # 用环境变量而不是 monkey-patch（见 `_isolate_knowledge_writes` 的说明）。
+    tmp_know = _isolate_knowledge_writes()
     suite = run_selftest(_default_config_candidate())
     print_report(suite)
     # 临时库留在盘上没意义（而且会越积越多），测完删掉
     try:
         shutil.rmtree(tmp_mem, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        shutil.rmtree(tmp_know, ignore_errors=True)
     except Exception:  # noqa: BLE001
         pass
     # ⚠️ 同理清掉 `.tmp-test/` 里本次建的目录（2026-10-09 加）。
@@ -10872,6 +11055,33 @@ def _isolate_memory_writes() -> Path:
 
     MemoryService._resolve_db_path = safe_resolve  # type: ignore[method-assign]
     MemoryService._selftest_original_resolve = original  # type: ignore[attr-defined]
+    return tmp_dir
+
+
+def _isolate_knowledge_writes() -> Path:
+    """**让自检期间的知识归档也落到临时目录**（2026-11-05 加）。
+
+    ## 为什么需要
+
+    和 `_isolate_memory_writes` 是同一个问题：自检里十几处 `Gateway(cfg)`，
+    每个都建一个 `KnowledgeStore`。不管的话它们全指向**真实的**
+    `F:\\ai\\pet-knowledge` —— 跑一次自检就在用户项目里留下一堆
+    `reading/测试书/v1-*.md`。
+
+    ## 为什么用环境变量而不是替换函数
+
+    记忆库那边替换的是 `MemoryService._resolve_db_path`，因为它的路径
+    解析逻辑复杂（要看配置里的 `path: auto`）。而知识库的路径只有
+    "环境变量 / 项目根"两个来源（见 `knowledge.knowledge_dir`），
+    一个环境变量就够了，不需要 monkey-patch。
+
+    ⚠️ 用 `os.environ[...] =` 而不是 `setdefault`：自检进程里必须
+       以我们为准，不能因为外部恰好设了同一个变量就跳过隔离。
+    """
+    import os
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pet-selftest-know-"))
+    os.environ["PET_KNOWLEDGE_DIR"] = str(tmp_dir / "pet-knowledge")
     return tmp_dir
 
 

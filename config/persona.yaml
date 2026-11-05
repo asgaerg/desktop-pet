@@ -458,7 +458,7 @@ modules:
 autonomy:
   enabled: true                # false = 关掉自动找机会说话（手动戳它仍会回应）
   tick_s: 5                    # 多久评估一次意愿
-  muted: false                 # 用户免打扰。托盘与界面按钮会改它，重启后保留
+  muted: true                 # 用户免打扰。托盘与界面按钮会改它，重启后保留
 
   # 开口阈值：意愿分超过它才说话。数值越大越不容易开口。
   speak_threshold: 0.55

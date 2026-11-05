@@ -55,6 +55,10 @@ from . import media as media_mod
 from . import media_vision
 from . import sticker as sticker_mod
 from . import sticker_fetch
+# 📚 知识归档（2026-11-05 用户要求做成模块）
+from . import knowledge as knowledge_mod
+from . import knowledge_tools
+from . import knowledge_analysis
 # ⚠️ `_clip_at_sentence` 2026-11-02 挪到 `reading.py` 了 —— 回看功能也要用它，
 #    而 reading.py 不能 import gateway（循环依赖）。这里显式导入，原调用点不变。
 from .reading import _clip_at_sentence
@@ -1697,6 +1701,25 @@ class Conversation:
                         )
                     except Exception:  # noqa: BLE001
                         log.warning("阅读工具挂载失败（已忽略）", exc_info=True)
+                # 📚 知识检索工具（2026-11-05 用户要求）
+                #
+                # 「让宠物想找某一个事件的时候要有自己搜索寻找到的功能，
+                #   不用用户说继续下去才一级一级找到相关信息」
+                #
+                # ⚠️ **不受联网开关影响**：这些工具只读本地档案
+                #    （`pet-knowledge/index.json` + 文件），不发任何网络请求。
+                #    关掉联网时它仍然该能回忆 —— 那正是"自己的记忆"。
+                #
+                # ⚠️ 用 `getattr` 取 `knowledge`：那是 **Gateway** 注入进来的
+                #    属性（见 `attach()` 附近），本类是 Conversation。
+                #    写死 `self._knowledge` 会 AttributeError 并被外层
+                #    except 吞掉 —— 表现是**所有工具一起消失**（踩过好几次）。
+                _kstore = getattr(self, "knowledge", None)
+                if _kstore is not None:
+                    try:
+                        self._tools.extend(knowledge_tools.build_tools(_kstore))
+                    except Exception:  # noqa: BLE001
+                        log.warning("知识检索工具挂载失败（已忽略）", exc_info=True)
                 log.info(
                     "已启用 %d 个工具：%s",
                     len(self._tools),
@@ -2801,6 +2824,25 @@ class Gateway:
         #    而"什么时候该发"的时机在 Conversation 的 `_generate` 收尾处。
         #    直接互相持有会循环依赖（这个项目已经为此栽过好几次）。
         self.conversation._sticker_sender = self._maybe_send_sticker
+
+        # 📚 知识归档（2026-11-05 用户要求）
+        #
+        # 「将看小说和小黑盒杂谈等联网搜索到的信息通通放在项目下的一个文件夹中」
+        # 「后续如果搜索联网数据有更新也可以在里面更新，不断添加」
+        #
+        # ⚠️ 注入到 `conversation.knowledge`（**不是** `self.knowledge`）：
+        #    `_tool_list()` 在 Conversation 上，它要能拿到这个 store。
+        #    这个项目第 7 次踩「状态在谁身上」的坑了。
+        self.knowledge = knowledge_mod.KnowledgeStore()
+        self.conversation.knowledge = self.knowledge
+        try:
+            _ks = self.knowledge.stats()
+            log.info(
+                "知识归档就绪：%d 个实体 / %d 个版本（%s）",
+                _ks["entities"], _ks["revisions"], _ks["root"],
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("知识归档统计失败（已忽略）", exc_info=True)
         # 工具读完后的回调也一起注入 —— `_tool_list` 在 Conversation 上，
         # 它拿不到 Gateway 的方法，只能靠这里把函数对象递过去。
         self.conversation._reading_on_read = self._reading_note_from_tool
@@ -5330,6 +5372,84 @@ class Gateway:
     # 现在改成事件：由 `EventEngine.pick()` 按权重抽，抽中才跑，
     # 跑的时候占槽（`duration_s`），槽里别的事件抽不到。
 
+    async def _archive_reading(self, chunk: Any) -> None:
+        """把读完的书归档进知识库（2026-11-05 用户要求）。
+
+        ## 用户原话
+
+        > 「宠物搜索完之后会对信息进行分析、总结、发散思维，这些都记在里面，
+        >   比如小说读后的感觉等等」
+
+        ## 三步
+
+            ① 判断值不值得（短的不折腾，省一次模型调用）
+            ② 让模型读一遍 -> (分析, 想法)
+            ③ 存进知识库（同一个书名会累加成新版本，不覆盖）
+
+        ## ⚠️ 章节区间要带进去
+
+        `Revision` 记了 `chapter_from` / `chapter_to`。有了它，
+        用户问「第 7 章那次我怎么想的」时才能落到**对应那版**，
+        而不是永远给最新的（详见 `KnowledgeStore.revision_at`）。
+        """
+        store = getattr(self, "knowledge", None)
+        if store is None:
+            return
+        if not self.modules.enabled("knowledge"):
+            log.debug("知识归档：模块关着，跳过")
+            return
+
+        text = str(getattr(chunk, "text", "") or "")
+        title = str(getattr(chunk, "title", "") or "").strip()
+        if not title:
+            return
+        if not knowledge_analysis.should_analyze(text):
+            log.debug(
+                "知识归档：《%s》只有 %d 字，不值得单独总结，跳过",
+                title, len(text),
+            )
+            return
+
+        # ② 分析 + 想法
+        analysis, thoughts = await knowledge_analysis.analyze(
+            text,
+            brain=self.conversation.brain,
+            title=title,
+            kind="书" if getattr(chunk, "kind", "") == "book" else "内容",
+        )
+
+        # ③ 归档（同一本书累加成新版本）
+        #
+        # ⚠️ 书名归一化当 key：这样「天官赐邪」和「天官赐邪 」是同一本
+        key = knowledge_mod.normalize_key(title)
+        # 章节区间：`reading.py` 把本次读的第几章放在 extra 里（有就带）
+        cf, ct = 0, 0
+        try:
+            extra = getattr(chunk, "extra", None) or {}
+            cf = int(extra.get("chapter_from") or 0)
+            ct = int(extra.get("chapter_to") or 0)
+        except (TypeError, ValueError):
+            cf, ct = 0, 0
+        scope = f"第 {cf}~{ct} 章" if cf and ct else ""
+
+        rev = store.upsert(
+            key=key,
+            title=title,
+            category="reading" if getattr(chunk, "kind", "") == "book" else "other",
+            source=str(getattr(chunk, "source", "") or ""),
+            analysis=analysis,
+            thoughts=thoughts,
+            body=text,
+            scope=scope,
+            chapter_from=cf,
+            chapter_to=ct,
+        )
+        if rev is not None:
+            log.info(
+                "知识归档：《%s》第 %d 版（%s）",
+                title, rev.n, scope or "全文",
+            )
+
     async def _event_read_novel(self, ctx: dict[str, Any]) -> Optional[str]:
         """事件「去网上看自己喜欢的小说」—— 让模型自己决定读什么。
 
@@ -5370,6 +5490,18 @@ class Gateway:
         #    read_book  -> 用户在对话里让它读的（`_reading_from_dialog`）
         #    idle       -> 它自己闲着找的
         self._remember_reading(chunk)
+        # 📚 归档到知识库（2026-11-05 用户要求）
+        #
+        # 「宠物搜索完之后会对信息进行分析、总结、发散思维，这些都记在里面，
+        #   比如小说读后的感觉等等」
+        #
+        # ⚠️ 放在 `_remember_reading` **之后**：记忆那条是轻量的（几百字），
+        #    保证即使归档失败，"读过什么"也留了下来。归档要做一次模型调用，
+        #    慢且可能失败 —— 不能让它挡住记忆。
+        try:
+            await self._archive_reading(chunk)
+        except Exception:  # noqa: BLE001 —— 归档失败不该影响读
+            log.warning("阅读归档失败（已忽略）", exc_info=True)
         return f"它自己读了《{chunk.title}》（{chunk.chars} 字）"
 
     async def _event_read_community(self, ctx: dict[str, Any]) -> Optional[str]:

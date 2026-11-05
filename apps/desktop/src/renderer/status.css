@@ -252,6 +252,26 @@ body {
   animation: pulse 1.1s ease-in-out infinite;
 }
 
+/*
+ * 💤 休息中（2026-11-05 用户要求）。
+ *
+ * 用户原话：「免打扰时将状态栏的绿灯改成灰色的颜色，文字改成休息中」。
+ *
+ * ## 为什么是灰色而不是别的颜色
+ *
+ * 绿色 `idle` 的意思是"在线、在听"。免打扰它**也在线**，只是主动不打扰 ——
+ * 灰在这个界面里的语义正好是"在、但不活跃"，也和"熄灯/休息"的直觉一致。
+ *
+ * ⚠️ 刻意**不加呼吸动画**：`searching` / `reading` 那种脉冲是"在忙"，
+ *    休息恰好相反。动起来会让用户以为它在干活。
+ */
+.light[data-state='resting'] {
+  background: #8b8b8b;
+  box-shadow:
+    0 0 3px 1px rgba(139, 139, 139, 0.75),
+    0 0 9px 3px rgba(139, 139, 139, 0.35);
+}
+
 .light[data-state='error'] {
   background: #e5484d;
   box-shadow:

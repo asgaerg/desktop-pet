@@ -1440,6 +1440,16 @@ async function main(): Promise<void> {
     startupNote('免打扰：启动时即收起对话框');
   }
   /*
+   * 状态条也立刻显示「休息中」灰灯（2026-11-05 用户要求）。
+   *
+   * ⚠️ 状态条窗口是后面才创建的，所以这里设的会被创建时那次
+   *    `setStatus` 覆盖 —— 创建之后还有一处（`statusVisible` 初始化附近）
+   *    会再压一次。两处都要，因为"创建前"和"创建后"是两个时机。
+   */
+  if (paused) {
+    statusWindow?.setStatus('resting', '休息中');
+  }
+  /*
    * 文字弹窗：**独立窗口**，浮在宠物头顶上方。
    *
    * 用户要求「可以加高宠物窗口」给气泡腾空间，但实测加高**不增加头顶以上的
@@ -8040,7 +8050,9 @@ function setPausedInternal(value: boolean, minutes: number): void {
     chatHiddenByMute = chatWindow?.isVisible() ?? false;
     if (chatHiddenByMute) chatWindow?.setUserHidden(true);
     setVoiceCaptureForMute(false);
-    log('免打扰：已收起对话框、关闭语音');
+    // 状态栏切成「休息中」灰灯（2026-11-05 用户要求）
+    statusWindow?.setStatus('resting', '休息中');
+    log('免打扰：已收起对话框、关闭语音、状态栏显示休息中');
   } else if (!value && pausedBefore) {
     // 出免打扰：只在"是我们藏起来的"时候才恢复
     if (chatHiddenByMute) {
@@ -8048,7 +8060,15 @@ function setPausedInternal(value: boolean, minutes: number): void {
       chatHiddenByMute = false;
     }
     setVoiceCaptureForMute(true);
-    log('免打扰：已恢复对话框与语音');
+    /*
+     * ⚠️ 用 `setStatus(statusText)` 恢复，而不是直接 `setStatus('在线')`。
+     *
+     * `statusText` 是免打扰期间一直在维护的**真实**状态（被 `setStatus`
+     * 的第一行更新，只是显示被压住了）。直接写死"在线"会把
+     * "其实它正在思考/看书"这个事实抹掉。
+     */
+    setStatus(statusText);
+    log('免打扰：已恢复对话框、语音与状态栏');
   }
 
   petWindow?.sendToRenderer('pet:paused', { paused: value, minutes });
@@ -8440,6 +8460,25 @@ Menu.setApplicationMenu(null);
 function setStatus(text: string): void {
   statusText = text;
   tray?.setStatus(text);
+  /*
+   * 🔴 免打扰时状态栏一律显示「休息中」灰灯（2026-11-05 用户要求）
+   *
+   * 用户原话：「免打扰时将状态栏的绿灯改成灰色的颜色，文字改成休息中」。
+   *
+   * ## 为什么拦在这一层
+   *
+   * `setStatus()` 是**所有**状态文本的唯一出口（托盘、状态条都从这儿走）。
+   * 各处调用点（回合相位、语音、工具、记忆刷新…）十几个，逐个加判断
+   * 必然漏 —— 而这个项目在"多处各写一份条件"上栽过好几次。
+   *
+   * ⚠️ 仍然记下 `statusText = text`：那是**真实**状态，
+   *    退出免打扰后要能立刻恢复成它（见 `setPausedInternal`）。
+   *    只是**显示**上被免打扰压住了。
+   */
+  if (paused) {
+    statusWindow?.setStatus('resting', '休息中');
+    return;
+  }
   const { kind, label } = statusKindFor(text);
   statusWindow?.setStatus(kind, label);
 }
