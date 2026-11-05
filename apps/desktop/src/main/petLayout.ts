@@ -1054,6 +1054,38 @@ export const PEEK_RIGHT_EXTRA_RATIO = 0.176;
  * 见那里的说明。
  */
 export const PEEK_OFFSET_DEFAULT_PX = 68;
+
+/**
+ * 🔴 四个宠物大小的**默认**探头偏移（2026-11-05 用户给定）。
+ *
+ * ## 用户原话
+ *
+ * > 「我分啊，从小到大分别是38、56、64、73」
+ *
+ * 对应四个档位：
+ *
+ *     150px (0.6)  ->  38
+ *     220px (0.88) ->  56
+ *     250px (1.0)  ->  64
+ *     300px (1.2)  ->  73
+ *
+ * ## 为什么不是四档都 68
+ *
+ * 立绘差一倍（150 vs 300），而探头要让开的留白跟尺寸成正比。
+ * 同一个值在 150px 上会显得"探过头"、在 300px 上显得"没探出去"。
+ *
+ * 这组数**不是按比例算的**（38×2=76≠73），是用户自己试出来的观感值 ——
+ * 所以照抄，不要"顺手优化成等比数列"。
+ *
+ * ⚠️ 只在**用户没调过**时用（见 `peekOffsetFor` 的兜底逻辑）。
+ *    用户调过就完全以他的为准。
+ */
+export const PEEK_OFFSET_DEFAULTS_BY_SCALE: Readonly<Record<string, number>> = Object.freeze({
+  '0.6': 38,
+  '0.88': 56,
+  '1': 64,
+  '1.2': 73,
+});
 /**
  * 可调范围（像素）。
  *
@@ -1097,19 +1129,23 @@ export function clampPeekOffset(value: unknown): number {
  *
  * 这就是他说的"只能调整一部分"。
  *
- * ## 取值优先级
+ * ## 取值优先级（🔴 2026-11-05 加了第 ② 层）
  *
  * ```
- * ① 该档位明确存了的        -> 用它（用户精调过）
- * ② 没存过                 -> 退回 `basePx`（全局值，老配置只有它）
+ * ① 该档位明确存了的          -> 用它（用户精调过）
+ * ② 没存过 -> 这档有默认值吗  -> 用 `PEEK_OFFSET_DEFAULTS_BY_SCALE`
+ * ③ 都没有                   -> 退回 `basePx`（全局值）
  * ```
+ *
+ * ⚠️ ② 那层是用户给定的四档观感值（38/56/64/73）。没有它的话，
+ *    新装用户四档全是 68，而 68 只对 250px 档合适 —— 他会立刻觉得
+ *    "150px 时探过头了"，然后以为功能有 bug。
  *
  * ⚠️ **不做"按比例自动推算"**。听起来聪明，但会让用户调 A 档时
  *    B 档也跟着变 —— 而他明确要"四个都能调整"，那意味着
  *    **各管各的**。推算出来的值他既没设过、也预料不到。
  *
- * ⚠️ `basePx` 兜底保证老配置行为不变（那时只有 `peekOffsetPx`）：
- *    四个档位全用它，和改动前一模一样。
+ * ⚠️ ③ 保证老配置行为不变（那时只有 `peekOffsetPx`）。
  *
  * @param scale  当前宠物大小档位（0.6 / 0.88 / 1 / 1.2）
  * @param byScale 按档位存的值（键是 scale 的字符串形式）
@@ -1120,13 +1156,18 @@ export function peekOffsetFor(
   byScale: Record<string, number> | undefined | null,
   basePx: number,
 ): number {
-  const base = clampPeekOffset(basePx);
-  if (!byScale || typeof byScale !== 'object') return base;
   // 用**同一个**归一化函数生成键，避免 0.6 / 0.60 / 1 / 1.0 对不上
   const key = scaleKey(scale);
-  const raw = byScale[key];
-  if (raw === undefined || raw === null) return base;
-  return clampPeekOffset(raw);
+  // ① 用户调过的
+  if (byScale && typeof byScale === 'object') {
+    const raw = byScale[key];
+    if (raw !== undefined && raw !== null) return clampPeekOffset(raw);
+  }
+  // ② 这档的出厂默认
+  const preset = PEEK_OFFSET_DEFAULTS_BY_SCALE[key];
+  if (preset !== undefined) return clampPeekOffset(preset);
+  // ③ 全局兜底
+  return clampPeekOffset(basePx);
 }
 
 /**

@@ -2427,27 +2427,88 @@ export class PetWindow {
     if (!window || window.isDestroyed()) return;
 
     const clamped = clampScale(scale);
+    const changed = Math.abs(clamped - this.petScale) > 1e-6;
     this.petScale = clamped;
     this.applyLayout(`大小 ${clamped.toFixed(2)}x`);
 
     /*
      * 🔴 正在探头时换大小 -> **必须重排探头**（2026-11-05）
      *
-     * 用户要求「四个大小时都能自动根据参数变化」。原来这里只调
-     * `applyLayout`（常态布局），探头状态下换大小就会：
+     * 用户要求「四个大小时都能自动根据参数变化」。
      *
-     *     ① 平移到旧档位的距离（`peekOffsetFor` 按新档位取值，但没被调用）
-     *     ② 立绘尺寸变了，而"贴边让开的留白"没重算 —— 看着像没贴到边
+     * ## ⚠️ 立刻调一次不够 —— 这是"要重启才生效"的真正原因
      *
-     * 所以换完大小要立刻按**新档位**重排一次探头。
+     * `repositionEdgePeek()` 依赖 `this.uprightArtRect`，而那是
+     * **渲染层异步上报**的（见 `art-rect` 那个 handler）：
      *
-     * ⚠️ 放在 `applyLayout` 之后：`applyLayout` 会改窗口尺寸，
-     *    而 `repositionEdgePeek` 依赖实测立绘矩形，顺序反了会算错。
+     *     setPetScale()           改 petScale、applyLayout()
+     *       └── repositionEdgePeek()   <- 此时 uprightArtRect 还是**旧尺寸**
+     *     渲染层重画 + 上报新矩形      <- 几十毫秒之后
+     *
+     * 于是第一次重排算出来的是旧值。用户看到的就是"换完大小探头位置没变，
+     * 得重启才好"。
+     *
+     * ## 修法：等渲染层报上来再重排一次
+     *
+     * 用 `requestAnimationFrame` 不够（那只是等一帧，渲染层可能还没画完）。
+     * 这里用一个短延迟 + **再确认一次尺寸**：如果新矩形到了就用新值重排。
+     *
+     * ⚠️ 不无限等：最长 500ms，超时就用当前值算（至少不会完全不重排）。
+     * ⚠️ 只在自己还是"同一档 + 仍在探头"时才重排 —— 用户可能在这
+     *    500ms 里又换了大小或退出探头，那时这次补算就是多余的。
      */
     if (this.edgePeek) {
       this.repositionEdgePeek();
+      if (changed) {
+        const expected = clamped;
+        this.schedulePeekRepositionAfterResize(expected);
+      }
     }
   }
+
+  /**
+   * 等渲染层报上新的立绘矩形后，再重排一次探头（2026-11-05）。
+   *
+   * 见 `setPetScale` 里那段说明 —— 这是"换大小后探头位置不更新"的修法。
+   */
+  private schedulePeekRepositionAfterResize(expectedScale: number): void {
+    if (this.peekResizeTimer !== null) {
+      clearTimeout(this.peekResizeTimer);
+      this.peekResizeTimer = null;
+    }
+    const startedAt = Date.now();
+    const tick = (): void => {
+      // 用户又换了大小 / 退出探头 -> 这次补算没意义了
+      if (Math.abs(this.petScale - expectedScale) > 1e-6 || !this.edgePeek) {
+        this.peekResizeTimer = null;
+        return;
+      }
+      const settled = this.uprightArtRect !== null && this.artRectMatchesScale();
+      if (settled || Date.now() - startedAt > 500) {
+        this.peekResizeTimer = null;
+        this.repositionEdgePeek();
+        return;
+      }
+      this.peekResizeTimer = setTimeout(tick, 40) as unknown as ReturnType<typeof setTimeout>;
+    };
+    this.peekResizeTimer = setTimeout(tick, 40) as unknown as ReturnType<typeof setTimeout>;
+  }
+
+  /**
+   * 实测到的立绘矩形是否已经符合**当前**档位。
+   *
+   * ⚠️ 用"宽度接近 `artSizeFor(scale)`"判断，不用精确相等 ——
+   *    实测值会因测量时机差几个像素（立绘有描边/留白）。
+   */
+  private artRectMatchesScale(): boolean {
+    const rect = this.uprightArtRect;
+    if (!rect || rect.width <= 0) return false;
+    const want = artSizeFor(this.petScale).width;
+    return Math.abs(rect.width - want) <= Math.max(4, want * 0.06);
+  }
+
+  /** 等立绘矩形稳定后再重排探头的定时器（见 `setPetScale`） */
+  private peekResizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   get currentPetScale(): number {
     return this.petScale;

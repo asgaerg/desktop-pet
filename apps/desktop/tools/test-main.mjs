@@ -6223,14 +6223,26 @@ console.log('\n12. fullscreenWatcher：常驻探测与全屏判据');
     `0.6->${peekOffsetFor(0.6, byScale, 68)} 1->${peekOffsetFor(1, byScale, 68)}`,
   );
   check(
-    '探头偏移：某档没值就退回全局（老配置只有全局值）',
-    peekOffsetFor(0.88, byScale, 68) === 68 && peekOffsetFor(1.2, byScale, 68) === 68,
-    `0.88->${peekOffsetFor(0.88, byScale, 68)} 1.2->${peekOffsetFor(1.2, byScale, 68)}`,
+    // 🔴 2026-11-05 改：没设过的档位先取**分档默认**（38/56/64/73），
+    //    而不是一律退回全局 68 —— 全 68 的话 150px 档会探过头。
+    '探头偏移：某档没设过就用该档默认（38/56/64/73）',
+    peekOffsetFor(0.88, byScale, 68) === 56 && peekOffsetFor(1.2, byScale, 68) === 73,
+    `0.88->${peekOffsetFor(0.88, byScale, 68)}（应 56） 1.2->${peekOffsetFor(1.2, byScale, 68)}（应 73）`,
   );
   check(
-    '探头偏移：整张表缺失时全部退回全局',
-    peekOffsetFor(0.6, undefined, 68) === 68 && peekOffsetFor(0.6, null, 68) === 68,
-    '老配置没有这个字段，必须能正常跑',
+    '探头偏移：整张表缺失时也走分档默认',
+    peekOffsetFor(0.6, undefined, 68) === 38 &&
+      peekOffsetFor(0.88, null, 68) === 56 &&
+      peekOffsetFor(1, null, 68) === 64 &&
+      peekOffsetFor(1.2, null, 68) === 73,
+    `150->${peekOffsetFor(0.6, null, 68)} 220->${peekOffsetFor(0.88, null, 68)} ` +
+      `250->${peekOffsetFor(1, null, 68)} 300->${peekOffsetFor(1.2, null, 68)}`,
+  );
+  check(
+    '探头偏移：非档位 scale 才退回全局兜底',
+    // 0.75 不在四个档位里 -> 没有分档默认 -> 用 basePx
+    peekOffsetFor(0.75, null, 68) === 68,
+    `0.75->${peekOffsetFor(0.75, null, 68)}（应退回 68）`,
   );
 
   // ---- 写回只改一档，其余保留 ----

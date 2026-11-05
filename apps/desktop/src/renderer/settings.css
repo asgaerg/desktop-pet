@@ -493,6 +493,28 @@ input[type='text'].narrow-num {
 }
 
 /*
+ * 警告文字（2026-11-05 用户要求写在下面）。
+ *
+ * ⚠️ 用暖色（不是错误红）：这是"建议重启"，不是"出错了"。
+ *    红色会让用户以为改坏了什么。
+ */
+.peek-scale-warn {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  /* 半透明暖黄底 + 左边一条竖线，不抢眼但看得见 */
+  background: rgba(245, 166, 35, 0.1);
+  border-left: 3px solid rgba(245, 166, 35, 0.8);
+  color: var(--text-dim);
+}
+
+.peek-scale-warn strong {
+  color: var(--text);
+}
+
+/*
  * 记忆列表的按钮不能被压窄。
  *
  * 踩过：搜索行是 `flex`，输入框带 `width: 100%`（来自 `input[type='text']` 那条
