@@ -10128,13 +10128,24 @@ def test_reading(suite: "Suite") -> None:
 
             got3 = s.scan()
             cats = s.categories()
-            for cat in ("猫猫", "无语到极致", "生气"):
+            # ⚠️ 2026-11-06：`生气` 现在**映射到 `angry`**，而不是保留中文名。
+            #
+            # 因为 72 类体系里 `angry` 的标签就是"生气" ——
+            # `_emotion_from_path` 会先做"中文标签 -> key"的反查。
+            #
+            # 而 `猫猫`/`无语到极致` 不在标签表里，所以原样保留成类别名。
+            # 这两类一起断言，才能同时守住"已知标签要归一"和"自定义目录要保留"。
+            for name, expect in (
+                ("猫猫", "猫猫"),
+                ("无语到极致", "无语到极致"),
+                ("生气", "angry"),        # 已知标签 -> 归一成英文 key
+            ):
                 _assert(
-                    cat in cats,
-                    f"用户自建的「{cat}」目录应当成为一个类别，实际 {sorted(cats)}",
+                    expect in cats,
+                    f"「{name}」应当体现为类别「{expect}」，实际 {sorted(cats)}",
                 )
-                hit = [x for x in got3.values() if x.emotion == cat]
-                _assert(hit, f"「{cat}」目录里的图应当归到该类别")
+                hit = [x for x in got3.values() if x.emotion == expect]
+                _assert(hit, f"「{name}」目录里的图应当归到「{expect}」")
             _assert(
                 "空目录占位" in cats,
                 "空目录**也算**类别（2026-11-06 改）—— 否则用户把新图全放进 "
@@ -10341,25 +10352,33 @@ def test_reading(suite: "Suite") -> None:
         > 「可以用图片和用户聊天，比如表情包，代替一些开心、悲伤、无语、
         >   不理你这种简单和常见的状态表情。」
 
-        ## 三个断言
+        ## 断言
 
-        ① 情绪 -> 类别映射（curious/neutral/sleepy **不映射**，硬映射会发错图）
-        ② 概率门 < 1（每句都配图很吵）
-        ③ 长回复不配图
+        ① 情绪 -> 类别映射（72 类体系下能对上更多；`neutral` 仍不映射）
+        ② **意图优先于心情**（「对不起」配道歉图，而不是"悲伤"图）
+        ③ 概率门 < 1（每句都配图很吵）
+        ④ 长回复不配图
         """
         import random as _random
 
         from .sticker import emotion_to_sticker, should_attach
 
         # ① 映射
+        #
+        # 🔴 2026-11-06：72 类体系下能对上更多心情了。
+        #    原来 annoyed 只能退到 ignore、sleepy 干脆没地方去。
+        import random as _random
+
+        rng = _random.Random(7)
         pairs = {
-            "excited": "happy",
+            "excited": "excited",
             "happy": "happy",
-            "annoyed": "ignore",
+            "annoyed": "annoyed",
             "sad": "sad",
-            "curious": "",
+            "sleepy": "sleepy",
+            "curious": "question",
+            # neutral 仍然不映射：「平静」没有对应表情，硬发反而怪
             "neutral": "",
-            "sleepy": "",
         }
         for dom, want in pairs.items():
             got = emotion_to_sticker(dom)
@@ -10367,6 +10386,27 @@ def test_reading(suite: "Suite") -> None:
                 got == want,
                 f"{dom} 应当映射到 {want!r}，实际 {got!r}",
             )
+
+        # ①-b 意图优先于心情（2026-11-06）
+        #
+        # 「对不起我错了」的心情可能是 neutral，但它显然该配道歉图。
+        # 只看心情的话这类意图永远发不出图 —— 那正是细分类的初衷。
+        from .sticker import intent_to_sticker
+
+        for text, want in (
+            ("对不起，是我错了", "sorry"),
+            ("晚安，好梦", "goodnight"),
+            ("分我一点嘛", "ask_money"),
+            ("别难过，会好的", "comfort"),
+        ):
+            got = intent_to_sticker(text)
+            _assert(got == want, f"「{text}」的意图应当是 {want!r}，实际 {got!r}")
+        _assert(
+            should_attach(
+                reply_text="对不起", dominant="neutral", rate=1.0, rng=rng
+            ),
+            "意图命中时，即使心情是 neutral 也该能发图",
+        )
 
         # ② 概率门：rate=0 时永不发，rate=1 且短回复且情绪匹配时必发
         rng = _random.Random(7)
@@ -10379,11 +10419,15 @@ def test_reading(suite: "Suite") -> None:
             should_attach(reply_text="嗯嗯", dominant="happy", rate=1.0, rng=rng),
             "rate=1 + 短回复 + 情绪匹配时必发",
         )
-        # 情绪不匹配时，rate=1 也不发
-        for dom in ("neutral", "curious", "sleepy"):
+        # 既没意图、情绪也映射不到时，rate=1 也不发
+        #
+        # ⚠️ 2026-11-06：`curious` 现在**映射到 `question`** 了
+        #    （72 类里有「疑问」），所以它不再是"发不出"的例子。
+        #    只剩 `neutral` 这一种真正没有对应类别的心情。
+        for dom in ("neutral",):
             _assert(
                 not should_attach(reply_text="嗯", dominant=dom, rate=1.0, rng=rng),
-                f"{dom} 没有对应类别，不该发",
+                f"{dom} 没有对应类别、也没有意图线索，不该发",
             )
 
         # ③ 长回复不配图

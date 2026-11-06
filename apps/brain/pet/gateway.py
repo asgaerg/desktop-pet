@@ -6430,7 +6430,11 @@ class Gateway:
         ):
             return
 
-        item = sticker_mod.pick_for_emotion(self.media, dominant)
+        # 🔴 把回复内容也传进去（2026-11-06）：让它能按**意图**挑图，
+        #    而不是只看心情。说「对不起我错了」时配道歉图，比配"悲伤"图贴切。
+        item = sticker_mod.pick_for_emotion(
+            self.media, dominant, reply_text=reply_text
+        )
         if item is None:
             return
 
