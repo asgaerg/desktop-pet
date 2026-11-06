@@ -570,6 +570,43 @@ function lookupUserInitiated(
 function forwardToBubble(message: { type?: string }): boolean {
   if (!bubbleWindow) return false;
   const type = message.type ?? '';
+  /*
+   * 🖼 表情包也走气泡（2026-11-06 用户要求）
+   *
+   * 用户原话：
+   *
+   * > 「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」
+   *
+   * ## 为什么把它当成一种"气泡消息"
+   *
+   * 气泡窗口已经解决了位置、尺寸、消失时机、点击穿透这一整摊事。
+   * 表情包要显示在**文字旁边**，本质就是"气泡里多一个元素"——
+   * 另起一个窗口反而要重做定位和层级。
+   *
+   * ## ⚠️ 不进 `decideBubble` 的门控
+   *
+   * 那个函数判的是"这段**文字**要不要显示"（沉浸模式、TTS 等）。
+   * 而表情包是**用户明确要的**：文字被隐藏时它仍然该出现
+   * （否则沉浸模式下就永远看不到表情包了）。
+   *
+   * 所以这里**只受"气泡总开关"约束**，不受沉浸模式约束。
+   */
+  if (type === 'pet.sticker') {
+    if (!bubbleVisible) return true;    // 气泡关了就丢弃（但仍算被消费）
+    /*
+     * ⚠️ 走 `sendToBubble` 而不是直接 `send`（2026-11-06）
+     *
+     * 那个函数是"发气泡消息的唯一漏斗"，它负责：
+     *   · 记 `lastBubbleMessage` —— 用户点「显示气泡」时能重放这一条
+     *   · 起"首帧宽限"计时（窗口还没画出来时不算显示时长）
+     *   · 调用 `show()` 把窗口摆出来
+     *
+     * 直接 `send` 会绕过这三样，表现是：表情包发了但窗口不显示、
+     * 或者用户"藏气泡再打开"之后表情包消失了。
+     */
+    sendToBubble(bubbleWindow, message, 'sticker');
+    return true;
+  }
   const kind =
     type === 'pet.thinking'
       ? 'thinking'
@@ -785,6 +822,18 @@ function sendToBubble(
     lingerMs: petWindow?.bubbleLinger ?? readSettings().bubbleLingerMs,
     // 段间距同款套路（2026-10-17）：随消息下发，设置里改完立刻生效
     paraGap: readSettings().bubbleParaGap,
+    /*
+     * 🖼 表情包数据（2026-11-06）。
+     *
+     * `pet.sticker` 带 `data`（base64）+ `mime` + `caption`，
+     * 这里原样带上 —— 气泡窗口用它拼 `data:` URL 显示。
+     *
+     * ⚠️ 只有 `kind === 'sticker'` 时才有这些字段；其余 kind 是 undefined，
+     *    前端不该读它（读也是 undefined，不会出错）。
+     */
+    data: (message as { data?: string }).data,
+    mime: (message as { mime?: string }).mime,
+    caption: (message as { caption?: string }).caption,
   };
   /*
    * **首次**气泡延后一点再显示内容 —— **已删除**（2026-10-04）。

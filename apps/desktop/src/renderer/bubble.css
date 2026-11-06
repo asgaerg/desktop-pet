@@ -293,6 +293,60 @@ body {
   margin-top: var(--para-gap, 4px);
 }
 
+/*
+ * 🖼 表情包（2026-11-06 用户要求）
+ *
+ * 用户原话：
+ *
+ * > 「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」
+ *
+ * ## 尺寸
+ *
+ * 最大 120px —— 和宠物立绘（默认 250px）比是"配图"而不是"主角"。
+ * `max-width/max-height` 都限制，因为表情包有横有竖（320x320 / 400x300 等），
+ * 只限一边会让另一边撑爆气泡。
+ *
+ * ## 和文字的关系
+ *
+ * `display: block` + `margin-bottom`：表情包在上、文字在下，各占一行。
+ * 想让它们"并排"的话得用 flex，但那会让长文字把图挤扁 ——
+ * 而用户要的是"表情包代替简单状态"，竖排更自然。
+ *
+ * ⚠️ 不加 `-webkit-app-region: drag`：气泡窗口整体不可拖（它跟着宠物走），
+ *    给图加 drag 反而会把点击吃掉。
+ */
+.bubble-sticker {
+  display: block;
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  /* 深色/浅色主题下都能看清轮廓 */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+  /* 淡入，别突然弹出来吓人 */
+  animation: sticker-in 0.18s ease-out;
+}
+
+.bubble-sticker.hidden {
+  display: none;
+}
+
+/* 只有图没有文字时，底下那 6px 会让气泡多一截空白 */
+.bubble-sticker:last-child {
+  margin-bottom: 0;
+}
+
+@keyframes sticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @keyframes caret {
   50% {
     opacity: 0;

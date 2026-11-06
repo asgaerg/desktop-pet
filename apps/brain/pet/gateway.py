@@ -6089,53 +6089,106 @@ class Gateway:
                     await asyncio.sleep(600)
                     continue
 
-                item = pending[0]
-                path = self.media.root / item.path
-                try:
-                    data = path.read_bytes()
-                except Exception:  # noqa: BLE001
-                    log.info("表情包标注：读不到 %s，跳过", item.path)
-                    await asyncio.sleep(60)
-                    continue
-
-                # 🔴 把**磁盘上实际存在的类别**传进去（2026-11-05）
+                # 🔴 批量并发标注（2026-11-06 用户要求"多线程分类"）
                 #
-                # 用户要求「按图片种类新开文件夹」，所以类别是他自己建的目录。
-                # 不传的话模型只知道内置那 5 个，用户建的 `stickers/猫猫/`
-                # 永远不会被分到 —— 图片会全堆在 other 里。
+                # ## 为什么改并发
                 #
-                # ⚠️ `categories()` 只返回**有图**的目录：用户建的空文件夹
-                #    不算一个类别（否则模型会分到一个永远没素材的类）。
-                known_cats = self.media.categories()
-                emo, caption, why = await asyncio.to_thread(
-                    media_vision.label_sticker,
-                    data,
-                    self.config,
-                    categories=known_cats,
-                )
-                if not caption:
-                    # 视觉不可用：留在 _inbox，下次再试（不要标记成已处理）
-                    log.info("表情包标注失败（%s），下次再试", why or "未知")
+                # 用户一次放了 **2271 张**表情包。原来一次标一张、每张歇 30 秒：
+                #
+                #     2271 × (1 秒模型调用 + 30 秒 sleep) ≈ 20 小时
+                #
+                # 那等于永远标不完，宠物永远用不上新素材。
+                #
+                # ## 并发数怎么定
+                #
+                # 8 路：实测视觉模型单次约 1~2 秒，8 路并发能在
+                # 40 秒左右标完 200 张。再高容易撞限流（429），
+                # 反而更慢（重试 + 退避）。
+                #
+                # ⚠️ 用 `Semaphore` 而不是"一次发 2271 个任务" ——
+                #    后者会把内存和连接池打爆。
+                #
+                # ⚠️ 每批只取 `LABEL_BATCH` 张：一批标完再取下一批。
+                #    一次性把 2271 个任务全排进事件循环，取消时很难收干净。
+                done = await self._label_batch(pending[: self.LABEL_BATCH])
+                if done == 0:
+                    # 一张都没标成（视觉模型不可用）—— 歇久一点再试，
+                    # 别在那儿空转烧 CPU。
+                    log.info("表情包标注：这一批一张都没标成，15 分钟后再试")
                     await asyncio.sleep(900)
-                    continue
-
-                self.media.annotate(item, caption, by="auto")
-                if emo and emo != "other":
-                    self.media.move_to_emotion(item, emo)
-                log.info(
-                    "表情包标注：%s -> %s「%s」",
-                    item.path,
-                    emo or "未分类",
-                    caption[:40],
-                )
-                # 标完一张歇一下：不连着调模型
-                await asyncio.sleep(30)
             except asyncio.CancelledError:
                 log.info("表情包标注循环已停止")
                 raise
             except Exception:  # noqa: BLE001 —— 这个循环绝不能死
                 log.exception("表情包标注单轮异常（已忽略）")
                 await asyncio.sleep(600)
+
+    #: 每批并发标注多少张（见 `_label_batch` 的说明）
+    LABEL_BATCH = 64
+    #: 同时最多几个模型调用
+    LABEL_CONCURRENCY = 8
+
+    async def _label_batch(self, items: list[Any]) -> int:
+        """并发标注一批表情包。返回**成功**的张数。
+
+        ## 为什么把 `move_to_emotion` 放在锁里
+
+        `self.media._items` 是普通 dict，而 `move_to_emotion` 会
+        `pop` + 重新插入 + `save()`。8 个协程同时改它会撞
+        "dictionary changed size during iteration"。
+
+        `to_thread` 里的模型调用**不占锁**（那是纯 IO，慢），
+        只有最后几行改索引时才进锁 —— 所以并发度不受影响。
+        """
+        if not items:
+            return 0
+
+        sem = asyncio.Semaphore(self.LABEL_CONCURRENCY)
+        lock = asyncio.Lock()
+        ok = 0
+        # 类别每批只算一次（`categories()` 要遍历目录，别每张都算）
+        known_cats = self.media.categories()
+
+        async def _one(item: Any) -> bool:
+            nonlocal ok
+            async with sem:
+                path = self.media.root / item.path
+                try:
+                    data = await asyncio.to_thread(path.read_bytes)
+                except Exception:  # noqa: BLE001
+                    log.info("表情包标注：读不到 %s，跳过", item.path)
+                    return False
+                try:
+                    emo, caption, why = await asyncio.to_thread(
+                        media_vision.label_sticker,
+                        data,
+                        self.config,
+                        categories=known_cats,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.info("表情包标注出错（%s），跳过 %s", type(exc).__name__, item.path)
+                    return False
+                if not caption:
+                    log.debug("表情包标注失败（%s）：%s", why or "未知", item.path)
+                    return False
+                # ⚠️ 只有改索引这几行进锁（见本方法的说明）
+                async with lock:
+                    self.media.annotate(item, caption, by="auto")
+                    if emo and emo != "other":
+                        self.media.move_to_emotion(item, emo)
+                    ok += 1
+                return True
+
+        try:
+            await asyncio.gather(*(_one(it) for it in items), return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
+        if ok:
+            log.info(
+                "表情包标注：这批 %d 张里标成 %d 张（并发 %d）",
+                len(items), ok, self.LABEL_CONCURRENCY,
+            )
+        return ok
 
     async def _fetch_stickers_once(self) -> int:
         """上网上找一批表情包下载下来。返回成功下载的张数。

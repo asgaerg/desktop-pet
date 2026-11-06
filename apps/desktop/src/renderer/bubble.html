@@ -10,8 +10,18 @@
       气泡本体：**底边贴窗口底、水平居中**。
       主进程把窗口底边对准宠物立绘头顶，所以气泡的高度怎么变，锚点都不动
       —— 这正是用户要的「弹窗底部始终在宠物头上」。
+
+      🖼 表情包（2026-11-06 用户要求）：
+      用户原话「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」。
+
+      所以它是气泡里**文字旁边**的一个 <img>，不是独立窗口：
+        · 和文字一起排版，气泡会自己长高/变宽（定位逻辑不用改）
+        · 文字被隐藏时它仍然显示（见 main/index.ts 的 forwardToBubble）
+
+      ⚠️ 两个容器都留着 —— 表情包可能在文字**之前**、**之后**，或者
+         **单独出现**（不配文字）。顺序由 bubble.js 按到达顺序决定。
     -->
-    <div id="bubble" class="bubble hidden" aria-live="polite"><div id="bubble-text" class="bubble-text"></div><span id="typing" class="typing hidden"><i></i><i></i><i></i></span></div>
+    <div id="bubble" class="bubble hidden" aria-live="polite"><img id="bubble-sticker" class="bubble-sticker hidden" alt="" /><div id="bubble-text" class="bubble-text"></div><span id="typing" class="typing hidden"><i></i><i></i><i></i></span></div>
     <script type="module" src="bubble.js"></script>
   </body>
 </html>

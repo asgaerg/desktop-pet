@@ -10136,8 +10136,10 @@ def test_reading(suite: "Suite") -> None:
                 hit = [x for x in got3.values() if x.emotion == cat]
                 _assert(hit, f"「{cat}」目录里的图应当归到该类别")
             _assert(
-                "空目录占位" not in cats,
-                "空目录不算类别 —— 否则模型会分到一个永远没素材的类",
+                "空目录占位" in cats,
+                "空目录**也算**类别（2026-11-06 改）—— 否则用户把新图全放进 "
+                "_inbox、情绪目录还空着时，模型收到空类别表只能全分到 other，"
+                "那四个目录永远填不上（实测 2271 张全归 other 的死锁）",
             )
 
             # ⑩ 非法目录名不当类别（防越界/垃圾目录）

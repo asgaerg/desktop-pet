@@ -17,6 +17,8 @@
 const bubble = document.getElementById('bubble');
 const bubbleText = document.getElementById('bubble-text');
 const typing = document.getElementById('typing');
+/* 🖼 表情包（2026-11-06）：和文字共处一个气泡，不是独立窗口 */
+const stickerEl = document.getElementById('bubble-sticker');
 
 /** 存在时间（毫秒），默认 10 秒；由主进程通过 bubble:message 的 lingerMs 下发 */
 let lingerMs = 60_000;
@@ -208,7 +210,21 @@ function scheduleSizeReport() {
 function hasContent() {
   const text = bubbleText && bubbleText.textContent ? bubbleText.textContent.trim() : '';
   const typingVisible = Boolean(typing && !typing.classList.contains('hidden'));
-  return Boolean(text) || typingVisible;
+  /* 🖼 表情包也算内容（2026-11-06）。
+   *
+   * ## 为什么必须加这一条
+   *
+   * 不加的话，一张**只有表情包、没有文字**的回复会：
+   *   · `hasContent()` 返回 false
+   *   · `syncEmptyMark()` 给气泡打上 `no-text`（CSS 里是 `visibility: hidden`）
+   *   · 结果：`<img>` 在 DOM 里、`src` 也设了，但**用户什么都看不见**
+   *
+   * 实测症状：表情包"发了"但屏幕上没反应，日志里一切正常。
+   */
+  const stickerVisible = Boolean(
+    stickerEl && !stickerEl.classList.contains('hidden') && stickerEl.getAttribute('src'),
+  );
+  return Boolean(text) || typingVisible || stickerVisible;
 }
 
 /**
@@ -319,8 +335,77 @@ function reportShown() {
   api.reportShown();
 }
 
+/*
+ * 🖼 显示表情包（2026-11-06 用户要求）
+ *
+ * 用户原话：
+ *
+ * > 「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」
+ * > 「文字和表情包可同时存在也能有先后」
+ *
+ * ## 三种到达顺序都要能处理
+ *
+ *     ① 先文字、后表情包   文字已经流式显示完，这里补一张图
+ *     ② 先表情包、后文字   图先出现，随后 `beginSay` 把文字填进来
+ *     ③ 只有表情包         不配文字（用户要的"代替简单状态"）
+ *
+ * ## ⚠️ 关键：不能动文字
+ *
+ * `beginSay` 会 `bubbleText.textContent = ''`（新一轮回复清空旧文字）。
+ * 表情包如果在它**之前**到，不能被清掉 —— 所以这里只改 `<img>`，
+ * 完全不碰 `bubbleText`。
+ *
+ * 反过来，`beginSay` 也不能清掉表情包。所以新一轮开始时由它显式
+ * 调 `clearSticker()`（见那里的说明）—— 一张表情包只属于一条回复，
+ * 不能跨回复残留。
+ */
+function showSticker(payload) {
+  const img = stickerEl;
+  if (!img) return;
+  const data = String((payload && payload.data) || '');
+  const mime = String((payload && payload.mime) || 'image/png');
+  if (!data) return;
+
+  img.src = `data:${mime};base64,${data}`;
+  // 无障碍：把标注当 alt（读屏能念出来）
+  img.alt = String((payload && payload.caption) || '表情包');
+  img.classList.remove('hidden');
+
+  if (typeof payload?.lingerMs === 'number' && payload.lingerMs > 0) {
+    lingerMs = payload.lingerMs;
+  }
+  /*
+   * ⚠️ 清掉 `no-text` 并显示气泡。
+   *
+   * 原来的判据是"有没有文字"（`syncEmptyMark`），而表情包是**图片**，
+   * 不算文字 —— 不处理的话气泡会处于 `no-text`（`visibility: hidden`），
+   * 图就在 DOM 里但**看不见**。
+   */
+  if (bubble) {
+    bubble.classList.remove('no-text', 'hidden');
+    bubble.classList.add('visible');
+  }
+  syncEmptyMark();
+  // 重新点一下"正在显示"—— 让主进程重新起消失计时（表情包也算内容）
+  if (typeof window.bubble?.notifyShown === 'function') window.bubble.notifyShown();
+}
+
+/** 把表情包收掉（新一轮回复开始 / 气泡关闭时） */
+function clearSticker() {
+  const img = stickerEl;
+  if (!img) return;
+  img.classList.add('hidden');
+  img.removeAttribute('src');
+  img.alt = '';
+}
+
 function beginSay(payload) {
   currentId = payload && payload.id ? payload.id : null;
+  /* ⚠️ 新一轮回复开始 -> 把上一轮的表情包收掉（2026-11-06）。
+   *
+   * 一张表情包只属于**一条**回复。不收的话，用户连着聊两句时
+   * 第一张表情包会一直挂在新回复旁边，看起来像"这轮也发了图"。 */
+  clearSticker();
   if (typeof payload?.lingerMs === 'number' && payload.lingerMs > 0) lingerMs = payload.lingerMs;
   /*
    * ⚠️ 文字必须**立刻**清空，不能等退场动画结束再清。
@@ -536,6 +621,9 @@ window.bubble.on('bubble:message', (payload) => {
       break;
     case 'say.end':
       endSay(payload);
+      break;
+    case 'sticker':
+      showSticker(payload);
       break;
     default:
       break;
