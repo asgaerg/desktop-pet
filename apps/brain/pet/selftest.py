@@ -10831,6 +10831,86 @@ def test_reading(suite: "Suite") -> None:
 
         return "主观层照常 tick；状态规则被跳过；tick 在跳过之前"
 
+    @suite.check("免打扰：麦克风请求一律被拒（用户报「还能触发语音」）")
+    def _() -> str:
+        """用户 2026-11-06：「有 bug，现在免打扰还能触发语音」。
+
+        ## 现场
+
+        启动日志：
+
+            10:59:02.674  免打扰：从 persona.yaml 恢复为「开启」
+            10:59:03.185  [按住说话] 渲染层已就绪，把开关状态推过去：开  ← 又开了
+            10:59:07.423  [语音] 已连上 sidecar，补报麦克风开关：关
+
+        `setPausedInternal` 在**更早**时发过 `pet:set-voice(false)`，但那时
+        渲染层监听还没挂好（`webContents.send` 不排队，消息直接丢）。
+        之后 `ptt-config`（推的是配置值）把闸门重新打开。
+
+        ## 这条守的是最后一道门
+
+        `voice.control` 是 sidecar 接收"开麦"的**唯一入口**。前端有多条
+        路径能开麦（设置页、按住说话、唤醒词），逐个堵必然漏 ——
+        所以在这里堵：免打扰中不管上游发什么，都不听。
+
+        ⚠️ 拦截在 **Gateway 的消息分支**里，不在 `VoiceSession.set_enabled`。
+           `set_enabled` 是底层原语，它只负责"照做"；"该不该做"的判断
+           属于网关（它才知道免打扰状态）。
+        """
+        import tempfile
+        from pathlib import Path as _P
+
+        from .config import Config
+        from .gateway import Gateway
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-dndmic-"))
+        try:
+            import os as _os
+
+            old = _os.environ.get("PET_DATA_DIR")
+            _os.environ["PET_DATA_DIR"] = str(tmp)
+            try:
+                cfg = Config()
+                gw = Gateway(cfg)
+            finally:
+                if old is None:
+                    _os.environ.pop("PET_DATA_DIR", None)
+                else:
+                    _os.environ["PET_DATA_DIR"] = old
+
+            import inspect
+
+            src = inspect.getsource(Gateway)
+            _assert(
+                "免打扰中：忽略「开麦克风」请求" in src,
+                "voice.control 里必须有免打扰拦截",
+            )
+            # 拦截必须发生在 `set_enabled` **之前**（否则已经开了再拦没用）
+            branch = src.index('if incoming.type == "voice.control":')
+            guard = src.index("免打扰中：忽略「开麦克风」请求", branch)
+            call = src.index("await self.voice.set_enabled(enabled)", branch)
+            _assert(
+                guard < call,
+                "拦截必须写在 set_enabled 之前 —— 否则麦克风已经被打开了",
+            )
+
+            # 免打扰关着时**不该拦**（别把正常路径也堵了）
+            #
+            # ⚠️ 这里只验证"拦截条件里有 muted 判断"，不去实际调
+            #    `set_enabled` —— 那个方法还依赖引擎/采集器状态，
+            #    在自检环境里可能因为缺依赖而什么都不做。
+            #    测它会把"环境不完整"误报成"逻辑坏了"。
+            _assert(
+                "muted = self.scheduler.muted" in src[branch : call],
+                "拦截必须基于实际的 muted 状态（免打扰关着时要放行）",
+            )
+        finally:
+            import shutil as _sh
+
+            _sh.rmtree(tmp, ignore_errors=True)
+
+        return "拦截在 set_enabled 之前；且基于 muted 判断（关着时放行）"
+
     @suite.check("知识归档：同一本书累加版本，按章号能定位到对应那版")
     def _() -> str:
         """用户 2026-11-05 的两个要求。

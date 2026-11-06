@@ -4468,6 +4468,31 @@ class Gateway:
             # 前端开关麦克风。开的时候顺带把语音状态统计回报一次，
             # 让界面能显示"识别引擎是谁、能不能用"。
             enabled = bool(incoming.raw.get("enabled", False))
+            """
+            🔴 免打扰期间**一律不许开麦克风**（2026-11-06 用户报的 bug）
+
+            ## 现场
+
+            用户：「有 bug，现在免打扰还能触发语音」。
+
+            主进程那边已经发过 `pet:set-voice(false)`，但那是在渲染层
+            就绪**之前**发的 —— `webContents.send` 不排队，消息丢了。
+            之后渲染层自己的「按住说话」逻辑（`ptt-config` 推的是配置值）
+            又把闸门打开，于是这条 `voice.control(enabled=true)` 照样过来。
+
+            ## 为什么拦在这里而不是只拦主进程
+
+            前端有多条路径能开麦（设置页开关、按住说话、唤醒词）。
+            逐个堵必然漏 —— 而这里是 sidecar 唯一的入口，
+            堵这里等于"不管上游怎么发，我都不听"。
+
+            ⚠️ 回执仍然按**实际生效**的值回（`enabled=False`），
+               否则界面会显示"已开启"而实际没开，用户以为坏了。
+            """
+            muted = self.scheduler.muted
+            if muted and enabled:
+                log.info("免打扰中：忽略「开麦克风」请求（前端可能没收到压制消息）")
+                enabled = False
             await self.voice.set_enabled(enabled)
             await self.send_to(
                 client,

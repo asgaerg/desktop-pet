@@ -3391,16 +3391,57 @@ function registerRendererIpc(): void {
       const pttEnabled = Boolean(
         readDeepScalar(CONFIG_ROOT, ['providers', 'push_to_talk', 'enabled'], true),
       );
+      /*
+       * 🔴 免打扰时**不能让这条把闸门重新打开**（2026-11-06 用户报的 bug）
+       *
+       * ## 现场（启动日志）
+       *
+       *     10:59:02.674  免打扰：从 persona.yaml 恢复为「开启」
+       *     10:59:03.185  [按住说话] 渲染层已就绪，把开关状态推过去：开   ← 又开了
+       *     10:59:07.423  [语音] 已连上 sidecar，补报麦克风开关：关
+       *
+       * `setPausedInternal` 在**更早**的时候发过 `pet:set-voice(false)`，
+       * 但那时渲染层的监听还没挂好（`webContents.send` 不排队，消息直接丢）。
+       * 等渲染层上报状态（`pet:status-report`）时，这条 `ptt-config`
+       * 才把"按住说话=开"推过去 —— **把免打扰刚关上的闸门又打开了**。
+       *
+       * 结果：免打扰期间麦克风照样会开、照样识别用户说话。
+       * 用户报「免打扰还能触发语音」就是它。
+       *
+       * ## 修法
+       *
+       * 免打扰开着时，`pttEnabled` 一律报 **false**。
+       *
+       * ⚠️ 只改**推给渲染层的值**，不动配置：这条 `ptt-config` 只在
+       *    启动时推一次（`pttConfigPushed` 闸门），免打扰结束走的是
+       *    `setPausedInternal(false)` -> `pet:set-voice(true)`，不受影响。
+       */
+      const effectivePtt = paused ? false : pttEnabled;
       petWindow?.sendToRenderer('pet:ptt-config', {
-        enabled: pttEnabled,
+        enabled: effectivePtt,
         // 语音触发方式（2026-10-30）：唤醒词模式下渲染层要一直开闸
         triggerMode: voiceTriggerMode,
       });
       startupNote(
         `[按住说话] 渲染层已就绪，把开关状态推过去：${
-          pttEnabled ? '开（只有按住时才听）' : '关（免提常听）'
+          paused
+            ? '关（免打扰中，强制静音）'
+            : effectivePtt
+              ? '开（只有按住时才听）'
+              : '关（免提常听）'
         }`,
       );
+      /*
+       * 🔴 免打扰时再补一条 `set-voice(false)`（双保险）。
+       *
+       * 渲染层的闸门可能被多条消息影响（ptt-config / set-voice / 唤醒词），
+       * 只压一条容易漏。这里在**它真正就绪的那一刻**再压一次 ——
+       * 前面那次（启动早期）多半已经丢了。
+       */
+      if (paused) {
+        petWindow?.sendToRenderer('pet:set-voice', { enabled: false });
+        startupNote('[按住说话] 免打扰中 -> 补发 set-voice(false)，确保麦克风不开');
+      }
     }
 
     const text = String(payload?.text ?? '').trim();
