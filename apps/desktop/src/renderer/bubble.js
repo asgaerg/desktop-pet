@@ -386,8 +386,47 @@ function showSticker(payload) {
     bubble.classList.add('visible');
   }
   syncEmptyMark();
-  // 重新点一下"正在显示"—— 让主进程重新起消失计时（表情包也算内容）
-  if (typeof window.bubble?.notifyShown === 'function') window.bubble.notifyShown();
+
+  /*
+   * 🔴 图片解码是**异步**的（2026-11-07 修「表情包显示有问题」）
+   *
+   * ## 原来的 bug
+   *
+   * `img.src = ...` 只是**发起**加载。这一行执行完，`img` 的尺寸还是
+   * 0×0（或者 CSS 里的 max 值），而气泡窗口的尺寸是
+   * `reportBubbleWidth()` 量 `bubble.offsetHeight` 算出来的 ——
+   * 那一刻量到的高度**不含图**。
+   *
+   * 于是窗口按"只有文字"的高度开好了，图解码完把气泡撑高，
+   * 但**没人再量一次**：图被窗口裁掉，或者气泡超出窗口。
+   *
+   * ## 修法
+   *
+   * ① 等 `decode()`（真的解码完，尺寸确定）
+   * ② 再量一次并上报 —— 主进程据此重排窗口
+   *
+   * ⚠️ 不用 `onload`：`onload` 只表示数据到齐，**解码可能还没完**
+   *    （动图的 webp 尤其明显）。`decode()` 是"画得出来"的信号。
+   *
+   * ⚠️ `decode()` 在有些情况下会 reject（图被取消/损坏）。
+   *    那时仍然要上报一次 —— 至少让窗口回到"只有文字"的正确尺寸，
+   *    而不是卡在一个为图预留却没图的高度。
+   */
+  const settle = () => {
+    syncEmptyMark();
+    scheduleSizeReport();
+    // 表情包也算"一次显示"——让主进程重新起消失计时
+    if (typeof window.bubble?.notifyShown === 'function') window.bubble.notifyShown();
+  };
+  if (typeof img.decode === 'function') {
+    img.decode().then(settle, settle);
+  } else {
+    // 极老的运行环境没有 decode：退回 load + 一帧延迟
+    img.addEventListener('load', () => requestAnimationFrame(settle), { once: true });
+    img.addEventListener('error', settle, { once: true });
+  }
+  // 先立即报一次（万一 decode 很慢，至少别让文字部分被裁）
+  settle();
 }
 
 /** 把表情包收掉（新一轮回复开始 / 气泡关闭时） */

@@ -199,7 +199,28 @@ body {
   max-height: var(--bubble-max-height, 620px);
   overflow-y: auto;
   overflow-x: hidden;
-  transform: translateY(-6px) scale(0.94);
+  /*
+   * 🔴 入场起点：**向下**偏，而不是向上（2026-11-07 修「上半部分被裁」）
+   *
+   * ## 原来写的是 `translateY(-6px) scale(0.94)`
+   *
+   * 那是"从上方略高处淡入"的常见做法，但这里有个致命前提被忽略了：
+   *
+   *     `.bubble` 是 `position: absolute; bottom: 0`，贴着窗口**底边**
+   *     而 `body { overflow: hidden }`
+   *
+   * 所以**向上**偏 6px 等于把气泡顶部推出窗口 —— 那 6px 会被直接切掉。
+   * 气泡越高（比如带了表情包），切掉的部分越明显。
+   *
+   * ## 现在改成向下
+   *
+   * `translateY(6px)` 是往窗口内部偏，**不会越界**，入场观感一样是"浮上来"。
+   *
+   * ⚠️ `scale(0.94)` 保留：`transform` 不参与布局，`offsetHeight` 量到的
+   *    仍是缩小前的尺寸，所以上报给主进程的窗口大小是准的。
+   *    这一点和上面那个位移不同 —— 位移会越界，缩放不会。
+   */
+  transform: translateY(6px) scale(0.94);
   opacity: 0;
   transition:
     opacity 180ms ease-out,
@@ -211,10 +232,14 @@ body {
   transform: translateY(0) scale(1);
 }
 
-/* 退场：淡出 + 轻微缩小上移（"上一个弹窗做动画过渡消失"） */
+/* 退场：淡出 + 轻微缩小上移（"上一个弹窗做动画过渡消失"）
+ *
+ * ⚠️ 位移方向同样是**向下**（2026-11-07）。向上的话顶部会越出窗口被
+ *    `body { overflow: hidden }` 切掉 —— 淡出期间会看到"上边缘突然少一块"。
+ */
 .bubble.leaving {
   opacity: 0;
-  transform: translateY(-8px) scale(0.94);
+  transform: translateY(8px) scale(0.94);
   transition:
     opacity 220ms ease-in,
     transform 220ms ease-in;
@@ -331,19 +356,60 @@ body {
   display: none;
 }
 
+/*
+ * 🔴 兜底：窗口装不下时**从下往上**裁，而不是裁掉顶部（2026-11-07）
+ *
+ * ## 为什么会装不下
+ *
+ * 主进程的 `place()` 把窗口高度夹在 `工作区高度 - 16` 以内。正常够用，
+ * 但如果屏幕小 + 宠物大 + 长文字 + 表情包同时出现，就可能超。
+ *
+ * ## 为什么被裁的总是**上半部分**
+ *
+ * `.bubble` 是 `position: absolute; bottom: 0` —— 它**贴着窗口底部**。
+ * 内容比窗口高时，多出来的部分向上溢出窗口，于是顶部被裁。
+ * 这就是用户报的「上半部分被裁掉了」。
+ *
+ * ## 修法
+ *
+ * 气泡自己内部滚动（`overflow-y: auto` 本来就有），并且**滚动起点是顶部**。
+ * 这样至少不会"顶部内容永远看不到"——用户滚一下能看到全部。
+ *
+ * ⚠️ 真正该做的是让窗口够高。这里的滚动只是**兜底**：
+ *    窗口够高时它完全不生效（不出现滚动条、`scrollTop` 恒为 0）。
+ */
+.bubble.overflowing {
+  overflow-y: auto;
+}
+
 /* 只有图没有文字时，底下那 6px 会让气泡多一截空白 */
 .bubble-sticker:last-child {
   margin-bottom: 0;
 }
 
+/*
+ * 🔴 只淡入，**不做位移和缩放**（2026-11-07 修「上半部分被裁」）
+ *
+ * 原来写的是 `translateY(4px) scale(0.96) -> translateY(0) scale(1)`。
+ * 看着自然，但有两个副作用：
+ *
+ * ① `translateY(4px)` 让图**先向下偏 4px 再回位**。气泡是
+ *    `position: absolute; bottom: 0` 贴窗口底部的 —— 图向下偏的时候
+ *    整体内容会顶到窗口上边界之外，**上半部分就被裁掉了**。
+ *
+ * ② `scale(0.96)` 虽然不改 `offsetHeight`（`transform` 不参与布局），
+ *    但 `getBoundingClientRect()` 会受影响。而尺寸上报里有用矩形的地方，
+ *    测量时机落在动画中途就会得到偏小的值 —— 窗口按偏小的值开，
+ *    动画结束图回到原尺寸，又把上半截顶出去。
+ *
+ * 表情包本来就是"安静地补一张图"，不需要动效存在感。只留透明度渐变。
+ */
 @keyframes sticker-in {
   from {
     opacity: 0;
-    transform: translateY(4px) scale(0.96);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 

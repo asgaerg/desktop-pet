@@ -326,8 +326,24 @@ export class BubbleWindow {
     // 即使实测尺寸晚到 100ms，位置也不会差得离谱。
     const PLACEHOLDER_W = 300;
     const PLACEHOLDER_H = 90;
-    const wantW = this.bubbleSize ? this.bubbleSize.width + 8 : PLACEHOLDER_W;
-    const wantH = this.bubbleSize ? this.bubbleSize.height + 8 : PLACEHOLDER_H;
+    /*
+     * 🔴 余量从 8 提到 16（2026-11-07 修「上半部分被裁」）
+     *
+     * ## 8 不够的原因
+     *
+     * 气泡的入场动画会 `translateY(6px)`（原先是 -6px，向上偏更糟）。
+     * `transform` 不参与布局，所以 `offsetHeight` 量到的是**位移前**的尺寸 ——
+     * 上报 144，主进程开 144+8=152 的窗口，看起来够。
+     *
+     * 但那 6px 位移是**往窗口内**挪的，气泡实际占用的还是 144 高度，
+     * 8px 余量只剩 2px 容错。不同 CRT 缩放、动画中途、像素取整
+     * 任何一项差 1px 就会切到边缘。
+     *
+     * 16 = 6（动画位移）+ 10（像素取整与边框的容错）。
+     */
+    const SIZE_PADDING = 16;
+    const wantW = this.bubbleSize ? this.bubbleSize.width + SIZE_PADDING : PLACEHOLDER_W;
+    const wantH = this.bubbleSize ? this.bubbleSize.height + SIZE_PADDING : PLACEHOLDER_H;
     /*
      * ## ⚠️ 宽度下限从 80 提到 160（2026-10-05 修"又高又窄"）
      *
