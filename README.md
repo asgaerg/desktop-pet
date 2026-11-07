@@ -47,7 +47,7 @@
 
 > ⚠️ 杀软可能误报 `resources\pet\pet.exe`（PyInstaller 打的 Python）→ 加白名单。
 > **安装包要放纯英文路径**（如 `C:\Temp`）再运行，中文路径会让 NSIS 失败。
-> 校验：`Get-FileHash .\DesktopPet-0.2.5-online-setup.exe -Algorithm SHA256`，
+> 校验：`Get-FileHash .\DesktopPet-0.3.0-online-setup.exe -Algorithm SHA256`，
 > 对照 [SHA256SUMS.txt](docs/SHA256SUMS.txt)。
 
 ## 关于代码签名
