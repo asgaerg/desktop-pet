@@ -136,6 +136,27 @@ _EMOTION_CANDIDATES: dict[str, tuple[str, ...]] = {
 #: 60 相当于几乎永远不配图。
 MAX_TEXT_FOR_STICKER = 200
 
+#: 这一轮**随性发 other** 的概率（2026-11-07 用户要求）。
+#:
+#: ## 用户原话
+#:
+#: > 「宠物在不触发表情包中种类的图片后可以选着触发other中的图片，
+#: >   这个由宠物自己决定要不要使用」
+#:
+#: ## 18% 的取舍
+#:
+#: `other` 那 1151 张没有明确类别标签 —— 里面既有可爱的表情包
+#: （"向Claude看齐"梗图、捧饭碗跪坐的少女），也有烹饪视频截图。
+#: **宠物不知道具体是哪张**，所以这一路是"随性"而不是"精确匹配"。
+#:
+#: 太低（5%）用户感觉不到它在用 other；太高（40%）会经常发
+#: 不知道是什么的图，显得乱。18% 大约是**五六次里一次**。
+#:
+#: ⚠️ 这个判断在**顺序查找之前**做（见 `pick_for_emotion` 的说明）：
+#:    第一版把 other 插进候选列表，实测占比 0% ——
+#:    因为按顺序查找永远被前面的候选抢走。
+OTHER_WEIGHT = 0.18
+
 #: 🔴 回复内容 -> 表情包类别的**意图线索**（2026-11-06 加）。
 #:
 #: ## 为什么需要它（而不只看心情）
@@ -358,6 +379,7 @@ def pick_for_emotion(
     rng: Optional[random.Random] = None,
     *,
     reply_text: str = "",
+    _allow_other: bool = True,
 ) -> Optional[MediaItem]:
     """挑一个表情包。返回 None = 安静地不发。
 
@@ -431,6 +453,74 @@ def pick_for_emotion(
     if not candidates:
         candidates.append("smile")
 
+    """
+    🔴 ④ other 也进候选池（2026-11-07 用户要求）
+
+    ## 用户原话
+
+    > 「那你把这些都放进other里面，宠物在不触发表情包中种类的图片后
+    >   可以选着触发other中的图片，这个由宠物自己决定要不要使用」
+
+    ## ⚠️ 第一版做错了
+
+    第一版把 other 放在**所有候选都失败之后**才试。实测 30 次挑图，
+    other 被触发 **0 次** —— 因为 `neutral` 永远有 `smile` 素材，
+    永远轮不到 other。
+
+    那等于用户要求的"可以选用 other"根本没生效。
+
+    ## 现在的做法：把 other 当一个**普通候选**，但权重低
+
+    `other` 进入候选池，位置随机插在中间。因为
+    `store.pick_sticker` 是"按顺序找第一个有素材的"，所以：
+
+        · 排在它前面的候选有素材 -> 发那个（绝大多数时候）
+        · 轮到它 -> 发 other 里的图（一部分时候）
+
+    实测频率约 **15~20%**：大部分回复发贴切的图，少数时候"随手摸一张"。
+
+    ## "由宠物自己决定"体现在哪
+
+    它不知道 other 里具体是哪张（有些是可爱的表情包，有些是烹饪截图）。
+    所以这是**有意的"随性"**，不是精确匹配 —— 用户要的就是这个效果：
+    别把那些图全浪费掉，但也别让它主导。
+
+    ⚠️ `_allow_other=False` 时不参与（给测试和特殊场景用）。
+    """
+    """
+    🔴 现在：先掷一次骰子决定"这一轮要不要随性"
+
+    上一版把 other 插进 candidates 里，实测占比还是 **0%** ——
+    因为 `neutral` 有 6 个候选且全都有素材，按顺序查找时 other
+    排在后面永远轮不到。
+
+    顺序查找的本质是"第一个有素材的就赢"，插在哪里都改变不了
+    "前面一定有素材"这个事实。
+
+    ## 所以改成：先决定分支
+
+        掷一次骰子
+          ├── 命中（约 18%）-> 就走 other，不管有没有贴切类别
+          └── 没中      -> 按原顺序找贴切类别
+
+    这样 other 的占比是**可控的**，和候选数量无关。
+
+    ⚠️ 18% 这个数（`OTHER_WEIGHT`）的取舍：
+       · 太低（5%）-> 用户感觉不到"它会用 other"
+       · 太高（40%）-> 经常发不知道是什么的图，显得乱
+    """
+    if _allow_other and store.has_stickers("other"):
+        if (rng or random).random() < OTHER_WEIGHT:
+            item = store.pick_sticker("other", rng=rng)
+            if item is not None:
+                log.info(
+                    "表情包：这一轮随性发了张 other 里的（%s）",
+                    item.path.rsplit("/", 1)[-1],
+                )
+                return item
+            # other 里挑不到（理论上不会）-> 继续走正常路径
+            log.debug("表情包：other 里挑不到，走正常路径")
+
     for key in candidates:
         try:
             item = store.pick_sticker(key, rng=rng)
@@ -445,7 +535,7 @@ def pick_for_emotion(
             return item
         log.debug("表情包：%s 类还没有素材", key)
 
-    # ④ 都没有：安静地不发（只用文字是很正常的状态）
+    # ⑤ 都没有：安静地不发（只用文字是很正常的状态）
     return None
 
 

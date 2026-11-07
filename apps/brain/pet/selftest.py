@@ -10620,26 +10620,27 @@ def test_reading(suite: "Suite") -> None:
 
         # ② 零素材类别 -> 发的是**相关**类别，不是无关的微笑
         #
-        # ⚠️ 2026-11-07 放宽断言：素材是**动态的**（标注在跑、用户在放图），
-        #    原来写死"害怕必须发 shocked"，后来「害怕」类真有了一张素材，
-        #    直接发 scared 反而更对 —— 断言不该因为素材变多而失败。
+        # ⚠️ 2026-11-07：`other` 现在是**合法结果**（用户要求
+        #    「宠物可以选着触发 other 中的图片，由它自己决定」）。
+        #    所以判据只剩一条：**不能发 smile**（那是"没话找话"的兜底）。
         #
-        #    所以判据从"必须发某个特定类别"改成
-        #    "**不能发无关的类别**（smile/其它）"，这才是真正要守的东西。
-        _IRRELEVANT = {"smile", "other"}
-        for text, want_any in (
-            ("有点害怕", {"shocked", "anxious", "scared", "wronged"}),
-            ("好孤单", {"wronged", "sad", "lonely", "cry"}),
-            ("发呆中", {"think", "speechless", "daze"}),
-            ("我不同意", {"refuse", "annoyed", "disagree"}),
-            ("好失望啊", {"sad", "helpless", "disappointed"}),
-        ):
-            item = _st.pick_for_emotion(store, "neutral", reply_text=text)
-            _assert(item is not None, f"「{text}」应当能配到图")
+        # ⚠️ 素材是动态的：原来写死"害怕必须发 shocked"，
+        #    后来「害怕」类真有一张素材了，直接发 scared 反而更对。
+        for text in ("有点害怕", "好孤单", "发呆中", "我不同意", "好失望啊"):
+            # other 是随机分支，多试几次取"非 other"的结果来判断
+            item = None
+            for _try in range(6):
+                cand = _st.pick_for_emotion(
+                    store, "neutral", reply_text=text, rng=_random.Random(_try)
+                )
+                if cand is not None and cand.emotion != "other":
+                    item = cand
+                    break
+            _assert(item is not None, f"「{text}」应当能配到图（非 other）")
             _assert(
-                item.emotion in want_any or item.emotion not in _IRRELEVANT,
-                f"「{text}」发了 {item.emotion!r} —— "
-                "发无关的 smile 就等于没功能",
+                item.emotion != "smile",
+                f"「{text}」发了 smile —— 那是「没话找话」的兜底，"
+                "说明意图/相邻兜底没生效",
             )
 
         # ③ 问号不再单独触发 question
@@ -10663,6 +10664,72 @@ def test_reading(suite: "Suite") -> None:
             _assert(got == want, f"「{text}」应当匹配 {want!r}，实际 {got!r}")
 
         return "相邻兜底优先于心情；零素材类别发相关图；问号不误判"
+
+    @suite.check("表情包：other 由宠物自己决定要不要发（约 18%）")
+    def _() -> str:
+        """用户 2026-11-07 要求：
+
+        > 「那你把这些都放进other里面，宠物在不触发表情包中种类的图片后
+        >   可以选着触发other中的图片，这个由宠物自己决定要不要使用」
+
+        ## 要守的两件事
+
+        ① other **真的会被发**（占比不能是 0）
+        ② 但**不能占主导**（不能超过 40%，否则经常发不知道是什么的图）
+
+        ## ⚠️ 中间踩的坑
+
+        第一版把 other 插进 `candidates` 列表里当普通候选。
+        实测占比 **0%** —— 因为 `neutral` 有 6 个候选且全都有素材，
+        按顺序查找时 other 排在后面永远轮不到。
+
+        顺序查找的本质是"第一个有素材的就赢"，插在哪里都改不了
+        "前面一定有素材"这个事实。
+
+        改成**先掷骰子决定分支**：18% 直接走 other，其余走正常路径。
+        这样占比可控，和候选数量无关。
+        """
+        import random as _r
+
+        from . import sticker as _st
+        from .media import MediaStore
+        from pathlib import Path as _P
+
+        store = MediaStore(_P(r"F:\ai\pet-media"))
+        _assert(store.has_stickers("other"), "other 类应当有素材（否则这条测不了）")
+
+        rng = _r.Random(7)
+        got = 0
+        total = 200
+        for _i in range(total):
+            item = _st.pick_for_emotion(store, "neutral", reply_text="嗯", rng=rng)
+            if item is not None and item.emotion == "other":
+                got += 1
+        ratio = got / total
+
+        _assert(got > 0, "other 从来没被发过 —— 那用户要求的「可以选用」没生效")
+        _assert(
+            ratio < 0.40,
+            f"other 占比 {ratio:.0%} 太高 —— 经常发不知道是什么的图会显得乱",
+        )
+        # 目标区间宽松一点：0.08 ~ 0.30（随机波动）
+        _assert(
+            0.08 <= ratio <= 0.30,
+            f"other 占比 {ratio:.0%} 不在预期区间 8%~30%（设定值 18%）",
+        )
+
+        # `_allow_other=False` 时必须完全不发 other
+        for _i in range(40):
+            item = _st.pick_for_emotion(
+                store, "neutral", reply_text="嗯", rng=rng, _allow_other=False
+            )
+            if item is not None:
+                _assert(
+                    item.emotion != "other",
+                    "_allow_other=False 时不该发 other（测试/特殊场景用）",
+                )
+
+        return f"other 占比 {ratio:.0%}（目标 18%）；关掉开关后完全不发"
 
     @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
     def _() -> str:

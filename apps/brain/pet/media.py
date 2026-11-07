@@ -958,6 +958,22 @@ class MediaStore:
         scored.sort(key=lambda p: (-p[0], p[1].used_count, p[1].last_used_at))
         return [it for _s, it in scored[: max(1, limit)]]
 
+    def has_stickers(self, emotion: str) -> bool:
+        """某一类**有没有可用素材**（2026-11-07 加）。
+
+        给 `sticker.pick_for_emotion` 的 other 兜底用 —— 要先知道
+        `stickers/other/` 里到底有没有东西，再决定要不要掷骰子。
+
+        ⚠️ 不用 `stickers_for(...)` 判空：那个会建一个完整列表
+           （1151 张），而这里只是问"有没有"。`any()` 短路更快。
+        """
+        self.load()
+        prefix = f"stickers/{emotion}/"
+        return any(
+            it.path.startswith(prefix) and it.emotion == emotion and it.caption
+            for it in self._items.values()
+        )
+
     def pick_sticker(self, emotion: str, *, rng: Any = None) -> Optional[MediaItem]:
         """挑一个表情包发出去。
 
