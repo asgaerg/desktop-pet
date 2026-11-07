@@ -10365,10 +10365,11 @@ def test_reading(suite: "Suite") -> None:
 
         # ① 映射
         #
-        # 🔴 2026-11-06：72 类体系下能对上更多心情了。
-        #    原来 annoyed 只能退到 ignore、sleepy 干脆没地方去。
-        import random as _random
-
+        # 🔴 2026-11-07：`neutral` 现在映射到 `smile`。
+        #
+        # 这是被用户报的「看不到宠物发的图」逼出来的：
+        # `dominant` 在 mood 0.4~0.62 之间返回 neutral，而那正是**常态**。
+        # 原来不映射 -> 绝大多数回复永远配不上图。
         rng = _random.Random(7)
         pairs = {
             "excited": "excited",
@@ -10377,8 +10378,8 @@ def test_reading(suite: "Suite") -> None:
             "sad": "sad",
             "sleepy": "sleepy",
             "curious": "question",
-            # neutral 仍然不映射：「平静」没有对应表情，硬发反而怪
-            "neutral": "",
+            # 🔴 中性兜底：不映射的话大多数回复配不上图
+            "neutral": "smile",
         }
         for dom, want in pairs.items():
             got = emotion_to_sticker(dom)
@@ -10419,19 +10420,41 @@ def test_reading(suite: "Suite") -> None:
             should_attach(reply_text="嗯嗯", dominant="happy", rate=1.0, rng=rng),
             "rate=1 + 短回复 + 情绪匹配时必发",
         )
-        # 既没意图、情绪也映射不到时，rate=1 也不发
+        # 🔴 2026-11-07：现在**所有** dominant 都有映射了（neutral -> smile），
+        # 所以"心情映射不到就不发"这条已经没有反例。
         #
-        # ⚠️ 2026-11-06：`curious` 现在**映射到 `question`** 了
-        #    （72 类里有「疑问」），所以它不再是"发不出"的例子。
-        #    只剩 `neutral` 这一种真正没有对应类别的心情。
-        for dom in ("neutral",):
-            _assert(
-                not should_attach(reply_text="嗯", dominant=dom, rate=1.0, rng=rng),
-                f"{dom} 没有对应类别、也没有意图线索，不该发",
-            )
+        # 但 `should_attach` 里那条判断**仍然要保留** —— 它守的是
+        # "万一将来新增一个没有映射的心情标签，别发错图"。
+        # 这里改成用**源码断言**守它，而不是找一个现在不存在的反例。
+        import inspect as _inspect
+
+        from . import sticker as _sticker_mod
+
+        _src = _inspect.getsource(_sticker_mod.should_attach)
+        _assert(
+            "intent_to_sticker(reply_text)" in _src
+            and "emotion_to_sticker(dominant)" in _src,
+            "should_attach 必须同时看「意图」和「心情」—— "
+            "只看心情的话道歉/道谢这类意图永远发不出图",
+        )
+        # neutral 现在能发了（这是修 bug 的关键）
+        _assert(
+            should_attach(reply_text="嗯", dominant="neutral", rate=1.0, rng=rng),
+            "neutral 现在映射到 smile —— 它必须能发，否则大多数回复永远没图",
+        )
 
         # ③ 长回复不配图
-        long_text = "这是一段很长的回复。" * 10
+        #
+        # ⚠️ 上限是 200（2026-11-06 从 60 提上来的），所以这里要造**真的**
+        #    超过 200 字的内容 —— 原来只有 100 字，改上限后它不再算"长"，
+        #    断言就变成了"期望不发、实际会发"。
+        from .sticker import MAX_TEXT_FOR_STICKER
+
+        long_text = "这是一段很长的回复。" * 40
+        _assert(
+            len(long_text) > MAX_TEXT_FOR_STICKER,
+            f"测试前提：{len(long_text)} 字应当超过上限 {MAX_TEXT_FOR_STICKER}",
+        )
         _assert(
             not should_attach(reply_text=long_text, dominant="happy", rate=1.0, rng=rng),
             "长回复不该配表情包",

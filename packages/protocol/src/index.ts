@@ -921,6 +921,37 @@ export interface SystemErrorMsg {
   where?: string;
 }
 
+/**
+ * 🖼 表情包（下行，2026-11-06 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * > 「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」
+ *
+ * ## 为什么用 base64 而不是路径
+ *
+ * 主进程和渲染进程都能直接拼 `data:` URL 显示；用路径要过一层文件系统
+ * 访问（还要处理 asar / 权限）。
+ *
+ * ## 为什么带 `caption`
+ *
+ * 它是渲染层 `<img>` 的 `alt`（读屏能念出来），也是出问题时唯一的线索。
+ */
+export interface PetStickerMsg {
+  type: 'pet.sticker';
+  /** base64 图片数据（纯 base64，不带 data: 前缀） */
+  data: string;
+  /** image/webp / image/png / image/gif */
+  mime?: string;
+  /** 类别 key（happy / sad / mischief … 见 `media.EMOTIONS`） */
+  emotion?: string;
+  /** 这张图表达什么（人话） */
+  caption?: string;
+  /** 相对 pet-media 的路径 */
+  path?: string;
+  ts?: number;
+}
+
 export type ToUiMsg =
   | ReadyMsg
   | PetThinkingMsg
@@ -930,6 +961,8 @@ export type ToUiMsg =
   | PetMouthMsg
   | PetEmotionMsg
   | PetObserveMsg
+  // 🖼 表情包（2026-11-06）：显示在文字气泡里，和文字可以共存
+  | PetStickerMsg
   // 工具执行状态（2026-10-12）：侧车发给主进程，用来把状态条切成「搜索中」
   | PetToolMsg
   | SystemErrorMsg
@@ -1274,6 +1307,28 @@ const TO_UI_TYPES = new Set<string>([
   'vision.snap.done',
   /** 活泼度档位回落（2026-10-17）：主进程接住，不再转发给渲染层 */
   'activity.tier',
+  /*
+   * 🖼 表情包（2026-11-06 用户要求）。
+   *
+   * ## 用户原话
+   *
+   * > 「表情包不影响文字的输出，它将在宠物的文字弹窗中显示」
+   *
+   * ## ⚠️ 漏了它的后果（这次踩到了）
+   *
+   * 这个集合是 `parseMessage()` 唯一的解析闸门。加这条之前：
+   *
+   *     sidecar 日志：表情包：发了 stickers/shy/s01670.webp
+   *     主进程日志：丢弃无法识别的消息：{"type":"pet.sticker",...}
+   *
+   * 也就是说**大脑发出了、主进程自己扔了** —— 用户什么都看不到，
+   * 而两侧日志各自都"看起来正常"。
+   *
+   * 这和 `vision.snap.done` 那次是同一个坑（见上面的说明）。
+   *
+   * payload: { data: base64, mime: 'image/webp', emotion, caption, path }
+   */
+  'pet.sticker',
 ]);
 
 /**

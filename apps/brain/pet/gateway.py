@@ -6425,9 +6425,43 @@ class Gateway:
         rate = max(0.0, min(1.0, rate))
 
         dominant = str(self.conversation.emotion.dominant or "")
+        """
+        ⚠️ 每个出口都记日志（2026-11-07 加）
+
+        用户报「看不到宠物发的图」时，**从日志上完全看不出来为什么没发** ——
+        所有出口都是静默 `return`。这种"什么都没发生"最难查：
+
+            · 是概率没抽中？
+            · 是回复太长？
+            · 是这一类的素材没标注？
+            · 还是根本没人调用这个函数？
+
+        四种情况的代码路径完全不同，但没有日志就全是同一个现象。
+        所以现在每个出口都留一条（用 `info` 不用 `debug`：
+        用户可能不会开 debug 日志，而这正是他要排查的事）。
+        """
+        intent = sticker_mod.intent_to_sticker(reply_text)
+        mood = sticker_mod.emotion_to_sticker(dominant)
         if not sticker_mod.should_attach(
             reply_text=reply_text, dominant=dominant, rate=rate
         ):
+            # 说清是哪一道门挡的 —— 比一句"没发"有用得多
+            if not intent and not mood:
+                log.info(
+                    "表情包：不发 —— 既没意图线索也没心情映射"
+                    "（dominant=%s，回复 %d 字：%s）",
+                    dominant or "?", len(reply_text), reply_text[:24],
+                )
+            elif len(reply_text) > sticker_mod.MAX_TEXT_FOR_STICKER:
+                log.info(
+                    "表情包：不发 —— 回复太长（%d 字 > %d）",
+                    len(reply_text), sticker_mod.MAX_TEXT_FOR_STICKER,
+                )
+            else:
+                log.info(
+                    "表情包：不发 —— 概率没抽中（rate=%.2f，意图=%s 心情=%s）",
+                    rate, intent or "-", mood or "-",
+                )
             return
 
         # 🔴 把回复内容也传进去（2026-11-06）：让它能按**意图**挑图，
@@ -6436,10 +6470,18 @@ class Gateway:
             self.media, dominant, reply_text=reply_text
         )
         if item is None:
+            log.info(
+                "表情包：不发 —— 目标类别没素材"
+                "（意图=%s 心情=%s；已分类 %d 张）",
+                intent or "-", mood or "-",
+                sum(1 for it in self.media.load().values()
+                    if it.path.startswith("stickers/") and it.caption),
+            )
             return
 
         payload = sticker_mod.build_payload(self.media, item)
         if not payload:
+            log.info("表情包：不发 —— 读图失败（%s）", item.path)
             return
 
         await self.bus.publish("pet.sticker", msg("pet.sticker", **payload))
