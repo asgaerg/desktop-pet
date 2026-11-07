@@ -77,6 +77,40 @@ _EMOTION_TO_STICKER: dict[str, str] = {
     "neutral": "smile",
 }
 
+#: 立绘情绪 -> **多个**候选类别（2026-11-07 加，用户要求「触发放宽」）。
+#:
+#: ## 为什么单个映射不够
+#:
+#: 实测 500 条真实回复，**只有 40% 能提取出意图**。剩下的 60%
+#: 全靠 `_EMOTION_TO_STICKER` —— 而它只有 7 条映射。
+#:
+#: 也就是说：六成回复的可用类别只有 7 个，而且 `neutral`（最常见）
+#: 永远只对应 `smile`。用户体感就是"翻来覆去就那几张"。
+#:
+#: ## 现在的做法
+#:
+#: 每种心情给 3~5 个**语义相近**的候选，挑图时轮着用。
+#: 不追求"精确"，只追求"不发错"：
+#:
+#:     happy   -> happy / smile / laugh / excited    都是正面的
+#:     sad     -> sad / cry / wronged / disappointed 都是低落的
+#:     neutral -> smile / ok / think / relieved      平和的
+#:
+#: ⚠️ 顺序有意义：第一个是"最贴切"的，越往后越泛。
+#:    `pick_for_emotion` 会按顺序找第一个**有素材**的类。
+#:
+#: ⚠️ 冲突检查：`laugh` 在 happy 和 excited 里都有 —— 那没关系，
+#:    它本来就同时适合两种心情。
+_EMOTION_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "happy": ("happy", "smile", "laugh", "excited", "cheer"),
+    "excited": ("excited", "happy", "laugh", "cheer", "love"),
+    "annoyed": ("annoyed", "refuse", "ignore", "helpless", "angry"),
+    "sad": ("sad", "cry", "wronged", "disappointed", "tired"),
+    "sleepy": ("sleepy", "tired", "daze", "ok", "smile"),
+    "curious": ("question", "think", "confused", "peek", "smile"),
+    "neutral": ("smile", "ok", "think", "relieved", "agree", "wait"),
+}
+
 #: 回复长度上限：超过这个字数就不配表情包了。
 #:
 #: ## 🔴 2026-11-06 从 60 提到 200（用户报「看不到表情包」）
@@ -299,8 +333,18 @@ def should_attach(
     ⚠️ 概率**必须 < 1**：每句都配图会让人觉得很吵、很假。
        0.35 的含义是"大约三句里有一句带图"，那才像人在聊天。
     """
-    # ① 意图命中 or 心情能映射，都算"有可用类别"
-    if not intent_to_sticker(reply_text) and not emotion_to_sticker(dominant):
+    # ① 意图命中 or 心情在候选表里，都算"有可用类别"
+    #
+    # 🔴 2026-11-07 放宽：判据从 `emotion_to_sticker(dominant)`
+    #    改成"`dominant` 在 `_EMOTION_CANDIDATES` 里"。
+    #
+    #    理由：`emotion_to_sticker` 只有 7 条单映射，而 `_EMOTION_CANDIDATES`
+    #    是 7 种心情 × 3~6 个候选。用前者判断会漏掉"候选表有、单映射没有"的
+    #    情况，而两者本该一致 —— 现在统一以候选表为准。
+    if (
+        not intent_to_sticker(reply_text)
+        and str(dominant or "") not in _EMOTION_CANDIDATES
+    ):
         return False
     if len(str(reply_text or "").strip()) > MAX_TEXT_FOR_STICKER:
         return False
@@ -357,10 +401,35 @@ def pick_for_emotion(
             if extra not in candidates:
                 candidates.append(extra)
 
-    # ③ 心情兜底（最后一道）
-    mood_key = emotion_to_sticker(dominant)
-    if mood_key and mood_key not in candidates:
-        candidates.append(mood_key)
+    # ③ 心情兜底：现在是**一组**候选，不是单个（2026-11-07 放宽）
+    #
+    # 实测 500 条真实回复只有 40% 能提取意图，剩下 60% 全靠心情。
+    #
+    # ## ⚠️ 顺序查找的副作用
+    #
+    # 原来是"按顺序找第一个有素材的"。实测发现：第一个（happy/smile）
+    # 永远有素材 -> **永远发第一类**，后面的候选等于没写。
+    #
+    # 60% 的回复都这样，体感还是"翻来覆去那几张"。
+    #
+    # ## 改成随机挑一个候选
+    #
+    # 从候选里**随机**挑一个（而不是固定第一个），这样同一心情下
+    # 会在相邻的几个类别之间轮换：
+    #
+    #     neutral -> 这次微笑、下次好的、再下次思考……
+    #
+    # `store.pick_sticker` 内部还会按 `used_count` 挑用得少的，
+    # 所以不会老发同一张图。
+    mood_cands = _EMOTION_CANDIDATES.get(str(dominant or ""), ())
+    if mood_cands:
+        chosen = (rng or random).choice(list(mood_cands))
+        for extra in (chosen, *mood_cands):
+            if extra not in candidates:
+                candidates.append(extra)
+    # 兜底：`dominant` 是没见过的值时，至少给 smile（否则这张表一改就发不出图）
+    if not candidates:
+        candidates.append("smile")
 
     for key in candidates:
         try:

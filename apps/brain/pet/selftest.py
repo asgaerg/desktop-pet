@@ -10584,19 +10584,41 @@ def test_reading(suite: "Suite") -> None:
         from .media import MediaStore
         from pathlib import Path as _P
 
-        # ① 顺序：相邻类必须排在心情前面
+        # ⚠️ 先建 store —— 下面多处要用（顺序写反过一次，别挪回去）
+        store = MediaStore(_P(r"F:\ai\pet-media"))
+
+        # ① 顺序：相邻类必须排在心情候选前面
         src = __import__("inspect").getsource(_st.pick_for_emotion)
         i_fb = src.find("_FALLBACK_CHAIN.get(intent_key")
-        i_mood = src.find("emotion_to_sticker(dominant)")
+        # ⚠️ 2026-11-07：心情那段从 `emotion_to_sticker(dominant)`（单映射）
+        #    改成了 `_EMOTION_CANDIDATES`（多候选），断言要跟着换锚点。
+        i_mood = src.find("_EMOTION_CANDIDATES")
         _assert(i_fb > 0, "应当有相邻类别兜底")
+        _assert(i_mood > 0, "应当有心情候选表")
         _assert(
             i_fb < i_mood,
-            "相邻兜底必须**排在心情前面** —— 否则 smile 永远先命中，"
+            "相邻兜底必须**排在心情候选前面** —— 否则 smile 永远先命中，"
             "「害怕」会发成微笑（实测踩过）",
         )
 
+        # ①-b 心情候选要能轮换，不能永远同一个（2026-11-07 放宽后）
+        import random as _r2
+
+        _rng2 = _r2.Random(3)
+        seen: set[str] = set()
+        for _i in range(12):
+            _it = _st.pick_for_emotion(
+                store, "neutral", reply_text="今天天气不错", rng=_rng2
+            )
+            if _it:
+                seen.add(_it.emotion)
+        _assert(
+            len(seen) >= 2,
+            f"无意图的回复应当能在多个类别间轮换，实际只有 {seen} —— "
+            "固定发一类会让用户觉得「翻来覆去就那几张」",
+        )
+
         # ② 零素材类别 -> 发的是**相关**类别，不是无关的微笑
-        store = MediaStore(_P(r"F:\ai\pet-media"))
         for text, want_any in (
             ("有点害怕", {"shocked", "anxious"}),
             ("好孤单", {"wronged", "sad"}),

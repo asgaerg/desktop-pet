@@ -833,16 +833,32 @@ class MediaStore:
     # ------------------------------------------------------------ 查询
 
     def unlabeled(self) -> list[MediaItem]:
-        """还没标注的表情包（用户新放进去的）。
+        """还没分好类的表情包：`caption` 或 `emotion` 有一个为空。
 
-        判据是 `caption` 为空 —— 不看 `labeled_by`：
-        用户手动标过的和模型自动标的都算"标了"。
+        ## 🔴 2026-11-07 修：原来只判 `caption`
+
+        原来写的是 `if not it.caption`。于是出现一类**永远处理不到**的数据：
+
+            有 caption（描述有了），但 emotion 为空（没归类）
+
+        实测 **1270 张**卡在这个状态 —— 它们是早期用老提示词标的
+        （那时只写描述、不分类），之后 72 类体系上线也没被重跑。
+
+        后果：
+          · `stickers_for()` 要求 `emotion == 某个类`，它们一条都进不去
+          · 而 `unlabeled()` 又认为"标过了"，不再处理
+          · 等于 1270 张素材**永久沉睡**，宠物只有 1001 张能用
+
+        用户报的"难触发"很大一部分是这个：素材看起来很多，
+        实际能用的一半。
+
+        ⚠️ `caption` 为空也算未标注：那是"连描述都没有"，更要重跑。
         """
         self.load()
         return [
             it
             for it in self._items.values()
-            if it.path.startswith("stickers/") and not it.caption
+            if it.path.startswith("stickers/") and (not it.caption or not it.emotion)
         ]
 
     def stickers_for(self, emotion: str) -> list[MediaItem]:
