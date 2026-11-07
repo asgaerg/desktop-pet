@@ -66,8 +66,29 @@ MODULES: tuple[Module, ...] = (
            note="地基：关了没有主循环"),
     Module("subjectivity", "主观层", default=True, gate=False,
            note="情绪/印象，阶段一只登记"),
+    # ------------------------------------------------------------------
+    # 语音（2026-11-07 把说明写清楚）
+    #
+    # 用户问：「语音模块包含识别用户的话和合成语音吗，如果是的话，
+    #          语音模块的描述上要写清楚」
+    #
+    # 查证结果：**两个都管**。见 `gateway.py` 那处 `build_voice_pipeline`：
+    #
+    #     if self.modules.enabled("voice"):
+    #         voice_pipeline = build_voice_pipeline(config, config.api_key())
+    #     else:
+    #         voice_pipeline = VoicePipeline(asr=MockAsrEngine(), tts=MockTtsEngine())
+    #
+    # `build_voice_pipeline` 一次建**两个**引擎（`asr` 和 `tts`），
+    # 所以关掉这个模块 = 既听不懂你说话、也不会出声。
+    #
+    # ⚠️ 原来的 note 写的是「关掉则不建 ASR/TTS 引擎」——
+    #    ASR/TTS 是行内缩写，普通用户看不懂，等于没写。
+    #    而且没提"会有哪些实际后果"（听不到说话、不会出声）。
     Module("voice", "语音", default=True,
-           note="关掉则不建 ASR/TTS 引擎（顺带省掉本地大模型）"),
+           note="同时管两件事：① 识别你说的话（语音转文字）"
+                "② 宠物出声说话（文字转语音）。"
+                "关掉后它既听不到你说话、也不会出声，只能打字聊"),
     Module("autonomy", "自主行为", default=True,
            note="自主发言、随机事件、自主截图三个循环的启动闸门"),
     Module("monologue", "自言自语", default=True),
@@ -91,6 +112,43 @@ MODULES: tuple[Module, ...] = (
            note="附加能力：让宠物自己搜索小说、下载并阅读。"
                 "关掉后自主行为里只剩小黑盒杂谈这类轻事件"),
     # ------------------------------------------------------------------
+    # 表情包（2026-11-07 用户要求：下载和使用合并成一个模块）
+    #
+    # 用户原话：
+    #
+    # > 「表情包下载和使用合并成一个模块，统合表情包的功能」
+    #
+    # ## 改之前是什么样
+    #
+    # 只有一个 `stickers` 模块，而且它**只管下载** ——
+    # `_maybe_send_sticker`（发表情包）完全不看模块开关。
+    # 结果：关掉「表情包下载」之后，宠物**照样发表情包**。
+    # 用户看到的是一个"开关不起作用"的模块，最容易让人不信任设置页。
+    #
+    # ## 现在的结构：一个总开关 + 一个可选能力
+    #
+    #     stickers          「表情包」  总开关。关掉 = 不发表情包、不下载、不标注
+    #     stickers_download 「表情包下载」子能力。关掉 = 只用手里的，不上网找
+    #
+    # ⚠️ 为什么拆成两个而不是一个
+    #
+    #   两者的**风险完全不同**：
+    #
+    #     · 发表情包 —— 纯本地，不联网、不下载
+    #     · 上网下载 —— **主动往外部发请求**，还会往用户盘上写文件
+    #
+    #   后者必须由用户显式点头（所以默认关，`default=False`）；
+    #   而前者没有任何风险，默认该开。合成一个开关的话，用户要发表情包
+    #   就不得不允许它上网 —— 那是强迫授权。
+    #
+    # ⚠️ 但**语义上它们是一个功能**（用户说的"统合"）。所以：
+    #    下载模块 `requires=("stickers",)` —— 总开关一关，下载自动关
+    #    （依赖闭包见 `ModuleRegistry._effective`），不会出现
+    #    "表情包都关了它还在偷偷下载"的荒唐状态。
+    # ------------------------------------------------------------------
+    Module("stickers", "表情包", default=True,
+           note="用表情包聊天、给表情包归类。关掉则完全不发表情包"),
+    # ------------------------------------------------------------------
     # 表情包下载（2026-11-03 加，用户要求）
     #
     # 用户原话：
@@ -100,14 +158,15 @@ MODULES: tuple[Module, ...] = (
     # >   这个下载功能也做成模块，搜索模块搜索到之后，
     # >   它自己分辨下载标注就好了」
     #
-    # ⚠️ 它**依赖 search**：下载要靠 `web_search` 找图源。
-    #    所以 `requires=("search",)` —— 联网搜索关掉时这个自动关
-    #    （依赖闭包会算出来，见 `ModuleRegistry._effective`）。
+    # ⚠️ 它依赖两个东西：
+    #    · `stickers` —— 表情包总开关（总开关关了，下载无意义）
+    #    · `search`   —— 下载要靠 `web_search` 找图源
     #
-    # ⚠️ 默认**关**（`default=False`）。理由和 `screen` 那条一样：
+    # ⚠️ 默认**关**（`default=False`）。理由：
     #    它会**主动往网上发请求找图**，还会把图下到用户盘上。
     #    这种事必须用户显式打开 —— 不能替用户做决定。
-    Module("stickers", "表情包下载", default=False, requires=("search",),
+    Module("stickers_download", "表情包下载", default=False,
+           requires=("stickers", "search"),
            note="让宠物自己上网找表情包下载并标注。默认关："
                 "它会主动发请求找图，需要你点头"),
     # ------------------------------------------------------------------
@@ -161,6 +220,51 @@ class ModuleRegistry:
             else:
                 value = bool(entry)
             self._want[mod.name] = value
+
+        """
+        🔴 迁移：旧配置的 `modules.stickers.enabled`（2026-11-07）
+
+        用户要求「表情包下载和使用合并成一个模块，统合表情包的功能」，
+        于是 `stickers` 从"只管下载"变成了"表情包总开关"，
+        下载拆成新的 `stickers_download`。
+
+        ## 不迁移会怎样
+
+        用户的 `persona.yaml` 里写的是：
+
+            modules:
+              stickers:
+                enabled: true      # 他当年点头同意"上网下载"了
+
+        如果直接按新语义读，这个 `true` 变成"表情包总开关开"，
+        而 `stickers_download` 没有配置项 -> 用默认值 **false** ->
+        **用户当年同意过的下载功能被静默关掉了**。
+
+        那是"升级导致既有功能消失"，最容易让人困惑（"我没动过它啊"）。
+
+        ## 迁移规则
+
+            旧 `stickers` 存在、且新 `stickers_download` 没写
+            -> 下载开关 = 旧 `stickers` 的值（继承用户当年的意愿）
+
+        ⚠️ 只在**新键缺失**时继承。用户一旦显式配了 `stickers_download`，
+           就以他的为准，不再被旧键影响。
+        """
+        if "stickers_download" not in raw and "stickers" in raw:
+            old = raw.get("stickers")
+            if isinstance(old, dict):
+                inherited = bool(old.get("enabled", True))
+            elif isinstance(old, str):
+                inherited = "false" not in old.strip().lower()
+            elif old is None:
+                inherited = True
+            else:
+                inherited = bool(old)
+            self._want["stickers_download"] = inherited
+            log.info(
+                "表情包下载：从旧版 modules.stickers 继承开关 = %s",
+                "开" if inherited else "关",
+            )
 
     # ------------------------------------------------------------ 判定
 

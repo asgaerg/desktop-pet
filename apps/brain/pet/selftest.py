@@ -2261,6 +2261,81 @@ def _run_endpointer(segments: list[tuple[str, int]]) -> list[Any]:
 
 
 def test_voice(suite: SelfTest) -> None:
+    @suite.check("语音模块：同时管「识别你说的话」和「出声说话」")
+    def _() -> str:
+        """用户 2026-11-07 问：
+
+        > 「语音模块包含识别用户的话和合成语音吗，如果是的话，
+        >   语音模块的描述上要写清楚」
+
+        ## 查证结论：**两个都管**
+
+        `gateway.py` 里那一处判断同时决定 ASR 和 TTS：
+
+            if self.modules.enabled("voice"):
+                voice_pipeline = build_voice_pipeline(config, config.api_key())
+            else:
+                voice_pipeline = VoicePipeline(asr=MockAsrEngine(), tts=MockTtsEngine())
+
+        而 `build_voice_pipeline` 一次建**两个**引擎。
+
+        ## 这条测试守什么
+
+        守两件事，任何一件坏了用户就会看到一个"说半句假话"的开关：
+
+          ① 关掉模块 -> ASR **和** TTS 都变成 mock（不能只关一半）
+          ② 设置页的说明必须**说清它管两件事** —— 用户正是因为这个
+             看不明白才来问的。说明里不能只有「ASR/TTS」这种缩写。
+        """
+        from .config import Config
+        from .gateway import Gateway
+        from .modules import MODULES
+
+        # ① 模块定义上说得清楚
+        m = next((x for x in MODULES if x.name == "voice"), None)
+        _assert(m is not None, "应当有 voice 模块")
+        note = m.note
+        _assert(
+            "识别" in note and "说话" in note,
+            f"说明必须同时提到「识别你说的话」和「出声说话」，实际：{note!r}",
+        )
+        _assert(
+            "ASR" not in note and "TTS" not in note,
+            "说明里不该只写 ASR/TTS 这种缩写 —— 用户看不懂，"
+            "这正是他要求「写清楚」的原因",
+        )
+
+        # ② 关掉模块 -> 两个引擎都变 mock
+        #
+        # ⚠️ 引擎是在 `Gateway.__init__` 里建的，所以必须在**构造前**
+        #    就把配置里的 voice 关掉 —— 构造后再 set_enabled 只影响未来，
+        #    已经建好的引擎还是真的。这正是"切了要重启才生效"的原因。
+        from .config import Config
+        from .gateway import Gateway
+
+        cfg = Config()
+        try:
+            cfg.root.setdefault("modules", {})["voice"] = {"enabled": False}
+        except Exception:  # noqa: BLE001
+            _assert(False, "配置结构不对，无法测试")
+        gw = Gateway(cfg)
+
+        tts_name = type(gw.voice.tts).__name__
+        _assert(
+            tts_name == "MockTtsEngine",
+            f"关掉语音模块后 TTS 必须是 mock（否则它还会出声），实际 {tts_name}",
+        )
+        pipeline = getattr(gw.voice, "pipeline", None)
+        if pipeline is not None:
+            asr_name = type(pipeline.asr).__name__
+            _assert(
+                asr_name == "MockAsrEngine",
+                f"关掉语音模块后 ASR 也必须是 mock，实际 {asr_name} —— "
+                "只关一半的话，它还能听懂你说话，那就不是「关掉语音」",
+            )
+
+        return "说明写清两件事；关掉后 ASR 和 TTS 都降级"
+
     @suite.check("语音识别：本地/云端两条路的构建与降级（用户要求可切换）")
     def _() -> str:
         """
@@ -10654,19 +10729,26 @@ def test_reading(suite: "Suite") -> None:
 
         return "协议/内网/magic bytes/装饰图 四道闸门都生效"
 
-    @suite.check("表情包下载：模块默认关，且依赖联网搜索")
+    @suite.check("表情包：总开关 + 下载子模块（2026-11-07 统合）")
     def _() -> str:
-        """用户要求「这个下载功能也做成模块」。
+        """用户要求：
 
-        ## 为什么默认**关**
+        > 「表情包下载和使用合并成一个模块，统合表情包的功能」
 
-        它会主动往网上发请求找图，还会把图下到用户盘上。
-        这种事必须用户显式打开 —— 不能替他做决定。
-        （和「看屏幕」默认关是同一条取舍。）
+        ## 改之前的问题
 
-        ## 为什么依赖 search
+        只有一个 `stickers` 模块，而且它**只管下载** ——
+        `_maybe_send_sticker`（发表情包）完全不看模块开关。
+        关掉「表情包下载」之后宠物**照样发表情包**，那开关等于没作用。
 
-        下载靠 `web_search` 找图源。联网关掉时它自动关（依赖闭包）。
+        ## 现在的结构
+
+            stickers            总开关（发表情包/归类）。默认**开**
+            stickers_download   上网找图。默认**关**，依赖 stickers + search
+
+        ⚠️ 两个模块而不是一个，因为**风险不同**：
+           发表情包是纯本地；上网下载会主动发请求并写文件。
+           合成一个的话，想发表情包就不得不允许上网 —— 强迫授权。
         """
         import time as _t
 
@@ -10675,12 +10757,59 @@ def test_reading(suite: "Suite") -> None:
         from .gateway import Gateway
         from .modules import MODULES
 
-        spec = next((m for m in MODULES if m.name == "stickers"), None)
-        _assert(spec is not None, "应当有 stickers 模块")
+        # ── 总开关 ──
+        top = next((m for m in MODULES if m.name == "stickers"), None)
+        _assert(top is not None, "应当有 stickers 总开关")
+        _assert(top.label == "表情包", f"标签不对：{top.label!r}")
+        _assert(top.default is True, "总开关必须默认开（纯本地行为，无风险）")
+        _assert(top.gate, "必须可热切（设置页开关要能点）")
+
+        # ── 下载子模块 ──
+        spec = next((m for m in MODULES if m.name == "stickers_download"), None)
+        _assert(spec is not None, "应当有 stickers_download 子模块")
         _assert(spec.label == "表情包下载", f"标签不对：{spec.label!r}")
-        _assert(spec.default is False, "必须默认关（主动联网行为）")
-        _assert(spec.requires == ("search",), f"必须依赖 search：{spec.requires}")
-        _assert(spec.gate, "必须可热切（设置页开关要能点）")
+        _assert(spec.default is False, "下载必须默认关（主动联网行为）")
+        _assert(
+            set(spec.requires) == {"stickers", "search"},
+            f"必须同时依赖总开关和联网搜索：{spec.requires}",
+        )
+        _assert(spec.gate, "必须可热切")
+
+        # ── 依赖闭包：总开关关了，下载也关 ──
+        cfg0 = Config()
+        from .modules import ModuleRegistry
+
+        reg = ModuleRegistry(cfg0)
+        reg.set_enabled("stickers", False)
+        _assert(
+            reg.enabled("stickers_download") is False,
+            "总开关关掉时，下载必须自动关 —— 否则会出现"
+            "「表情包都关了它还在偷偷下载」",
+        )
+        _assert(
+            "stickers" in (reg.reason("stickers_download") or ""),
+            "原因要指明是总开关关的",
+        )
+        # 反过来：关联网搜索只影响下载，不影响发表情包
+        reg2 = ModuleRegistry(cfg0)
+        reg2.set_enabled("search", False)
+        _assert(
+            reg2.enabled("stickers") is True,
+            "关联网搜索不该影响「发表情包」（那是纯本地行为）",
+        )
+        _assert(reg2.enabled("stickers_download") is False, "下载要靠搜索，该关")
+
+        # ── 事件仍然绑着 ──
+        cfg = Config()
+        cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
+        gw = Gateway(cfg)
+        ev = get_event("fetch_stickers")
+        _assert(ev is not None, "应当有 fetch_stickers 事件")
+        _assert(ev.handler is not None, "handler 必须已绑定（否则抽中了也不做事）")
+        _assert(
+            gw.events.module_of.get("fetch_stickers") == "stickers_download",
+            "事件要挂在**下载**模块上（不是总开关）",
+        )
 
         cfg = Config()
         cfg.root.setdefault("tools", {})["web_search_mode"] = "fast"
@@ -10694,15 +10823,15 @@ def test_reading(suite: "Suite") -> None:
                 ev, now=_t.time(), last_interaction_at=0, last_event_at=0, events_today=0
             )
 
-        # 默认关 -> 抽取阶段就排除
+        # 下载默认关 -> 抽取阶段就排除
         ok, why = _ok()
-        _assert(not ok, "模块默认关时不该能抽")
+        _assert(not ok, "下载模块默认关时不该能抽")
         _assert("module_off" in why, f"原因要说明模块关着：{why!r}")
 
-        # 打开 -> 可抽
-        gw.modules.set_enabled("stickers", True)
+        # 打开下载 -> 可抽
+        gw.modules.set_enabled("stickers_download", True)
         ok2, why2 = _ok()
-        _assert(ok2, f"打开后应当能抽：{why2!r}")
+        _assert(ok2, f"打开下载后应当能抽：{why2!r}")
 
         # 关掉 search -> 依赖闭包把它一起关掉
         gw.modules.set_enabled("search", False)
@@ -10710,7 +10839,20 @@ def test_reading(suite: "Suite") -> None:
         _assert(not ok3, "关掉联网搜索后，表情包下载也该停")
         _assert("module_off" in why3, f"原因要说明：{why3!r}")
 
-        return "默认关；打开可抽；关联网时连带关"
+        # 🔴 关掉**总开关** -> 下载也停（这是"统合"的关键）
+        gw.modules.set_enabled("search", True)
+        gw.modules.set_enabled("stickers_download", True)
+        ok4, _ = _ok()
+        _assert(ok4, "两个都开着时应当能抽")
+        gw.modules.set_enabled("stickers", False)
+        ok5, why5 = _ok()
+        _assert(
+            not ok5,
+            "总开关关掉后下载必须停 —— 否则「表情包都关了还在偷偷下载」",
+        )
+        _assert("module_off" in why5, f"原因要说明：{why5!r}")
+
+        return "总开关管发表情包+下载；下载还额外依赖 search；闭包正确"
 
     @suite.check("免打扰：静音 + 不弹气泡，但**继续截图**、关掉后立刻聊")
     def _() -> str:

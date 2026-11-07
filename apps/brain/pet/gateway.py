@@ -2925,7 +2925,12 @@ class Gateway:
         # 表情包下载同样绑模块（2026-11-03）：
         # 模块默认关，关着时事件在抽取阶段就排除 —— 不然会抽中、抢槽、
         # 进去发现模块关着、什么都不做，白占一个槽。
-        self.events.module_of["fetch_stickers"] = "stickers"
+        # 🔴 挂在**下载**模块上（2026-11-07 拆分后）
+        #
+        # `stickers` 现在是总开关（发表情包+归类），
+        # `stickers_download` 才是"上网找图"。
+        # 挂错的话：关掉下载、事件照样被抽中 -> 白跑一趟搜索。
+        self.events.module_of["fetch_stickers"] = "stickers_download"
         self.events.module_enabled = self.modules.enabled
         # 🔴 安静档不触发任何事件（2026-11-02 用户要求）
         #
@@ -3013,7 +3018,10 @@ class Gateway:
             # 调用方都要判空，反而容易漏。
             from .voice import MockAsrEngine, MockTtsEngine, VoicePipeline
 
-            log.info("语音模块关掉了：不建 ASR/TTS 引擎（本地模型不会加载）")
+            log.info(
+                "语音模块关掉了：既不识别你说话、也不合成语音"
+                "（ASR/TTS 都用 mock，本地大模型不会加载）"
+            )
             voice_pipeline = VoicePipeline(
                 asr=MockAsrEngine(),
                 tts=MockTtsEngine(),
@@ -6082,6 +6090,13 @@ class Gateway:
 
         while True:
             try:
+                # 🔴 模块总开关（2026-11-07）：表情包功能整体关掉时不标注
+                #
+                # 标注是**要花钱的**（每张一次视觉模型调用）。关掉表情包
+                # 还继续烧钱标注，用户会觉得"我明明关了它还在后台跑"。
+                if not self.modules.enabled("stickers"):
+                    await asyncio.sleep(600)
+                    continue
                 pending = self.media.unlabeled()
                 # 只看表情包（images/ 下的是对话图，已经有描述了）
                 pending = [it for it in pending if it.path.startswith("stickers/")]
@@ -6215,7 +6230,7 @@ class Gateway:
         网上的图源极不稳定（防盗链、404、被墙）。任何一个环节失败
         都只是"这次没下成"，**不打扰用户** —— 和书源失效同一个取舍。
         """
-        if not self.modules.enabled("stickers"):
+        if not self.modules.enabled("stickers_download"):
             log.debug("表情包下载：模块关着")
             return 0
         if not self.conversation._web_enabled():
@@ -6413,7 +6428,20 @@ class Gateway:
 
         用户可能根本没用过这个功能。那时**不报错、不提示**——
         提示"请先放表情包"只是打扰。
+
+        ## 🔴 模块总开关（2026-11-07 用户要求「统合表情包的功能」）
+
+        用户原话：「表情包下载和使用合并成一个模块，统合表情包的功能」。
+
+        改之前：`stickers` 模块**只管下载**，而这里（发表情包）完全不看
+        模块开关 —— 于是关掉「表情包下载」之后，宠物**照样发表情包**。
+        用户看到的是一个"开关不起作用"的模块。
+
+        现在这里也受 `stickers` 管：总开关关掉 = 完全不发表情包。
         """
+        if not self.modules.enabled("stickers"):
+            log.debug("表情包：模块关着")
+            return
         try:
             rate = float(
                 (self.config.activity or {}).get("emoji_sticker_rate", 0.35)
