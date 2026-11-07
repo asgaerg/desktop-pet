@@ -147,7 +147,17 @@ _INTENT_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("尴尬", "社死"), "awkward"),
     (("无奈", "没办法", "摊手"), "helpless"),
     (("震惊", "吃惊", "难以置信"), "shocked"),
-    (("为什么", "怎么会", "真的吗", "？"), "question"),
+    # ⚠️ 这里**故意不写单独的 "？"**（2026-11-07 实测修）
+    #
+    # 原来有 `(("为什么", "怎么会", "真的吗", "？"), "question")`，
+    # 而「？」是个**单字符触发词** —— 宠物说话经常带问号
+    # （"是那串符号显示成图了吗？"），于是**任何疑问句都被判成 question**。
+    #
+    # 实测后果：用户说「哈哈哈哈哈」，它回了一句带问号的话，
+    # 结果发出了一张"疑问"表情包 —— 和当时气氛完全不符。
+    #
+    # 现在只认真正的"提问词"，不看标点。
+    (("为什么", "怎么会", "真的吗", "是怎么回事"), "question"),
     (("不懂", "没懂", "迷惑"), "confused"),
     (("不理我", "别理我", "走开"), "ignore"),
     (("才不", "不要", "不干"), "refuse"),
@@ -163,6 +173,34 @@ _INTENT_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("难过", "伤心", "失落"), "sad"),
     (("生气", "气死", "火大"), "angry"),
     (("烦", "烦死", "别吵"), "annoyed"),
+    # 🔴 补充（2026-11-07 实测：这些说法原来**一个都匹配不到**，
+    #    于是全退到心情类 smile）。见 `_FALLBACK_CHAIN` 的说明。
+    (("失望", "没想到这样", "太让人失望"), "disappointed"),
+    (("不同意", "不赞同", "反对", "我不认可"), "disagree"),
+    (("害怕", "好可怕", "吓到", "瑟瑟发抖"), "scared"),
+    (("孤单", "寂寞", "一个人待"), "lonely"),
+    (("安心", "放心了", "松口气"), "relieved"),
+    (("卖惨", "装可怜", "可怜可怜我"), "pitiful"),
+    (("苦笑", "哭笑不得"), "speechless_laugh"),
+    (("恶作剧", "整蛊"), "prank"),
+    (("摸摸头", "摸头"), "pat"),
+    (("围观", "看热闹", "起哄"), "cheer_on"),
+    (("吹嘘", "吹牛", "自夸"), "boast"),
+    # 🔴 日常应答（2026-11-07 补）
+    #
+    # 实测：宠物回复里最常见的正是这类短应答，而它们**一个意图都匹配不到**
+    # -> 全退到心情类 smile（29 张里随机一张）。
+    # 用户体感就是"它只会发那几张微笑"，这也是"难触发"的一部分。
+    #
+    # ⚠️ 「嗯」「哦」故意**不映射**：它们太中性，配任何图都像在过度表演。
+    #    那种情况交给心情类（happy 时发开心图很合理）。
+    #
+    #    实测确认过这是对的：这类极简应答在真实对话里占比不高
+    #    （都是"嗯嗯""好的我看看"这种带信息的），而不映射时
+    #    心情类能兜住 —— 不会漏，只是可能不够贴切。
+    (("好的", "收到", "没问题", "行吧", "知道了"), "ok"),
+    (("你说得对", "你说的对", "确实是", "没错", "有道理"), "agree"),
+    (("这样啊", "原来如此", "是这样"), "relieved"),
     (("怕", "害怕", "好可怕"), "scared"),
     (("孤单", "寂寞", "一个人"), "lonely"),
 )
@@ -183,6 +221,50 @@ def intent_to_sticker(text: str) -> str:
         if any(w in hay for w in words):
             return key
     return ""
+
+
+#: 零素材类别的**相邻兜底**（2026-11-07 加）。
+#:
+#: ## 为什么需要
+#:
+#: 实测 72 类里有 12 类一张素材都没有。那些意图命中后
+#: `pick_sticker` 返回 None，于是退回心情类 —— 而心情类常态是 `smile`。
+#:
+#: 结果：说「有点害怕」「好孤单」「发呆中」发的**都是同一张微笑**。
+#: 用户会觉得"它就只会笑"。
+#:
+#: ## 挑选原则
+#:
+#: **宁可差点，也别乱配**。每条都要说得通：
+#:
+#:     害怕 -> 震惊      都是"被吓到"的表情
+#:     孤单 -> 委屈      一个人待着的低落
+#:     失望 -> 悲伤      同向下沉
+#:     安心 -> 微笑      放下心来确实是笑
+#:     恶作剧 -> 捣蛋    同义（只是颗粒度差）
+#:     摸摸头 -> 抱抱    都是亲昵动作
+#:     围观助威 -> 围观  本来就是同一件事
+#:     吹嘘 -> 得意      吹嘘的表情就是得意
+#:     苦笑 -> 无语      苦笑≈无奈地笑
+#:     发呆 -> 思考      走神和思考的视觉很像
+#:     不赞同 -> 拒绝    都是否定的态度
+#:     卖惨 -> 委屈      卖惨就是表演委屈
+#:
+#: ⚠️ 用户以后补了那类的图，就会直接用真图 —— 这张表只是兜底。
+_FALLBACK_CHAIN: dict[str, tuple[str, ...]] = {
+    "relieved": ("smile", "comfort"),
+    "pitiful": ("wronged", "cry"),
+    "disappointed": ("sad", "helpless"),
+    "scared": ("shocked", "anxious"),
+    "lonely": ("wronged", "sad"),
+    "speechless_laugh": ("helpless", "speechless"),
+    "disagree": ("refuse", "annoyed"),
+    "prank": ("mischief", "tease"),
+    "daze": ("think", "speechless"),
+    "pat": ("hug", "comfort"),
+    "cheer_on": ("watch", "cheer"),
+    "boast": ("proud", "smug"),
+}
 
 
 def emotion_to_sticker(dominant: str) -> str:
@@ -261,7 +343,21 @@ def pick_for_emotion(
     intent_key = intent_to_sticker(reply_text)
     if intent_key:
         candidates.append(intent_key)
-    # ② 心情兜底
+    # ② 意图类的**相邻兜底**排在心情前面（2026-11-07 修）
+    #
+    # ⚠️ 顺序踩过一次：原来是 [意图, 心情, 相邻]。
+    #    测「有点害怕」时 candidates = [scared, smile, shocked, anxious]，
+    #    而 scared 没素材 -> **smile 先命中** -> 永远发那张微笑，
+    #    shocked/anxious 根本没机会。
+    #
+    #    现在把相邻类**插在心情前面**：意图和它的近亲都试完，才轮到心情。
+    #    这样「害怕」会发"震惊"（贴切），而不是"微笑"（无关）。
+    if intent_key:
+        for extra in _FALLBACK_CHAIN.get(intent_key, ()):
+            if extra not in candidates:
+                candidates.append(extra)
+
+    # ③ 心情兜底（最后一道）
     mood_key = emotion_to_sticker(dominant)
     if mood_key and mood_key not in candidates:
         candidates.append(mood_key)
@@ -274,11 +370,13 @@ def pick_for_emotion(
             item = None
         if item is not None:
             if key != candidates[0]:
-                log.debug("表情包：意图类 %s 没素材，退回心情类 %s", candidates[0], key)
+                log.debug(
+                    "表情包：意图类 %s 没素材，退到 %s", candidates[0] or "-", key
+                )
             return item
         log.debug("表情包：%s 类还没有素材", key)
 
-    # ③ 都没有：安静地不发（不打 warning —— 只用文字是很正常的状态）
+    # ④ 都没有：安静地不发（只用文字是很正常的状态）
     return None
 
 

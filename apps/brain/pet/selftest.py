@@ -10548,6 +10548,92 @@ def test_reading(suite: "Suite") -> None:
 
         return f"映射正确；概率门生效（{hit}/1000）；长回复不配图"
 
+    @suite.check("表情包：零素材类别不发无关的图 + 问号不误判疑问")
+    def _() -> str:
+        """用户 2026-11-07 报：
+
+        > 「你试试不同种类的表情包触发，我现在有些难触发，
+        >   你试试不同的对话怎么触发」
+
+        实测发现两个让"难触发/乱触发"的具体原因。
+
+        ## 一、零素材类别全退到同一张 smile
+
+        72 类里有 12 类一张素材都没有。那些意图命中后
+        `pick_sticker` 返回 None，于是退回心情类 —— 而心情类常态是 `smile`。
+
+        结果：说「有点害怕」「好孤单」「发呆中」发的**都是同一张微笑**。
+        用户体感就是"它只会发那几张微笑"。
+
+        ⚠️ 修的时候还踩了一次**顺序**：原来的候选表是
+           `[意图, 心情, 相邻]`，于是 smile 排在相邻类前面，
+           永远先命中 —— 相邻兜底等于没写。现在改成
+           `[意图, 相邻, 心情]`。
+
+        ## 二、单独的「？」当触发词，任何疑问句都被判成 question
+
+        实测：「哈哈哈哈哈」时它回了句带问号的话 ->
+        意图被判成 `question` -> 发出一张"疑问"表情包，
+        和当时的气氛完全不符。
+
+        现在只认真正的提问词（为什么/怎么会/真的吗），不看标点。
+        """
+        import random as _random
+
+        from . import sticker as _st
+        from .media import MediaStore
+        from pathlib import Path as _P
+
+        # ① 顺序：相邻类必须排在心情前面
+        src = __import__("inspect").getsource(_st.pick_for_emotion)
+        i_fb = src.find("_FALLBACK_CHAIN.get(intent_key")
+        i_mood = src.find("emotion_to_sticker(dominant)")
+        _assert(i_fb > 0, "应当有相邻类别兜底")
+        _assert(
+            i_fb < i_mood,
+            "相邻兜底必须**排在心情前面** —— 否则 smile 永远先命中，"
+            "「害怕」会发成微笑（实测踩过）",
+        )
+
+        # ② 零素材类别 -> 发的是**相关**类别，不是无关的微笑
+        store = MediaStore(_P(r"F:\ai\pet-media"))
+        for text, want_any in (
+            ("有点害怕", {"shocked", "anxious"}),
+            ("好孤单", {"wronged", "sad"}),
+            ("发呆中", {"think", "speechless"}),
+            ("我不同意", {"refuse", "annoyed"}),
+            ("好失望啊", {"sad", "helpless"}),
+        ):
+            item = _st.pick_for_emotion(store, "neutral", reply_text=text)
+            _assert(item is not None, f"「{text}」应当能配到图")
+            _assert(
+                item.emotion in want_any,
+                f"「{text}」应当发 {want_any} 里的图（贴切），"
+                f"实际发了 {item.emotion!r} —— 发无关的 smile 就等于没功能",
+            )
+
+        # ③ 问号不再单独触发 question
+        _assert(
+            _st.intent_to_sticker("是那串符号显示成图了吗？") != "question",
+            "带问号但没提问词的句子**不该**判成 question —— "
+            "宠物说话经常带问号，那样会把所有回复都判成疑问",
+        )
+        _assert(
+            _st.intent_to_sticker("为什么会这样") == "question",
+            "真正的提问词仍要能识别",
+        )
+
+        # ④ 日常应答有意图了（原来一个都匹配不到）
+        for text, want in (
+            ("好的收到", "ok"),
+            ("你说的对", "agree"),
+            ("这样啊", "relieved"),
+        ):
+            got = _st.intent_to_sticker(text)
+            _assert(got == want, f"「{text}」应当匹配 {want!r}，实际 {got!r}")
+
+        return "相邻兜底优先于心情；零素材类别发相关图；问号不误判"
+
     @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
     def _() -> str:
         """用户要求：「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注」。
