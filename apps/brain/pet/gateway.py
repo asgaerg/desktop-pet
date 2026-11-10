@@ -59,6 +59,8 @@ from . import sticker_fetch
 from . import knowledge as knowledge_mod
 from . import knowledge_tools
 from . import knowledge_analysis
+# 📖 在线找书（2026-11-10 用户要求）：起点 / 番茄正版站的搜书工具
+from . import novel_tools
 # ⚠️ `_clip_at_sentence` 2026-11-02 挪到 `reading.py` 了 —— 回看功能也要用它，
 #    而 reading.py 不能 import gateway（循环依赖）。这里显式导入，原调用点不变。
 from .reading import _clip_at_sentence
@@ -1720,6 +1722,36 @@ class Conversation:
                         self._tools.extend(knowledge_tools.build_tools(_kstore))
                     except Exception:  # noqa: BLE001
                         log.warning("知识检索工具挂载失败（已忽略）", exc_info=True)
+                # 📖 在线找书（2026-11-10 用户要求）
+                #
+                # 用户原话：
+                #
+                # > 「现在我需要加一个新模块，能够帮我搜索分析小说的功能，
+                # >   帮我找到我喜欢的小说」/「起点的、番茄的」
+                #
+                # ⚠️ 受**两道**约束：
+                #    · 联网关掉时不该挂（它要发请求到起点/番茄）
+                #    · `modules.reading` 关掉时也不挂（用户可能就不想让它找书）
+                #
+                # ⚠️ 和 `reading_tools` 的区别：那套是盗版书源 + 下载整本；
+                #    这套是正版站，只搜/看简介/试读几章。见 `novel_tools` 的说明。
+                #
+                # ⚠️⚠️ **`self.modules` 是 Gateway 的，不是 Conversation 的**（踩过）
+                #
+                # 本方法属于 Conversation，而 `modules` 由 Gateway 持有。
+                # 直接写 `self.modules` 会 AttributeError，然后被外层那个
+                # `except Exception` 吞掉 —— 表现是**所有工具一起消失**
+                # （工具表变成空列表），而不是只有这一个没挂上。
+                #
+                # 自检里那两条「默认应当有 web_search，实际 []」就是这么炸的。
+                # 和 `self.reader` 同一个坑（上面 reading_tools 的注释里也写了）。
+                _mods = getattr(self, "modules", None)
+                _reading_on = bool(_mods is not None and _mods.enabled("reading"))
+                if self._web_enabled() and _reading_on:
+                    try:
+                        self._tools.extend(novel_tools.build_tools())
+                    except Exception:  # noqa: BLE001
+                        log.warning("在线找书工具挂载失败（已忽略）", exc_info=True)
                 log.info(
                     "已启用 %d 个工具：%s",
                     len(self._tools),

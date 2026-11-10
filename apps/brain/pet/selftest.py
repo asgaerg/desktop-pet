@@ -11476,6 +11476,99 @@ def test_reading(suite: "Suite") -> None:
 
         return "三个工具都挂上了；空档案给提示；有内容能搜到"
 
+    @suite.check("在线找书：起点/番茄工具挂载 + 能力边界如实说明")
+    def _() -> str:
+        """用户 2026-11-10 要求：
+
+        > 「现在我需要加一个新模块，能够帮我搜索分析小说的功能，
+        >   帮我找到我喜欢的小说」/「起点的、番茄的」
+        > 「用起点官方网站，番茄官方网站，这样搜到书名可以免费看几章」
+        > 「搜索的频率降低」
+
+        ## 这条测试守什么
+
+        ① 两个工具真的挂上了（`find_novel` / `preview_novel`）
+        ② **频率限制存在** —— 用户明确要求「搜索的频率降低」
+        ③ 描述里写清了能力边界（不给模型"能读全本"的错觉）
+        ④ 番茄"没有真搜索"要在描述里说明 —— 否则模型会一直按关键词
+           搜番茄、一直搜不到、一直重试
+        ⑤ 章号解析（番茄目录里"最近更新"排第一，不排序会取反）
+
+        ⚠️ 不打真实网络：这条只验结构和文案。
+        """
+        import inspect
+
+        from . import books_online as bo
+        from . import novel_tools
+
+        # ① 工具挂上了
+        tools = novel_tools.build_tools()
+        names = {t.name for t in tools}
+        _assert(
+            names == {"find_novel", "preview_novel"},
+            f"应当有 find_novel 和 preview_novel，实际 {sorted(names)}",
+        )
+
+        # ② 频率限制（用户要求「搜索的频率降低」）
+        _assert(
+            bo.MIN_INTERVAL_S >= 1.0,
+            f"两次请求间隔至少 1 秒，实际 {bo.MIN_INTERVAL_S} —— "
+            "正版站爬太快会被封，还会连带影响用户自己的账号",
+        )
+        _assert(
+            bo.MAX_PAGES <= 3,
+            f"每轮最多翻 3 页，实际 {bo.MAX_PAGES}",
+        )
+
+        # ③ 描述里写清了边界
+        finder = next(t for t in tools if t.name == "find_novel")
+        desc = finder.description
+        _assert(
+            "番茄" in desc and "起点" in desc,
+            "描述里要点名两个站",
+        )
+        _assert(
+            "没有搜索" in desc or "APP" in desc,
+            "必须说明番茄网页端没有搜索 —— 不说的话模型会一直按关键词"
+            "搜番茄、一直搜不到、一直重试",
+        )
+        _assert(
+            "不要编造" in desc,
+            "必须明确禁止编造书名 —— 实测模型没调工具就直接报了"
+            "《十日终焉》《夜无疆》这些凭记忆编的书名",
+        )
+
+        # ④ preview 说明不能当精确原文
+        pv = next(t for t in tools if t.name == "preview_novel")
+        _assert(
+            "缺字" in pv.description or "字体" in pv.description,
+            "必须说明正版站有字体反爬、正文可能缺字 —— "
+            "否则模型会把残句当原文引用",
+        )
+        _assert(
+            "编造" in pv.description,
+            "读不到时必须如实说，不能编情节",
+        )
+
+        # ⑤ 章号解析（数字 + 中文数字）
+        _assert(
+            bo._chapter_no("第351章 不可思议") == 351,
+            "数字章号要能解析",
+        )
+        _assert(
+            bo._chapter_no("第一百章 转折") == 100,
+            "中文数字章号也要认（老书常见）",
+        )
+
+        # ⑥ 节流器确实会 sleep（只加锁的话间隔还是 0）
+        src = inspect.getsource(bo._Throttle)
+        _assert(
+            "MIN_INTERVAL_S" in src and "sleep" in src,
+            "节流器必须真的 sleep —— 只加锁只能保证不并发，间隔还是 0",
+        )
+
+        return "两工具就位；有频率限制；番茄无搜索和缺字都写明了；章号排序正确"
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(
