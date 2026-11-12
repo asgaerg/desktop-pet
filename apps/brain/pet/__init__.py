@@ -14,6 +14,15 @@ from __future__ import annotations
 
 __version__ = "0.3.0"
 
+#: 许可证（2026-11-12 用户要求改成「不能商用」）。
+#:
+#: CC BY-NC 4.0 = 署名 + **禁止商业使用**。
+#:
+#: ⚠️ 严格说它**不是 OSI 定义的开源许可**（OSI 要求必须允许商用）。
+#:    准确说法是「源码公开 + 非商业许可」。这里用 SPDX 标识符是为了
+#:    让工具链（pip / npm / license 扫描器）能认出来。
+__license__ = "CC-BY-NC-4.0"
+
 from .config import Config, ConfigError, load_config
 from .gateway import Conversation, Gateway
 from .plugins import Plugin, PluginHub, PluginContext, ToolSpec
