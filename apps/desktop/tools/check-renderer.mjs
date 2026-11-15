@@ -457,10 +457,90 @@ const report = (ok, label, detail) => {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// 「查看图片」按钮：蓝底可读性（2026-11-15 用户要求）
+//
+// 用户原话：「查看图片的ui不是很明显，深色和浅色状态都改成比较显眼的
+//   颜色吧，深色主题下蓝色不错，浅色也蓝色算了」
+//
+// 为什么放进契约检查：这类问题**语法完全正确、运行不报错**，
+// 只有"看起来看不清"这一个症状，而开发环境又没法目视验证。
+// 静态算对比度能兜住底线。
+//
+// 实测踩到的真问题：第一版写「蓝底白字」，浅色 4.55:1 刚过线，
+// 但深色主题的 accent 是**亮蓝** #6aa9ff —— 白字在上面只有 **2.40:1**，
+// 远低于 WCAG AA 的 4.5。所以深色下必须换成深色文字。
+// --------------------------------------------------------------------------- //
+{
+  const memoryCss = readFileSync(path.join(rendererDir, 'memory.css'), 'utf-8');
+  const memoryJs = readFileSync(path.join(rendererDir, 'memory.js'), 'utf-8');
+
+  // JS 里得真的用上这个 class
+  report(
+    memoryJs.includes('btn-view-image'),
+    '「查看图片」按钮带专属 class',
+    '不加专属 class 就只能改 .btn.mini，会把同一行的「修正」「加为固定」也染色',
+  );
+
+  // WCAG 相对亮度 / 对比度
+  const lin = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const lum = (hex) => {
+    let h = hex.replace('#', '');
+    if (h.length === 3) h = [...h].map((x) => x + x).join('');
+    const [r, g, b] = [0, 2, 4].map((i) => lin(parseInt(h.slice(i, i + 2), 16) / 255));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => {
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+
+  const lightAccent = /:root\s*\{[^}]*?--accent:\s*(#[0-9a-fA-F]{6})/s.exec(memoryCss)?.[1];
+  const darkAccent =
+    /html\[data-theme='dark'\]\s*\{[^}]*?--accent:\s*(#[0-9a-fA-F]{6})/s.exec(memoryCss)?.[1];
+
+  // 每个主题实际用的文字色：浅色取基础规则，深色取覆盖规则
+  //
+  // ⚠️ 两个坑都踩过：
+  //    · 用 `([^{}]*)` 卡选择器 -> 被前面的**块注释**带偏（注释里有大括号）；
+  //    · 用 `indexOf('{')` 找规则体 -> 找到的是**注释里的** `{`。
+  //    现在用 `matchAll` 精确匹配"规则名 + 花括号"，再检查选择器里有没有 data-theme。
+  const pickColor = (withDark) => {
+    for (const m of memoryCss.matchAll(/^([^\n{}]*\.btn-view-image[^\n{}]*)\s*\{([^}]*)\}/gm)) {
+      const selector = m[1].trim();
+      const isDarkRule = selector.includes('data-theme');
+      if (isDarkRule !== withDark) continue;
+      // ⚠️ 要同时认**三位简写** `#fff` 和六位 `#ffffff` ——
+      //    第一版只写 `{6}`，于是浅色那条（`color: #fff`）匹配不到、
+      //    测出来是 `? 字`，误报成"对比度不足"。
+      const cm = /color:\s*(#[0-9a-fA-F]{3,8})\b/.exec(m[2]);
+      if (cm) return cm[1];
+    }
+    return null;
+  };
+  const baseColor = pickColor(false);
+  const darkColor = pickColor(true) ?? baseColor;
+
+  for (const [label, accent, textColor] of [
+    ['浅色', lightAccent, baseColor],
+    ['深色', darkAccent, darkColor],
+  ]) {
+    // AA 正文 4.5；UI 组件 3.0 勉强够，但按钮上有文字，按 4.5 要求
+    const r = accent && textColor ? ratio(accent, textColor) : 0;
+    report(
+      r >= 4.5,
+      `「查看图片」按钮${label}对比度 >= 4.5:1（${accent ?? '?'} 底 + ${textColor ?? '?'} 字）`,
+      `实际 ${r.toFixed(2)}:1。蓝底 + 文字要能分清：亮蓝底配白字会看不清（实测 2.4:1），` +
+        `深色主题下应改用深色文字`,
+    );
+  }
+}
+
 if (contractIssues > 0) {
   console.error(`\n渲染层契约检查未通过：${contractIssues} 项`);
   process.exit(1);
 }
+
 console.log('渲染层契约检查通过（DOM 元素 / preload 通道 / pet API / els 属性 / 采集闸门 / PTT 心跳）');
 
 // 素材存在性顺带确认（不对就早点说，别等运行时才发现是占位宠物）

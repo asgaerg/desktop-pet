@@ -495,7 +495,21 @@ function renderRaw(items, { searching }) {
      */
     if (it.has_image) {
       const imgBtn = document.createElement('button');
-      imgBtn.className = 'btn mini';
+      /*
+       * 🔴 加专属 class `btn-view-image`（2026-11-15 用户要求）
+       *
+       * 用户原话：「查看图片的ui不是很明显，深色和浅色状态都改成比较
+       *   显眼的颜色吧，深色主题下蓝色不错，浅色也蓝色算了」
+       *
+       * ## 为什么不是在 `.btn.mini` 上改
+       *
+       * 那一行里还有「修正」「加为固定」两个按钮，它们共用 `.btn.mini`。
+       * 直接改 `.btn.mini` 会让三个按钮全变蓝 —— 那就没有"显眼"的效果了
+       * （全显眼 = 都不显眼）。
+       *
+       * 所以给这个按钮单独一个 class，配合 `.btn.mini` 用。
+       */
+      imgBtn.className = 'btn mini btn-view-image';
       imgBtn.textContent = '查看图片';
       imgBtn.title = '看它当时截到的那张图（就是它回这句话时所看的画面）';
       imgBtn.addEventListener('click', () => void openRawImage(it.id));

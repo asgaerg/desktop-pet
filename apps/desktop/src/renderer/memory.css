@@ -387,6 +387,64 @@ main {
   font-size: 11.5px;
 }
 
+/*
+ * 「查看图片」按钮：**实心蓝**，从旁边灰色小按钮里跳出来
+ * （2026-11-15 用户要求）
+ *
+ * 用户原话：「查看图片的ui不是很明显，深色和浅色状态都改成比较显眼的
+ *   颜色吧，深色主题下蓝色不错，浅色也蓝色算了」
+ *
+ * ## 为什么用实心而不是只换文字色
+ *
+ * 同一行里还有「修正」「加为固定」，它们都是**浅底灰字**。
+ * 只把文字改成蓝的，在一片灰里仍然不显眼 —— 用户说的"不明显"
+ * 就是这个问题。实心色块的视觉重量差了一个数量级。
+ *
+ * ## 🔴 文字色必须**按主题**分别给（不是一律白）
+ *
+ * 第一版写的是「蓝底 + 白字」，用 `var(--accent)` 当底色。实测对比度：
+ *
+ *     浅色  #2f6fed 上白字 -> 4.55:1  ✅ 刚过 WCAG AA
+ *     深色  #6aa9ff 上白字 -> 2.40:1  ❌ 远不够（AA 要 4.5）
+ *
+ * 原因是深色主题的 accent 是**亮蓝**（为了在深底上显眼），
+ * 而亮蓝配白字对比度反而低。
+ *
+ * 所以深色下改成**深色文字**：亮蓝底 + 深字，对比度 5.7:1。
+ *
+ * ⚠️ 这正是这个项目栽过的主题变量坑（见深色块里 `--row-hover` 那段
+ *    注释：只写 :root、深色块忘了一起换）。这次两个主题都给了值。
+ */
+.btn-view-image {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+/*
+ * 深色主题：亮蓝底 + **深字**（白字在亮蓝上只有 2.40:1，看不清）
+ *
+ * 用 `#14161c`（比 `--bg` 稍深）而不是纯黑：纯黑在亮蓝上对比过强，
+ * 看起来发"生硬"。
+ */
+html[data-theme='dark'] .btn-view-image {
+  color: #14161c;
+}
+
+/* 悬停：加深一点，但不能变成"另一种颜色"（那样像换了按钮） */
+.btn-view-image:hover:not(:disabled) {
+  /* color-mix 在 Chromium 111+ 支持；本机 Electron 32 = Chromium 128，安全 */
+  background: color-mix(in srgb, var(--accent) 82%, #000);
+  border-color: color-mix(in srgb, var(--accent) 82%, #000);
+}
+
+/* 键盘聚焦要看得见（实心蓝块上默认焦点环容易被淹没） */
+.btn-view-image:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .btn.on {
   background: var(--accent);
   border-color: var(--accent);
