@@ -5758,6 +5758,43 @@ class Gateway:
                 # 所以这里把结果**存进待用队列**，不 `speak_autonomously`。
                 # 用户关掉免打扰时由 `_flush_pending_snaps()` 取出来聊。
                 if self.scheduler.muted:
+                    """
+                    🔴 免打扰中：**截图立刻进原文记忆**（2026-11-15 用户要求）
+
+                    ## 用户原话
+
+                    > 「免打扰的时候截的图片也要保存到原文记忆里面，
+                    >   和之前的截图对话和宠物自己截图一样，在记忆管理中的
+                    >   原文记忆里面能看到图片」
+
+                    ## 改之前是什么样
+
+                    原来这里只往**内存队列** `_pending_snaps` 里塞一份：
+
+                        self._pending_snaps.append({...})
+
+                    然后等用户关掉免打扰，`_flush_pending_snaps()` 拿最新那张
+                    去开口（`speak_autonomously(image=...)`），那时才入库。
+
+                    **问题**：免打扰可能开一整天。那期间：
+                      · 库里没有这些图 -> 记忆管理里看不到
+                      · 进程被关掉（重启/关机）-> 队列没了，图**彻底丢失**
+                      · 用户想回头看"它在我免打扰时看到了什么" -> 看不了
+
+                    ## 现在怎么做
+
+                    **当下就写一条 assistant 记录**（带原图 BLOB）。
+                    这样：
+                      · 记忆管理里立刻能看到
+                      · 进程重启也不会丢
+                      · 关掉免打扰时仍然照旧开口（那条后续回复不带图，
+                        避免同一张图存两次 —— 见 `_flush_pending_snaps`）
+
+                    ⚠️ 文字用"免打扰期间截的一帧"这种**如实**的说法，
+                       不要假装是对话回复 —— 用户翻记忆时得能分辨出
+                       "这条是它自己截的，不是我说的什么"。
+                    """
+                    self._remember_dnd_snap(result)
                     self._pending_snaps.append(
                         {
                             "description": result.description,
@@ -6704,6 +6741,76 @@ class Gateway:
             },
         )
 
+    def _remember_dnd_snap(self, result: Any) -> None:
+        """把免打扰期间截的一帧写进原文记忆（带原图 BLOB）。
+
+        ## 用户要求（2026-11-15）
+
+        > 「免打扰的时候截的图片也要保存到原文记忆里面，和之前的截图对话
+        >   和宠物自己截图一样，在记忆管理中的原文记忆里面能看到图片」
+
+        ## 为什么单独一个方法，而不是复用 `speak_autonomously`
+
+        那个方法会**生成回复**（调模型、说话、弹气泡）—— 而免打扰的
+        全部意义就是"不出声、不弹气泡"。所以不能走它。
+
+        这里直接写库：一条 assistant 记录 + 原图。不生成、不说话。
+
+        ## 为什么用"观察"口吻而不是对话口吻
+
+        用户在记忆管理里翻到这条时，得能分辨出：
+        **"这是它自己截的"**，不是某轮对话的回复。
+
+        所以文字写成「（免打扰期间截的一帧）…」，而不是假装在聊天。
+
+        ## ⚠️ 失败必须安静
+
+        截图功能本身是锦上添花。写记忆失败（库锁、磁盘满）不该
+        影响截图循环 —— 那会让一次意外的写入失败变成"截图功能坏了"。
+        """
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return
+        try:
+            desc = str(getattr(result, "description", "") or "").strip()
+            titles = list(getattr(result, "titles", ()) or ())
+            image = getattr(result, "image", b"") or b""
+
+            # 文字：说明这是免打扰期间的一帧，附上画面描述
+            head = "（免打扰期间截的一帧）"
+            if desc:
+                body = f"{head}{desc}"
+            elif titles:
+                # 视觉不可用时退化：只有窗口标题也比空白强
+                body = f"{head}画面上是这些窗口：{'、'.join(titles[:5])}"
+            else:
+                body = f"{head}没看清画面"
+
+            # ⚠️ `session_id` 是 **Conversation** 的属性，不是 Gateway 的。
+            #    直接 `self.session_id` 会 AttributeError（这个项目踩过 N 次：
+            #    `reader`、`knowledge`、`modules` 都踩过）。
+            #    走 conversation 取，且用 getattr 兜底。
+            conv = getattr(self, "conversation", None)
+            session_id = str(getattr(conv, "session_id", "") or "")
+            if image:
+                memory.remember_turn(
+                    session_id,
+                    "assistant",
+                    body,
+                    image=bytes(image),
+                    image_mime="image/jpeg",
+                )
+            else:
+                # 没抓到图（视觉失败但仍有一帧信息）—— 至少把文字记下
+                memory.remember_turn(session_id, "assistant", body)
+            log.info(
+                "免打扰截图已入原文记忆（%d KB，%d 字描述）",
+                len(image) // 1024,
+                len(desc),
+            )
+        except Exception:  # noqa: BLE001 —— 写记忆失败不该影响截图
+            log.warning("免打扰截图写记忆失败（已忽略）", exc_info=True)
+
     async def _flush_pending_snaps(self) -> None:
         """免打扰结束后，用期间截的图开口聊（2026-11-04 用户要求）。
 
@@ -6773,8 +6880,20 @@ class Gateway:
                     ),
                     "screen": latest["description"],
                 },
-                image=latest.get("image") or None,
-                image_mime="image/jpeg",
+                # 🔴 **不再挂 image**（2026-11-15）
+                #
+                # 截图那一刻已经写进原文记忆了（见 `_remember_dnd_snap`）。
+                # 这里再传一次会让**同一张图存两条**：
+                #
+                #     assistant「（免打扰期间截的一帧）…」  [有图]  <- 截图时写的
+                #     assistant「诶，你刚才屏幕上…」        [有图]  <- 这里又写一遍
+                #
+                # 记忆管理里会出现两张一模一样的图，用户会以为"怎么重复了"。
+                #
+                # ⚠️ 代价：这条后续开口**自己在库里没图**。但它上一行就是
+                #    那张截图记录，用户翻的时候连着看得到，不影响理解。
+                image=None,
+                image_mime=None,
             )
         except Exception:  # noqa: BLE001 —— 开口失败不该影响别的
             log.warning("免打扰结束后的开口失败（已忽略）", exc_info=True)

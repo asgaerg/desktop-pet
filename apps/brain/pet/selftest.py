@@ -11137,13 +11137,27 @@ def test_reading(suite: "Suite") -> None:
                 "必须说明这是**期间**看到的，否则模型会说成「你现在屏幕上」",
             )
             _assert(not gw._pending_snaps, "开口之后队列要清空")
-            _assert(bool(spoke[0]["kw"].get("image")), "应当带上最新那张图")
+            # 🔴 2026-11-15 改：开口时**不再传图**
+            #
+            # 截图那一刻已经写进原文记忆了（`_remember_dnd_snap`）。
+            # 这里再传一次会让同一张图在库里存**两条**
+            # （一条「免打扰期间截的一帧」，一条开口回复），
+            # 记忆管理里看起来像重复。
+            #
+            # 原来这条断言是 `assertTrue(kw.image)`。改成断言"不该有图"，
+            # 正是这次改动的**反向保护** —— 谁要是又把 image 传回来，
+            # 这条会立刻失败。
+            _assert(
+                not spoke[0]["kw"].get("image"),
+                "开口时不该再传图 —— 截图那一刻已经存过一次了，"
+                "再传会让同一张图在记忆里出现两次",
+            )
         finally:
             import shutil as _sh
 
             _sh.rmtree(tmp, ignore_errors=True)
 
-        return "不合成语音；说话被抑制；仍然截图；关掉后立刻用待用图开口"
+        return "不合成语音；说话被抑制；仍然截图；关掉后用画面描述开口（图已在截图时入库）"
 
     @suite.check("免打扰：状态冻结，但精力/心情照常变（关掉后继续）")
     def _() -> str:
@@ -11304,6 +11318,117 @@ def test_reading(suite: "Suite") -> None:
             _sh.rmtree(tmp, ignore_errors=True)
 
         return "拦截在 set_enabled 之前；且基于 muted 判断（关着时放行）"
+
+    @suite.check("免打扰截图：立刻进原文记忆，记忆管理里能看到图")
+    def _() -> str:
+        """用户 2026-11-15 要求：
+
+        > 「免打扰的时候截的图片也要保存到原文记忆里面，和之前的截图对话
+        >   和宠物自己截图一样，在记忆管理中的原文记忆里面能看到图片」
+
+        ## 改之前是什么样
+
+        免打扰时截图只塞进**内存队列** `_pending_snaps`，等用户关掉免打扰
+        才通过 `speak_autonomously(image=...)` 入库。那一整段时间里：
+
+        · 库里没有这些图 -> 记忆管理里看不到
+        · 进程被关掉（重启/关机）-> 队列没了，**图彻底丢失**
+        · 用户想回头看"它在我免打扰时看到了什么" -> 看不了
+
+        免打扰常常开一整天，这个洞很实际。
+
+        ## 现在
+
+        截图当下就写一条 assistant 记录（带原图 BLOB）。
+        关掉免打扰时仍然照旧开口，但**不再传图** ——
+        否则同一张图会存两条，记忆管理里看起来像重复。
+
+        ## 这条守什么
+
+        ① 写进去的记录 `has_image = 1`
+        ② 能从库里取回原始字节（`get_raw_image`）
+        ③ 没抓到图时也能写一条文字记录（视觉失败不该整条丢掉）
+        ④ 文字用「（免打扰期间截的一帧）」开头 —— 用户翻记忆时
+           得能分辨"这是它自己截的"，不是某轮对话的回复
+        """
+        import os as _os
+        import tempfile
+        from pathlib import Path as _P
+
+        from .config import load_config
+        from .gateway import Gateway
+
+        tmp = _P(tempfile.mkdtemp(prefix="pet-selftest-dndsnap-"))
+        old = _os.environ.get("PET_DATA_DIR")
+        _os.environ["PET_DATA_DIR"] = str(tmp)
+        try:
+            cfg = load_config(_P(r"F:\ai\config\persona.yaml"))
+            gw = Gateway(cfg)
+        finally:
+            if old is None:
+                _os.environ.pop("PET_DATA_DIR", None)
+            else:
+                _os.environ["PET_DATA_DIR"] = old
+
+        memory = gw.memory
+        _assert(memory is not None, "应当建起记忆库")
+
+        # 最小 JPEG（只要能过魔数归一化即可，不需要是真图）
+        fake = b"\xff\xd8\xff\xe0" + b"\x00" * 200 + b"\xff\xd9"
+
+        class _Snap:
+            description = "用户正在看一个代码编辑器"
+            titles = ("main.py - VSCode",)
+            image = fake
+
+        gw._remember_dnd_snap(_Snap())
+
+        rows = memory.list_raw(limit=20)
+        hit = None
+        for r in rows:
+            text = str(r.get("text") or "")
+            if "免打扰期间" in text:
+                hit = r
+                break
+
+        _assert(hit is not None, "应当有一条「免打扰期间截的一帧」的原文记忆")
+        _assert(
+            bool(hit.get("has_image")),
+            "那条记录必须有图 —— 用户要求的就是「记忆管理里能看到图片」",
+        )
+
+        # 取图能拿回原始字节
+        raw_id = int(hit.get("id") or 0)
+        got = memory.get_raw_image(raw_id)
+        _assert(got is not None, f"get_raw_image({raw_id}) 应当能拿到图")
+        data, mime = got
+        _assert(data == fake, f"取回的字节应当和原图一致（拿到 {len(data)} 字节）")
+        _assert("jpeg" in str(mime).lower(), f"mime 应当是 jpeg，实际 {mime!r}")
+
+        # 视觉失败（只有窗口标题、没有图）时也要写一条
+        class _SnapNoImg:
+            description = ""
+            titles = ("某个窗口",)
+            image = b""
+
+        gw._remember_dnd_snap(_SnapNoImg())
+        rows2 = memory.list_raw(limit=5)
+        _assert(
+            any("免打扰期间" in str(r.get("text") or "") for r in rows2),
+            "没抓到图时也该留一条文字记录（视觉失败不该整条丢掉）",
+        )
+
+        # 关掉免打扰后的开口**不该再传图**（否则同图存两条）
+        import inspect as _inspect
+
+        src = _inspect.getsource(type(gw)._flush_pending_snaps)
+        _assert(
+            "image=None" in src,
+            "免打扰结束后的开口不该再传图 —— 截图那一刻已经存过一次了，"
+            "再传会让同一张图在记忆里出现两次",
+        )
+
+        return "截图即刻入库、有图、能取回；无图也能记；开口不再重复存图"
 
     @suite.check("知识归档：同一本书累加版本，按章号能定位到对应那版")
     def _() -> str:
