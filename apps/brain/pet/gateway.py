@@ -340,6 +340,37 @@ def _default_state_dir() -> Path:
     return paths.data_dir()
 
 
+def _guess_image_mime(data: bytes) -> str:
+    """按**字节魔数**猜图片 MIME。
+
+    ## 为什么需要它（2026-11-15）
+
+    `_remember_dnd_snap` 里原来写死 `image_mime="image/jpeg"`，
+    但采集器编码的是 **PNG**。`store.add_turn` 内部会按魔数再归一化，
+    所以功能一直没坏 —— 但这个声明是假的，误导后来读代码的人。
+
+    ## ⚠️ 一开始只改了调用、忘了定义，被 `except` 吞掉
+
+    那次的表现是：截图正常、日志里只有一行
+    `免打扰截图写记忆失败（已忽略）`，库里没有新记录 ——
+    正好踩中这个项目反复出现的"兜底 except 掩盖真错误"。
+
+    ⚠️ 认不出来时返回 `image/jpeg` 而不是空串：
+        `store.add_turn` 用 `image_mime or "image/jpeg"` 兜底，两者等价，
+        但这里显式给值能让调用方拿到一个确定的东西。
+    """
+    head = bytes(data[:8]) if data else b""
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and bytes(data[8:12]) == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
 def _ms_to_s(value: Any) -> Optional[float]:
     """JS 的毫秒时间戳 -> Python 的秒（库里的 `ts` 是 `time.time()` 的秒）。
 
@@ -6774,7 +6805,16 @@ class Gateway:
         try:
             desc = str(getattr(result, "description", "") or "").strip()
             titles = list(getattr(result, "titles", ()) or ())
-            image = getattr(result, "image", b"") or b""
+            # 🔴 存**高清那份**（2026-11-15 用户反馈「挺糊的」）
+            #
+            # `result.image` 是压到长边 768 的版本（喂模型用，省 token）。
+            # 用户会在记忆管理里点开看，768px 看着就是糊的。
+            # 所以 `Frame.image_hd`（长边 1600）优先，没有才退回 `image`。
+            image = (
+                getattr(result, "image_hd", b"")
+                or getattr(result, "image", b"")
+                or b""
+            )
 
             # 文字：说明这是免打扰期间的一帧，附上画面描述
             head = "（免打扰期间截的一帧）"
@@ -6798,7 +6838,11 @@ class Gateway:
                     "assistant",
                     body,
                     image=bytes(image),
-                    image_mime="image/jpeg",
+                    # ⚠️ 原来写死 "image/jpeg"，但采集器编码的是 **PNG**。
+                    #    `remember_turn` 会按魔数归一化，所以功能没坏，
+                    #    但这个声明是假的。改成按真实字节判断（同一条路径上
+                    #    少一个"看起来对、其实不对"的地方）。
+                    image_mime=_guess_image_mime(bytes(image)),
                 )
             else:
                 # 没抓到图（视觉失败但仍有一帧信息）—— 至少把文字记下

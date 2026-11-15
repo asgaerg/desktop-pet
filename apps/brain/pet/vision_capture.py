@@ -118,17 +118,47 @@ class PillowCapturer:
         self,
         include_titles: bool = True,
         keep_image: bool = False,
-        max_edge_px: int = 768,
+        max_edge_px: int = 0,
+        hd_edge_px: int = 0,
     ) -> None:
         """
         :param keep_image: 是否保留编码后的图像。只有内容层里配了 OCR 或视觉模型时
             才该打开 —— 否则每帧都白白编码一张 PNG，纯属浪费。
-        :param max_edge_px: 保留图像时把长边压到这个尺寸。这一步直接决定
-            送给视觉模型的 token 量，是成本控制里最有效的一刀。
+        :param max_edge_px: 保留图像时长边压到多少。**0 = 不缩放，原像素**
+            （2026-11-15 用户要求改成默认）。
+        :param hd_edge_px: **给人看的**那份长边多少。**0 = 不缩放**。
+
+        ## 🔴 2026-11-15：默认从 768 改成**不缩放**
+
+        用户原话：
+
+        > 「所以图片是模糊截图的吗，难怪有时候它图片识别不太清楚，
+        >   这样，所有截图全都用原图像素」
+
+        ## 原来 768 的代价（两个都中招）
+
+        那个数字是**为省 token** 定的：压到长边 768，一次视觉调用的
+        图像 token 少很多。但它同时影响了两件不该被压的事：
+
+            ① 存进原文记忆的那张 —— 用户在记忆管理点开看，糊
+            ② **喂给视觉模型的那张** —— 小字、代码、UI 细节全糊，
+               识别准确率因此下降（用户说的"识别不太清楚"）
+
+        ② 才是真损失：省的是钱，赔的是准确率。而分辨率的收益
+        不是线性的 —— 768 到 1920，小字从"糊成一团"到"看得清"，
+        这一步的差别远大于 1920 到 4K。
+
+        ## 现在的策略
+
+        默认**原像素不缩放**（1080p 屏幕就是 1920x1080）。
+        `max_edge_px` 留着当"上限保险"：设了才生效，设 0 不缩放。
         """
         self.include_titles = include_titles
         self.keep_image = keep_image
-        self.max_edge_px = max(64, max_edge_px)
+        self.max_edge_px = max(0, max_edge_px)
+        # 高清那份：0 也当"不缩放"。两者默认一致（都是原图），
+        # 编两份纯粹是历史包袱 —— 但保留字段免得下游全改。
+        self.hd_edge_px = max(0, hd_edge_px)
         self._grabber: Any = None
         self._import_error: Optional[str] = None
         try:
@@ -156,6 +186,15 @@ class PillowCapturer:
         try:
             rgb = image.convert("RGB")
             grid = grid_from_rgb(rgb.tobytes(), rgb.width, rgb.height, channels=3)
+            # 🔴 2026-11-15：**只编一份**（原像素）。
+            #
+            # 原来编两份（768 喂模型 + 1600 存记忆）。用户要求
+            # 「所有截图全都用原图像素」之后，两者变成同一张 ——
+            # 再编两次就是纯浪费（一张 1080p PNG 编码要几十毫秒）。
+            #
+            # ⚠️ 保留 `image_hd` 字段并指向同一份字节：下游
+            #    （`gateway._remember_dnd_snap` 等）还在读它，
+            #    指同一份等于"高清版就是原图"，语义也对。
             payload = self._encode(rgb) if self.keep_image else None
         except Exception:  # noqa: BLE001
             log.debug("像素转换失败", exc_info=True)
@@ -166,18 +205,33 @@ class PillowCapturer:
             height=rgb.height,
             titles=_window_titles() if self.include_titles else (),
             image=payload,
+            image_hd=payload,
         )
 
-    def _encode(self, image: Any) -> Optional[bytes]:
-        """缩放并编码成 PNG。缩放是省 token 的关键一步。"""
+    def _encode(self, image: Any, *, edge: Optional[int] = None) -> Optional[bytes]:
+        """编码成 PNG。**默认不缩放**（原像素）。
+
+        :param edge: 长边上限。不传用 `max_edge_px`；两者都是 0（默认）
+            时不缩放。设了就按那个上限等比缩。
+
+        ⚠️ 缩放用 LANCZOS —— 默认的 NEAREST 缩小后会明显锯齿/发糊，
+           而那正是用户报「挺糊的」的一部分原因。
+        """
         import io  # noqa: PLC0415
 
+        limit = int(self.max_edge_px if edge is None else edge)
         try:
-            longest = max(image.width, image.height)
-            if longest > self.max_edge_px:
-                scale = self.max_edge_px / float(longest)
-                target = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
-                image = image.resize(target)
+            if limit > 0:
+                longest = max(image.width, image.height)
+                if longest > limit:
+                    scale = limit / float(longest)
+                    target = (
+                        max(1, int(image.width * scale)),
+                        max(1, int(image.height * scale)),
+                    )
+                    from PIL import Image as _Image  # noqa: PLC0415
+
+                    image = image.resize(target, _Image.LANCZOS)
             buffer = io.BytesIO()
             image.save(buffer, format="PNG", optimize=True)
             return buffer.getvalue()
@@ -249,10 +303,17 @@ def build_capturer(config: dict[str, Any], keep_image: bool = False) -> ScreenCa
 
         return NullCapturer()
     if provider == "pillow":
+        # ⚠️ 这里**不能用 `or 0` 或 `or 768`** —— `0 or X` 在 Python 里等于 X，
+        #    会把"不缩放（0）"吃掉，静默变回缩放。显式判 None 才安全。
+        _raw_edge = config.get("max_edge_px")
+        _raw_hd = config.get("hd_edge_px")
         capturer = PillowCapturer(
             include_titles=bool(config.get("include_titles", True)),
             keep_image=keep_image,
-            max_edge_px=int(config.get("max_edge_px") or 768),
+            # 🔴 2026-11-15：默认**不缩放**（原像素）。
+            # 用户原话：「所有截图全都用原图像素」。
+            max_edge_px=0 if _raw_edge is None else int(_raw_edge),
+            hd_edge_px=0 if _raw_hd is None else int(_raw_hd),
         )
         if capturer.available:
             log.info(

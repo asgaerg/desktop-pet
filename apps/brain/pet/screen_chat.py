@@ -96,9 +96,16 @@ class SnapResult:
     height: int = 0
     elapsed_ms: float = 0.0
     # 抓到的原始图像字节（**不落盘**，只在内存里活过一次调用）
-    # 原图字节（JPEG）：autosnap 说话时写进原文记忆，用户能回看"它当时看到什么"
+    # 原图字节（PNG）：autosnap 说话时写进原文记忆，用户能回看"它当时看到什么"
     image: bytes = b""
     image_bytes: int = 0
+    #: 高清版（存记忆**给人看**的那份）—— 2026-11-15 加。
+    #:
+    #: `image` 是压到长边 768 的版本（喂视觉模型，省 token）。
+    #: 用户反馈在记忆管理里点开「挺糊的」，所以另存一份长边 1600 的。
+    #:
+    #: ⚠️ 存记忆时**优先用这个**，没有才退回 `image`。
+    image_hd: bytes = b""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -185,10 +192,28 @@ def capture_once(config: Any) -> Optional[Frame]:
     直接返回"没有可发送的图像数据"，而它看起来像"模型不支持"。
     """
     section = dict(getattr(config, "screenshot", None) or {})
+    """
+    🔴 `max_edge_px` 的默认值是 **0（不缩放，原像素，2026-11-15 用户要求）**
+
+    ## ⚠️ 这里曾经有个隐蔽的坑：`or 768` 把 0 吃掉了
+
+    原来写的是：
+
+        max_edge_px=int(section.get("max_edge_px") or 768),
+
+    `0 or 768` 在 Python 里等于 **768** —— 于是用户/配置里明明写的是
+    "不缩放（0）"，取出来还是 768。
+
+    表现极难查：配置文件里写着 0，日志里也不算错，但图一直是 768 宽。
+
+    改成"显式判 None"：只有**没配**时才用默认值，配了 0 就是 0。
+    """
+    raw_edge = section.get("max_edge_px")
+    max_edge = 0 if raw_edge is None else int(raw_edge)
     capturer = PillowCapturer(
         include_titles=True,
         keep_image=True,
-        max_edge_px=int(section.get("max_edge_px") or 768),
+        max_edge_px=max_edge,
     )
     if not capturer.available:
         log.warning("截图不可用（Pillow 没有 ImageGrab）")
@@ -283,6 +308,8 @@ async def _capture_and_describe_locked(config: Any) -> SnapResult:
         height=frame.height,
         image=frame.image or b"",
         image_bytes=len(frame.image or b""),
+        # 高清那份（给记忆管理里人看）——`Frame.image_hd` 可能为 None
+        image_hd=(getattr(frame, "image_hd", None) or b""),
     )
 
     # ② 隐私检查（**在发给模型之前**）

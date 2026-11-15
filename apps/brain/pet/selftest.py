@@ -11428,7 +11428,95 @@ def test_reading(suite: "Suite") -> None:
             "再传会让同一张图在记忆里出现两次",
         )
 
-        return "截图即刻入库、有图、能取回；无图也能记；开口不再重复存图"
+        # 🔴 `_guess_image_mime` 必须真的存在（2026-11-15 踩过）
+        #
+        # 我改了调用（把写死的 "image/jpeg" 换成按魔数判），却**忘了定义**
+        # 那个函数。表现极隐蔽：
+        #
+        #     截图正常、日志只有一行「免打扰截图写记忆失败（已忽略）」、
+        #     库里没有新记录
+        #
+        # 因为 `_remember_dnd_snap` 外层有 `except Exception` 兜底。
+        # 这正是本项目反复出现的"兜底 except 掩盖真错误"。
+        from .gateway import _guess_image_mime
+
+        _assert(
+            _guess_image_mime(b"\x89PNG\r\n\x1a\n") == "image/png",
+            "PNG 魔数应当认成 image/png",
+        )
+        _assert(
+            _guess_image_mime(b"\xff\xd8\xff\xe0") == "image/jpeg",
+            "JPEG 魔数应当认成 image/jpeg",
+        )
+
+        # 🔴 截图分辨率：默认**不缩放**（2026-11-15 用户要求）
+        #
+        # 「所有截图全都用原图像素」。原来压到长边 768，两头都在赔：
+        # 记忆里那张糊，喂视觉模型的那张也糊（识别准确率下降）。
+        #
+        # ⚠️ 这里只验 `PillowCapturer` 的默认值，不真去截屏
+        #    （自检不该依赖桌面会话）。
+        from .vision_capture import PillowCapturer
+
+        cap = PillowCapturer(keep_image=True)
+        _assert(
+            cap.max_edge_px == 0,
+            f"默认应当不缩放（0），实际 {cap.max_edge_px} —— "
+            "768 会让小字糊到影响识别",
+        )
+        # 给个假图验编码不缩放：造一张 200x100，编出来还得是 200x100
+        try:
+            from PIL import Image as _Img
+
+            fake_img = _Img.new("RGB", (200, 100), (30, 40, 50))
+            encoded = cap._encode(fake_img)
+            if encoded:
+                import io as _io
+
+                back = _Img.open(_io.BytesIO(encoded))
+                _assert(
+                    back.size == (200, 100),
+                    f"不缩放时编出来应当还是 200x100，实际 {back.size}",
+                )
+        except ImportError:
+            pass  # 没有 Pillow 就跳过这条（不影响主断言）
+
+        # ⚠️ `or` 吃 0 的坑：`0 or 768` 等于 768，会让"不缩放"静默失效
+        #
+        # ⚠️ 判据要**排除注释行** —— 那段说明里本身就引用了 `or 768`
+        #    （用来说明这个坑），第一版直接 `"or 768" not in src`，
+        #    被自己的注释误伤成失败。
+        import inspect as _ins2
+
+        from . import screen_chat as _sc
+
+        _sc_src = _ins2.getsource(_sc.capture_once)
+        _code_lines = [
+            ln for ln in _sc_src.splitlines() if not ln.strip().startswith("#")
+        ]
+        # 去掉块注释（三引号之间的内容）
+        _no_doc = []
+        _in_doc = False
+        for ln in _code_lines:
+            if ln.count('"""') == 1:
+                _in_doc = not _in_doc
+                continue
+            if _in_doc:
+                continue
+            _no_doc.append(ln)
+        _real_code = "\n".join(_no_doc)
+        _assert(
+            "or 768" not in _real_code,
+            "capture_once 的**代码**里不能用 `or 768` —— `0 or 768` 等于 768，"
+            "配置写了不缩放也会被吃掉",
+        )
+        _assert(
+            "is None" in _real_code,
+            "capture_once 应当用 `is None` 判断显式给默认值 —— "
+            "只有没配时才回填，配了 0 就是 0",
+        )
+
+        return "截图即刻入库、有图、能取回；无图也能记；开口不重复存图；默认不缩放"
 
     @suite.check("知识归档：同一本书累加版本，按章号能定位到对应那版")
     def _() -> str:
