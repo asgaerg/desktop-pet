@@ -637,16 +637,41 @@ function applyParaGap(px) {
   document.documentElement.style.setProperty('--para-gap', gap + 'px');
 }
 
+/**
+ * 表情包最大边长 -> CSS 变量（2026-11-16 用户要求）。
+ *
+ * ## 用户原话
+ *
+ * > 「表情包的图片大小再大写吧，现在感觉小了看不太清楚」
+ * > 「做成这5档可调节，设置里面切换吧。」
+ *
+ * ⚠️ 改了之后**正在显示**的表情包会立刻变大 —— 因为 CSS 变量是
+ *    实时生效的，不用等下一句。这正是用户想要的（调完马上能看效果）。
+ *
+ * ⚠️ 不合法就**不动**（保留当前值），不要回退成某个默认数字：
+ *    万一主进程传了个 undefined，回退成 120 会让用户的图突然缩小。
+ */
+function applyStickerSize(px) {
+  const n = Number(px);
+  if (!Number.isFinite(n) || n <= 0) return;
+  const size = Math.max(80, Math.min(400, Math.round(n)));
+  document.documentElement.style.setProperty('--sticker-max', size + 'px');
+}
+
 window.bubble.on('bubble:message', (payload) => {
   const kind = payload && payload.kind;
   if (kind === 'config') {
-    // 设置里刚改完段间距 -> 立刻生效（只改 CSS 变量，不动显示状态）
+    // 设置里刚改完 -> 立刻生效（只改 CSS 变量，不动显示状态）
     applyParaGap(payload && payload.paraGap);
+    applyStickerSize(payload && payload.stickerSize);
     return;
   }
   if (payload && Number.isFinite(Number(payload.paraGap))) {
     // 顺带把最新段间距应用上（与 lingerMs 同一条通道的套路）
     applyParaGap(payload.paraGap);
+  }
+  if (payload && Number.isFinite(Number(payload.stickerSize))) {
+    applyStickerSize(payload.stickerSize);
   }
   switch (kind) {
     case 'thinking':

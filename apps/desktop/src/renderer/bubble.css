@@ -342,8 +342,20 @@ body {
  */
 .bubble-sticker {
   display: block;
-  max-width: 120px;
-  max-height: 120px;
+  /*
+   * 尺寸由设置决定（2026-11-16 用户要求 5 档可调）。
+   *
+   * `--sticker-max` 由渲染层根据主进程下发的配置写入 <html> 上，
+   * 这里只是读取。兜底 120px 是改之前的旧值 —— 万一变量没设上，
+   * 至少还是原来那个能用的尺寸，不会变成 0 或撑满窗口。
+   *
+   * ⚠️ 用 max-width/max-height 而不是 width/height：
+   *    表情包原图长宽比不一（实测 1200 张里 43% 不是正方形，
+   *    有 400x88 这种长条）。写死 width 会把长条图拉变形。
+   */
+  max-width: var(--sticker-max, 120px);
+  max-height: var(--sticker-max, 120px);
+  /* 小图不会被放大到糊 —— max-* 只在超出时约束，不强制撑满 */
   border-radius: 8px;
   margin-bottom: 6px;
   /* 深色/浅色主题下都能看清轮廓 */

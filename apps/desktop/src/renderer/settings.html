@@ -283,6 +283,51 @@
             </div>
           </div>
 
+          <!--
+            表情包显示尺寸（2026-11-16 用户要求）
+
+            用户原话：
+              「表情包的图片大小再大写吧，现在感觉小了看不太清楚，
+                你告诉我现在的尺寸我看看」
+              「做成这5档可调节，设置里面切换吧。」
+
+            ## 为什么是下拉框而不是滑块
+
+            ① 与这一页其它控件一致（`wrapSelects()` 已经处理过箭头/配色/键盘）
+            ② 只用 5 档，滑块会滑出 187px 这种没意义的中间值
+
+            ## 档位怎么定的
+
+            表情包原图实测（采样 1200 张）：宽中位 400、高中位 400，
+            57% 接近正方形。所以：
+
+                120  改之前的旧值，只占原图 30%（用户说"看不太清楚"）
+                200  原图 50%，默认
+                280  原图 70%，最大档
+
+            ⚠️ 上限 280 是因为气泡窗口 `BUBBLE_MAX_WIDTH = 520`，
+               再大就会频繁触发"从下往上裁"那条兜底逻辑。
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">表情包大小</span>
+              <span class="setting-desc">
+                气泡里表情包的最大边长，<strong>默认 200</strong>
+                （原来的 120 有点小，看不清画面）。改完<strong>立刻生效</strong>，
+                当前正显示的图也会跟着变大。
+                <br />
+                原图大多是 400×400：200 约等于原图一半，280 约等于七成。
+              </span>
+            </div>
+            <select id="sticker-size">
+              <option value="120">小 · 120</option>
+              <option value="160">中偏小 · 160</option>
+              <option value="200">中 · 200（推荐）</option>
+              <option value="240">大 · 240</option>
+              <option value="280">特大 · 280</option>
+            </select>
+          </div>
+
           <div class="setting">
             <div class="setting-text">
               <span class="setting-title">气泡上方间距</span>

@@ -900,6 +900,14 @@ export class BubbleWindow {
   private paraGapPx = 4;
 
   /**
+   * 表情包最大边长（px）当前值 —— 2026-11-16 用户要求。
+   *
+   * 默认 200（原图实测中位 400，200 = 原图 50%）。
+   * 合法值见 `settingsStore.STICKER_SIZE_STEPS`（120/160/200/240/280）。
+   */
+  private stickerSizePx = 200;
+
+  /**
    * 气泡摆放的三个可调参数（2026-10-18，设置 → 桌宠）：
    *   · gapAbovePx —— 气泡与头顶的间距（原 GAP_ABOVE_HEAD）
    *   · gapSidePx  —— 气泡与左右立绘的间距（原 SIDE_GAP）
@@ -929,6 +937,30 @@ export class BubbleWindow {
     this.paraGapPx = gap;
     // 走 bubble:message 通道（kind='config'），渲染层只改 CSS 变量、不 show
     this.send('bubble:message', { kind: 'config', paraGap: gap });
+  }
+
+  /**
+   * 表情包显示的最大边长（px）—— 2026-11-16 用户要求。
+   *
+   * ## 用户原话
+   *
+   * > 「表情包的图片大小再大写吧，现在感觉小了看不太清楚」
+   * > 「做成这5档可调节，设置里面切换吧。」
+   *
+   * ## 怎么生效
+   *
+   * 和 `paraGap` 同一条通道（`bubble:message` / `kind='config'`）：
+   * 渲染层收到后写进 CSS 变量 `--sticker-max`，**正在显示**的表情包
+   * 立刻跟着变大，不用等下一句说话。
+   *
+   * ⚠️ 合法值由 `settingsStore.clampStickerSize()` 管（5 档），
+   *    这里只做防御性夹紧 —— 万一有人绕过设置直接调这个方法。
+   */
+  setStickerSize(px: number): void {
+    const size = Math.max(80, Math.min(400, Math.round(Number(px) || 0)));
+    if (size === this.stickerSizePx) return;
+    this.stickerSizePx = size;
+    this.send('bubble:message', { kind: 'config', stickerSize: size });
   }
 
   send(channel: string, payload: unknown): void {

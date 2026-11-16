@@ -34,6 +34,9 @@ const CHANNEL = {
   /** 气泡段间距（px，2026-10-17 加） */
   bubbleParaGap: 'settings:bubble-para-gap',
   setBubbleParaGap: 'settings:set-bubble-para-gap',
+  /** 表情包显示尺寸（5 档，2026-11-16 加） */
+  stickerSize: 'settings:sticker-size',
+  setStickerSize: 'settings:set-sticker-size',
   /** 气泡摆放参数（上方/左右间距 + 贴合度，2026-10-18 加） */
   bubbleGapAbove: 'settings:bubble-gap-above',
   setBubbleGapAbove: 'settings:set-bubble-gap-above',
@@ -407,6 +410,20 @@ const api = {
 
   setBubbleParaGap(value: number): Promise<unknown> {
     return ipcRenderer.invoke(CHANNEL.setBubbleParaGap, { value });
+  },
+
+  /**
+   * 表情包显示尺寸（最大边长 px，5 档：120/160/200/240/280）。
+   *
+   * 2026-11-16 用户要求：「做成这5档可调节，设置里面切换吧。」
+   * 读回数字，写用 `setStickerSize(px)`。
+   */
+  stickerSize(): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.stickerSize);
+  },
+
+  setStickerSize(value: number): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.setStickerSize, { value });
   },
 
   /** 气泡与头顶间距（px，默认 6）。 */

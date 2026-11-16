@@ -822,6 +822,8 @@ function sendToBubble(
     lingerMs: petWindow?.bubbleLinger ?? readSettings().bubbleLingerMs,
     // 段间距同款套路（2026-10-17）：随消息下发，设置里改完立刻生效
     paraGap: readSettings().bubbleParaGap,
+    // 表情包尺寸同款套路（2026-11-16 用户要求 5 档可调）
+    stickerSize: readSettings().stickerSizePx,
     /*
      * 🖼 表情包数据（2026-11-06）。
      *
@@ -1540,6 +1542,12 @@ async function main(): Promise<void> {
       gapSide: st.bubbleGapSidePx,
       coreShrink: st.bubbleCoreShrinkPct,
     });
+    // 表情包尺寸（2026-11-16）。走 `bubble:message` / kind='config' 通道，
+    // ⚠️ 必须在气泡窗口 ready 之后调用才会被收到 —— 见 `setStickerSize`
+    //    内部用的是 `send()`，它在 ready 之前是静默丢弃的。
+    //    所以这里只是"尽早推一次"，真正的兜底是每条 bubble:message
+    //    都会带 `stickerSize` 字段（见下面 buildBubblePayload）。
+    bubbleWindow.setStickerSize(st.stickerSizePx);
   }
   /*
    * **状态条窗口**（2026-10-11 用户要求）—— 贴屏幕左/右边缘的竖条。
@@ -3674,6 +3682,28 @@ function registerRendererIpc(): void {
     bubbleWindow?.setParaGap(result.settings.bubbleParaGap);
     return {
       bubbleParaGap: result.settings.bubbleParaGap,
+      saved: result.ok,
+      path: result.path,
+      error: result.error,
+    };
+  });
+
+  // ---- 表情包显示尺寸（5 档，2026-11-16 用户要求）----
+  //
+  // 用户原话：
+  //   「表情包的图片大小再大写吧，现在感觉小了看不太清楚」
+  //   「做成这5档可调节，设置里面切换吧。」
+  //
+  // ⚠️ 合法值只有 5 档（120/160/200/240/280，见 settingsStore）。
+  //    `writeSettings` 内部会用 `clampStickerSize()` 归一化 ——
+  //    渲染层传 187 也会落到 200，不会出现"谁都没见过的尺寸"。
+  ipcMain.handle('settings:sticker-size', () => readSettings().stickerSizePx);
+  ipcMain.handle('settings:set-sticker-size', (_event, payload: { value?: unknown }) => {
+    const result = writeSettings({ stickerSizePx: Number(payload?.value) });
+    // 立刻推进气泡窗口 —— 正在显示的表情包也跟着变大，不用等下一句
+    bubbleWindow?.setStickerSize(result.settings.stickerSizePx);
+    return {
+      stickerSizePx: result.settings.stickerSizePx,
       saved: result.ok,
       path: result.path,
       error: result.error,

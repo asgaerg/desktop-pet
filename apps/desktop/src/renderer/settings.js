@@ -185,6 +185,8 @@ const ui = {
   /** 「自言自语」持续多久（分钟，2026-10-17 用户要求；0 = 不回落） */
   monologueDecay: el('monologue-decay'),
   bubbleParaGap: el('bubble-para-gap'),
+  // 表情包显示尺寸（5 档，2026-11-16）
+  stickerSize: el('sticker-size'),
   bubbleGapAbove: el('bubble-gap-above'),
   bubbleGapSide: el('bubble-gap-side'),
   bubbleCoreShrink: el('bubble-core-shrink'),
@@ -633,6 +635,51 @@ function bindNumberField(input, read, write) {
   })();
 }
 
+/**
+ * 下拉框绑定（2026-11-16 加，给表情包尺寸用）。
+ *
+ * ## 为什么不用 `bindNumberField`
+ *
+ * 那个是数字输入框的：带"边打边存"防抖、min/max 夹取、空值回读。
+ * 对下拉框全都不适用 —— select 只有合法选项，用户不可能敲出 187。
+ *
+ * ## 与 `initThemeSelect` 的区别
+ *
+ * 主题那个要广播到**所有窗口**（主进程刷属性），所以单独写了一个。
+ * 这个只影响气泡窗口，逻辑就是"读一次回显 + change 时写"，
+ * 所以做成通用函数，以后再有下拉框可以复用。
+ *
+ * ⚠️ 写入后要用**主进程返回的值**回显，不是用户选的值。
+ *    主进程会归一化（传 187 会变成 200），
+ *    直接用用户选的值会让界面和实际生效值不一致。
+ */
+function bindSelect(select, read, write, toValue) {
+  if (!select) return;
+
+  select.addEventListener('change', async () => {
+    const value = toValue(select.value);
+    try {
+      const result = await write(value);
+      const applied = result && toValue(result.applied);
+      if (Number.isFinite(applied) && String(applied) !== String(select.value)) {
+        select.value = String(applied);
+      }
+      reportPersist(result);
+    } catch (error) {
+      ui.status.textContent = `保存失败：${error.message}`;
+    }
+  });
+
+  void (async () => {
+    try {
+      const value = toValue(await read());
+      if (Number.isFinite(value)) select.value = String(value);
+    } catch {
+      /* 读不到就保持默认显示，不影响其它设置 */
+    }
+  })();
+}
+
 /* ------------------------------------------------------------------ 读取 */
 
 async function load() {
@@ -899,6 +946,25 @@ bindNumberField(
       error: r && r.error,
     };
   },
+);
+
+// 表情包显示尺寸（5 档，2026-11-16 用户要求）
+//
+// ⚠️ `applied` 用主进程返回的 `stickerSizePx` —— 它会归一化到 5 档之一，
+//    直接用用户选的值会让界面和实际生效值不一致。
+bindSelect(
+  ui.stickerSize,
+  async () => Number(await api.stickerSize()),
+  async (px) => {
+    const r = await api.setStickerSize(px);
+    return {
+      applied: r && Number.isFinite(Number(r.stickerSizePx)) ? Number(r.stickerSizePx) : px,
+      saved: r && r.saved,
+      path: r && r.path,
+      error: r && r.error,
+    };
+  },
+  (value) => Number(value),
 );
 
 /*

@@ -6797,6 +6797,102 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
   );
 }
 
+/*
+ * ---- 表情包显示尺寸：5 档可调（2026-11-16 用户要求）----
+ *
+ * 用户原话：
+ *
+ *   「表情包的图片大小再大写吧，现在感觉小了看不太清楚，
+ *     你告诉我现在的尺寸我看看」
+ *   「做成这5档可调节，设置里面切换吧。」
+ *
+ * ## 为什么要测这几条
+ *
+ * 这个功能横跨四处，漏掉任何一处都表现为"设置改了没用"：
+ *
+ *     settingsStore.ts   档位常量 + 归一化
+ *     index.ts           IPC + 启动注入 + 每条消息带上
+ *     bubbleWindow.ts    推送（ready 前会丢弃，靠每条消息兜底）
+ *     bubble.css/js      读 CSS 变量
+ *
+ * 而开发环境看不到气泡，只能靠静态检查兜住。
+ */
+{
+  const mainDir = path.join(here, '..', 'src', 'main');
+  const rendererDir = path.join(here, '..', 'src', 'renderer');
+  const storeSrc = readFileSync(path.join(mainDir, 'settingsStore.ts'), 'utf-8');
+  const bubbleWinSrc = readFileSync(path.join(mainDir, 'bubbleWindow.ts'), 'utf-8');
+  const indexSrc = readFileSync(path.join(mainDir, 'index.ts'), 'utf-8');
+  const bubbleCss = readFileSync(path.join(rendererDir, 'bubble.css'), 'utf-8');
+  const bubbleJs = readFileSync(path.join(rendererDir, 'bubble.js'), 'utf-8');
+  const settingsHtml = readFileSync(path.join(rendererDir, 'settings.html'), 'utf-8');
+
+  check(
+    '表情包尺寸：5 个档位',
+    /STICKER_SIZE_STEPS\s*=\s*\[120,\s*160,\s*200,\s*240,\s*280\]/.test(storeSrc),
+    '用户要的是「这5档」，档位数量和值都不能随便改',
+  );
+
+  check(
+    '表情包尺寸：默认 200（不是旧的 120）',
+    /STICKER_SIZE_DEFAULT_PX[^=]*=\s*200/.test(storeSrc),
+    '用户明确说 120 太小看不清',
+  );
+
+  check(
+    '表情包尺寸：归一化到最近的档位（不是夹到区间）',
+    /export function clampStickerSize/.test(storeSrc) && /bestGap/.test(storeSrc),
+    '用户手改 settings.json 写 187 应当归到 200，而不是变成谁都没见过的 187',
+  );
+
+  check(
+    '表情包尺寸：改完立刻推给气泡窗口（不等下一句）',
+    /settings:set-sticker-size[\s\S]{0,400}bubbleWindow\?\.setStickerSize/.test(indexSrc),
+    '用户调完想马上看效果',
+  );
+
+  check(
+    '表情包尺寸：每条 bubble 消息都带上（窗口未 ready 时的兜底）',
+    /stickerSize:\s*readSettings\(\)\.stickerSizePx/.test(indexSrc),
+    'setStickerSize 走 send()，ready 之前会静默丢弃 —— 必须靠每条消息补',
+  );
+
+  check(
+    '表情包尺寸：CSS 读变量且有兜底值',
+    /max-width:\s*var\(--sticker-max,\s*120px\)/.test(bubbleCss),
+    '变量没设上时至少还是原来那个能用的尺寸，不能变成 0 或撑满窗口',
+  );
+
+  check(
+    '表情包尺寸：渲染层收到 config 就改变量',
+    /function applyStickerSize/.test(bubbleJs) &&
+      /setProperty\('--sticker-max'/.test(bubbleJs),
+    '不改变量的话，改了设置图不会变',
+  );
+
+  check(
+    '表情包尺寸：设置页有 5 个选项',
+    (settingsHtml.match(/id="sticker-size"/g) || []).length === 1 &&
+      ['120', '160', '200', '240', '280'].every((v) =>
+        new RegExp(`<option value="${v}"`).test(settingsHtml),
+      ),
+    '下拉框里的档位要和 STICKER_SIZE_STEPS 一致',
+  );
+
+  check(
+    '表情包尺寸：不合法输入不缩小当前图',
+    /if \(!Number\.isFinite\(n\) \|\| n <= 0\) return;/.test(bubbleJs),
+    '主进程传 undefined 时不能回退成 120 —— 那会让用户的图突然缩小',
+  );
+
+  check(
+    '表情包尺寸：bubbleWindow 有 setStickerSize 且会推送',
+    /setStickerSize\(px: number\)/.test(bubbleWinSrc) &&
+      /stickerSize:\s*size/.test(bubbleWinSrc),
+    '没有这个方法，index.ts 的调用会 TypeError',
+  );
+}
+
 /* ------------------------------------------------------------------ 收尾 */
 
 console.log('');

@@ -170,6 +170,26 @@ export interface PetSettings {
    */
   bubbleParaGap: number;
 
+  /**
+   * 表情包在气泡里显示的**最大边长**（px，5 档，默认 200）。
+   *
+   * ## 用户要求（2026-11-16）
+   *
+   * > 「表情包的图片大小再大写吧，现在感觉小了看不太清楚，
+   * >   你告诉我现在的尺寸我看看」
+   * > 「做成这5档可调节，设置里面切换吧。」
+   *
+   * ## 为什么用边长而不是缩放比例
+   *
+   * 表情包原图大多是 400×400（实测 1200 张：宽中位 400、高中位 400，
+   * 57% 接近正方形）。用**像素边长**最直观 —— 用户能直接对上
+   * "原图 400，我显示 200"，用 0.5x 这种比例反而要想一下。
+   *
+   * 取值来自 `STICKER_SIZE_STEPS`，不是任意数字（防止用户填 9999
+   * 把气泡撑爆）。
+   */
+  stickerSizePx: number;
+
   /** 气泡与头顶间距（px，默认 6） */
   bubbleGapAbovePx: number;
   /** 气泡与左右立绘的间距（px，默认 10） */
@@ -274,6 +294,66 @@ export const BUBBLE_GAP_ABOVE_DEFAULT_PX = 6;
 export const BUBBLE_GAP_SIDE_DEFAULT_PX = 10;
 export const BUBBLE_CORE_SHRINK_DEFAULT_PCT = 25;
 
+/**
+ * 表情包显示档位（最大边长，px）—— 2026-11-16 用户要求。
+ *
+ * ## 用户原话
+ *
+ * > 「表情包的图片大小再大写吧，现在感觉小了看不太清楚，
+ * >   你告诉我现在的尺寸我看看」
+ * > 「做成这5档可调节，设置里面切换吧。」
+ *
+ * ## 为什么是这 5 档
+ *
+ * 表情包原图实测：宽中位 400、高中位 400（采样 1200 张，57% 接近正方形）。
+ *
+ *     120  改之前的旧值 —— 只占原图 30%，用户说"看不太清楚"
+ *     160  1.33x，稳妥改善
+ *     200  原图 50%，细节清楚（**默认**）
+ *     240  原图 60%，很有存在感
+ *     280  接近原图 70%，最大档
+ *
+ * ⚠️ 上限 280 不是随便定的：气泡窗口 `BUBBLE_MAX_WIDTH = 520`、
+ *    `BUBBLE_MAX_HEIGHT = 620`。280 之后加文字还行，再大就会
+ *    频繁触发"从下往上裁"那条兜底逻辑（见 bubble.css）。
+ *
+ * ⚠️ 最低档保留 120（旧的默认值）—— 有人就是喜欢小的，别剥夺。
+ */
+export const STICKER_SIZE_STEPS = [120, 160, 200, 240, 280] as const;
+/**
+ * 默认档位。
+ *
+ * ⚠️ 必须显式标 `number` —— 不加的话 TS 会把它推断成字面量类型 `200`，
+ *    而 `DEFAULTS` 里写 `stickerSizePx: STICKER_SIZE_DEFAULT_PX` 时
+ *    那个对象字面量的类型就变成 `{ stickerSizePx: 200 }`，
+ *    之后 `clampStickerSize()` 返回 120/240/280 都会报
+ *    「not assignable to type '200'」。
+ */
+export const STICKER_SIZE_DEFAULT_PX: number = 200;
+
+/**
+ * 把任意输入夹到合法档位。
+ *
+ * ⚠️ 返回的是**档位里的值**，不是"夹到区间"—— 用户手改 settings.json
+ * 写了 187，应该归到最近的 200，而不是变成一个谁都没见过的 187。
+ */
+export function clampStickerSize(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return STICKER_SIZE_DEFAULT_PX;
+  // ⚠️ 标 `number`：不标的话 TS 推成字面量 `120`（`STEPS[0]` 的类型），
+  //    循环里 `best = step` 换别的档位就报 not assignable to type '120'
+  let best: number = STICKER_SIZE_STEPS[0];
+  let bestGap = Math.abs(n - best);
+  for (const step of STICKER_SIZE_STEPS) {
+    const gap = Math.abs(n - step);
+    if (gap < bestGap) {
+      best = step;
+      bestGap = gap;
+    }
+  }
+  return best;
+}
+
 export function clampBubbleGapAbove(value: unknown): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return BUBBLE_GAP_ABOVE_DEFAULT_PX;
@@ -324,6 +404,7 @@ const DEFAULTS: PetSettings = {
   bubbleGapAbovePx: BUBBLE_GAP_ABOVE_DEFAULT_PX,
   bubbleGapSidePx: BUBBLE_GAP_SIDE_DEFAULT_PX,
   bubbleCoreShrinkPct: BUBBLE_CORE_SHRINK_DEFAULT_PCT,
+  stickerSizePx: STICKER_SIZE_DEFAULT_PX,
   /**
    * 气泡默认**显示**（用户要求「可在宠物菜单设置隐藏和显示气泡」——
    * 默认状态是显示，由用户在菜单里关）。
@@ -548,6 +629,9 @@ export function readSettings(): PetSettings {
         bubbleGapAbovePx: clampBubbleGapAbove(raw?.bubbleGapAbovePx ?? DEFAULTS.bubbleGapAbovePx),
         bubbleGapSidePx: clampBubbleGapSide(raw?.bubbleGapSidePx ?? DEFAULTS.bubbleGapSidePx),
         bubbleCoreShrinkPct: clampBubbleCoreShrink(raw?.bubbleCoreShrinkPct ?? DEFAULTS.bubbleCoreShrinkPct),
+        // 2026-11-16：表情包显示档位。归一化到 5 档之一 ——
+        // 用户手改 settings.json 写了 187 也会归到最近的 200。
+        stickerSizePx: clampStickerSize(raw?.stickerSizePx ?? DEFAULTS.stickerSizePx),
     bubbleVisible:
       typeof raw?.bubbleVisible === 'boolean' ? raw.bubbleVisible : DEFAULTS.bubbleVisible,
 
@@ -652,6 +736,10 @@ export function writeSettings(patch: Partial<PetSettings>): SettingsWriteResult 
       patch.bubbleCoreShrinkPct !== undefined
         ? clampBubbleCoreShrink(patch.bubbleCoreShrinkPct)
         : current.bubbleCoreShrinkPct,
+    stickerSizePx:
+      patch.stickerSizePx !== undefined
+        ? clampStickerSize(patch.stickerSizePx)
+        : current.stickerSizePx,
     bubbleVisible:
       typeof patch.bubbleVisible === 'boolean' ? patch.bubbleVisible : current.bubbleVisible,
 
