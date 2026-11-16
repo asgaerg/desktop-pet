@@ -415,8 +415,35 @@ function showSticker(payload) {
   const settle = () => {
     syncEmptyMark();
     scheduleSizeReport();
-    // 表情包也算"一次显示"——让主进程重新起消失计时
-    if (typeof window.bubble?.notifyShown === 'function') window.bubble.notifyShown();
+    /*
+     * 🔴 表情包也算"一次显示"—— 让主进程重新起消失计时（2026-11-16 修）
+     *
+     * ## 这里原来写的是 `window.bubble.notifyShown()`
+     *
+     * 但 preload 暴露的方法名是 **`reportShown`** —— `notifyShown` 根本不存在。
+     * 外面套了 `typeof === 'function'` 守卫，所以**不报错、静默跳过**：
+     *
+     *     图显示出来了 ✓
+     *     尺寸上报了   ✓
+     *     消失计时器**没有重置** ✗
+     *
+     * ## 后果（用户报的）
+     *
+     * > 「现在的表情包也受到气泡消失的限制，你看看现在好像2分钟结束也没消失」
+     *
+     * 因为计时器从**上一次文字**的 `reportShown` 起算，
+     * 而表情包出现在那之后 —— 于是：
+     *
+     *   · 文字说完 -> 起 60 秒计时
+     *   · 表情包跟着出来 -> 不重置
+     *   · 60 秒后计时器到点 -> 气泡（连同图）一起消失
+     *
+     * 用户看到的是"图刚出来没一会儿就没了"。
+     *
+     * ⚠️ 用 `reportShown()`（本地函数，内部会做 api 存在性检查），
+     *    不要直接碰 `window.bubble.xxx` —— 那样拼错名字也不会报错。
+     */
+    reportShown();
   };
   if (typeof img.decode === 'function') {
     img.decode().then(settle, settle);

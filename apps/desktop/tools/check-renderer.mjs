@@ -536,6 +536,58 @@ const report = (ok, label, detail) => {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// 表情包显示后要重置消失计时器（2026-11-16 修）
+//
+// 用户报：「现在的表情包也受到气泡消失的限制，
+//          你看看现在好像2分钟结束也没消失」
+//
+// 根因：`showSticker()` 里写的是 `window.bubble.notifyShown()`，
+// 而 preload 暴露的方法名是 **`reportShown`** —— 名字对不上。
+// 外面套了 `typeof === 'function'` 守卫，所以**不报错、静默跳过**：
+//
+//     图显示出来了 ✓
+//     尺寸上报了   ✓
+//     消失计时器**没重置** ✗
+//
+// 于是计时器从「上一次文字」起算，表情包出来不算一次"新的显示"，
+// 到点就跟着整个气泡一起消失。
+//
+// 这条守的是：**跨模块调用的方法名，拼错了不会报错**（因为都有守卫），
+// 只能靠静态检查兜住。
+// --------------------------------------------------------------------------- //
+{
+  const bubbleSrc = readFileSync(path.join(rendererDir, 'bubble.js'), 'utf-8');
+  const bubblePreload = readFileSync(
+    path.join(rendererDir, '..', 'preload', 'bubble.ts'),
+    'utf-8',
+  );
+
+  // 去掉注释再查，避免说明文字里的名字被误判
+  const stripComments = (s) =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const codeOnly = stripComments(bubbleSrc);
+
+  report(
+    /reportShown\(\): void/.test(bubblePreload),
+    'preload 暴露了 reportShown（表情包重置计时器要用）',
+    '没有它，表情包显示后不会重置消失计时器',
+  );
+
+  report(
+    !/\.notifyShown\s*\(/.test(codeOnly),
+    '渲染层不调用不存在的 notifyShown',
+    '这个名字不存在（真实名字是 reportShown），而外面有 typeof 守卫，' +
+      '所以不会报错、只会静默失效 —— 正是这个 bug 的成因',
+  );
+
+  report(
+    /const settle = \(\) => \{[\s\S]{0,900}?reportShown\(\);/.test(codeOnly),
+    '表情包解码完会 reportShown（重置消失计时）',
+    '不重置的话，计时器从上次文字起算，图刚出来不久就跟着消失',
+  );
+}
+
 if (contractIssues > 0) {
   console.error(`\n渲染层契约检查未通过：${contractIssues} 项`);
   process.exit(1);
