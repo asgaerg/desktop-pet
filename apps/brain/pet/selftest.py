@@ -10892,6 +10892,112 @@ def test_reading(suite: "Suite") -> None:
             f"mood 0.3 -> {low:.3f}、0.9 -> {high:.3f}"
         )
 
+    @suite.check("表情包：整个挑图交给宠物（候选池混合 + 它自己选）")
+    def _() -> str:
+        """用户 2026-11-16 要求：
+
+        > 「整个挑图都交给它」
+        > 「去掉概率门，完全交给它」
+
+        ## 改之前
+
+        规则挑图（`pick_for_emotion`）：意图类 -> 相邻类 -> 心情候选，
+        按顺序找**第一个有素材的**；心情候选里随机抽一个。
+
+        宠物**没有话语权** —— 类别由规则定，具体哪张由随机定。
+        它连自己发的是什么都不知道。
+
+        ## 现在
+
+            ① `build_candidates` 混候选池：
+               意图类 3 + 相邻类 2 + 心情类 4 + other 3，上限 12
+            ② 把类别标签 + 画面描述给它
+            ③ 它回数字选一张；回 0 = 这句不配图
+
+        ## 这条守什么
+
+        ① 候选池**混了多个来源**（只有意图类的话，"它自己挑"没意义）
+        ② 池子里**一定有 other**（用户要"由它决定要不要用 other"）
+        ③ 池子大小受控（12 张，太多模型挑不准 + token 涨）
+        ④ 提示词带**类别标签**（只看描述它得自己推断意图）
+        ⑤ 提示词允许回 0（不然被迫挑一张不贴切的）
+        """
+        from . import sticker as _st
+        from .media import MediaStore
+        from pathlib import Path as _P
+
+        store = MediaStore(_P(r"F:\ai\pet-media"))
+
+        # ① 候选池混多个来源
+        pool = _st.build_candidates(
+            store, "neutral", reply_text="对不起，是我搞错了"
+        )
+        _assert(pool, "候选池不该为空")
+        _assert(
+            len(pool) <= _st.POOL_SIZE,
+            f"候选池最多 {_st.POOL_SIZE} 张，实际 {len(pool)} —— "
+            "太多模型挑不准，token 也涨",
+        )
+        kinds = {it.emotion for it in pool}
+        _assert(
+            len(kinds) >= 2,
+            f"候选池应当混多个类别（否则等于规则挑图），实际只有 {kinds}",
+        )
+        # 意图命中时，道歉类该在里面
+        _assert(
+            "sorry" in kinds,
+            f"「对不起」的候选池里应当有 sorry 类，实际 {kinds}",
+        )
+
+        # ② 池子里一定有 other（给它"用不用"的决定权）
+        _assert(
+            "other" in kinds,
+            f"候选池必须含 other —— 用户要「由它决定要不要用」，"
+            f"实际分类只有 {kinds}",
+        )
+
+        # ③ 提示词带类别标签 + 允许回 0
+        prompt = _st.build_pick_prompt(pool, "对不起，是我搞错了", "neutral")
+        _assert("[sorry]" in prompt, "提示词里要有类别标签（[sorry] 这种）")
+        _assert("1." in prompt, "要有编号列表")
+        _assert(
+            "回 0" in prompt or "回0" in prompt,
+            "要允许它说「这句不配图」—— 否则被迫挑一张不贴切的",
+        )
+        _assert(
+            "只回数字" in prompt,
+            "要约束输出格式（回一段话解析不出来）",
+        )
+        _assert(
+            len(prompt) < 1200,
+            f"提示词应当控制在 1200 字内，实际 {len(prompt)}",
+        )
+
+        # ④ 同一份池子能被正确索引
+        picked = _st.pick_from_sample(pool, 1)
+        _assert(
+            picked is not None and picked.path == pool[0].path,
+            "回 1 应当取第一张",
+        )
+
+        # ⑤ 心情会改变候选池的构成（不同 dominant 抽到的类别不同）
+        pools = {
+            dom: {
+                it.emotion
+                for it in _st.build_candidates(store, dom, reply_text="嗯")
+            }
+            for dom in ("happy", "sad", "sleepy")
+        }
+        _assert(
+            pools["happy"] != pools["sad"],
+            f"不同心情该有不同候选（都是 {pools['happy']} 就不对了）",
+        )
+
+        return (
+            f"池 {len(pool)} 张/{len(kinds)} 类（含 other）；"
+            f"提示词带标签且允许回 0"
+        )
+
     @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
     def _() -> str:
         """用户要求：「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注」。

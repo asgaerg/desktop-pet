@@ -6510,75 +6510,82 @@ class Gateway:
                 log.exception("随机事件单轮异常（已忽略，继续下一轮）")
             await asyncio.sleep(max(1.0, float(self.config.autonomy.get("tick_s", 5.0))))
 
-    async def _pick_other_by_feeling(self, reply_text: str) -> Any:
-        """从 other 里抽 5 张，让宠物**自己挑**一张（2026-11-15 用户要求）。
+    async def _pick_sticker_by_feeling(
+        self,
+        reply_text: str,
+        dominant: str,
+        mood_height: float,
+    ) -> Any:
+        """构建候选池 -> 让宠物**自己挑**一张（2026-11-16 用户要求）。
 
         用户原话：
 
-        > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
-        > 「算了随机挑选5张吧，这样花销不大。」
+        > 「整个挑图都交给它」
 
-        ## 为什么让它挑，而不是随机发
+        ## 和原来 `_pick_other_by_feeling` 的区别
 
-        `other` 里那 1151 张没有明确类别（烹饪截图、立牌照片、模糊表情包混在一起）。
-        随机发一张 = 宠物不知道自己在发什么，"聊着好累突然发张米饭图"。
+        那个只处理 `other` 分支（规则已挑定"发 other 类"，只是让它
+        在 5 张里选具体哪张）。
 
-        抽样之后它看着 5 条描述挑，能选贴合当下的那个。
+        现在**类别也由它选**：
 
-        ## 成本（实测过）
+            ① `sticker.build_candidates` 混好候选池
+               （意图类 3 + 相邻类 2 + 心情类 4 + other 3）
+            ② 把池子的**类别标签 + 画面描述**给它
+            ③ 它回一个数字 -> 就是那张；回 0 -> 这句不配图
 
-            输入  约 200~400 token（5 行短描述 + 回复原文）
-            输出  1~3 token（就一个数字）
-            ≈ ¥0.001 一次
+        ## 为什么把类别标签也给它
 
-        ⚠️ 只在 other 分支发生，而 other 约占总配图的 18%。
-           所以真实开销是"配图的 18% × ¥0.001"，可以忽略。
+        caption 是客观描述（"蓝发角色举着手"），类别名是**意图标签**
+        （"道歉"、"无语"、"捣蛋"）。只看描述它得自己推断意图，
+        带上标签判断更准 —— 用户当初设计 72 类就是为了这个。
 
-        ## 失败时返回 None = 这次不发
+        ## 成本
 
-        ⚠️ 模型说 0 或回答解析不出来时**不发图**，而不是退回随机发
-           —— 用户要的是"它自己选"，选不出来就不发，比乱发强。
+            输入  600~800 token（12 行）
+            输出  1~3 token
+
+        ⚠️ **只在配图发生时才调用**（约 47% 的回复），不是每句都调。
+
+        ## 失败 = 不发
+
+        `max_tokens` 太小会让模型回空串（这个项目在 8 和 50 上都踩过）。
+        所以给 100 且 `thinking=False`。解析不出来就返回 None，
+        **不兜底随便发一张** —— 那会让"它挑不出来"这个信号消失。
         """
         try:
-            candidates = sticker_mod.sample_other(self.media)
+            candidates = sticker_mod.build_candidates(
+                self.media, dominant, reply_text=reply_text,
+            )
             if not candidates:
+                log.info("表情包：候选池是空的（没有已标注素材）")
                 return None
 
-            prompt = sticker_mod.build_sample_prompt(candidates, reply_text)
-            # ⚠️ `LLMRequest` 的字段是 `system / history / user_text`，
-            #    **不是** `messages=`（那是 OpenAI 原始格式）。
-            #    实测踩过：写成 `messages=` 会 TypeError，然后被外层
-            #    `except` 吞掉，表现是"挑图静默失效、每次都发不出去"。
+            prompt = sticker_mod.build_pick_prompt(
+                candidates, reply_text, dominant,
+            )
             from .brains.base import LLMRequest
 
             req = LLMRequest(
                 system="你只在挑表情包。只回一个数字。",
                 history=[],
                 user_text=prompt,
-                temperature=0.2,
-                # ⚠️ 不能给小值！实测 `max_tokens=8` 时模型回**空字符串** ——
-                #    推理模式把额度吃光了，正文一个字都没输出。
-                #    这个项目在 50 token 上踩过同一个坑（见 persona.yaml
-                #    里 screenshot 段那段实测）。
-                #    给 100 留足余量：正常只要 1~3 个 token。
+                temperature=0.3,
+                # ⚠️ 不能给小值：实测 8 / 50 都会被推理吃光、正文回空串
                 max_tokens=100,
-                # ⚠️ 必须**关掉思考模式**。开着的话推理会先把额度用完。
                 thinking=False,
                 timeout_s=20.0,
             )
             text = ""
-            # ⚠️ `stream()` 吐的是 dict，用 `kind == "delta"` 过滤，
-            #    不是对象属性（`chunk.text` 那种写法会 AttributeError）
             async for item in self.brain.stream(req):
                 if item.get("kind") == "delta":
                     text += str(item.get("text") or "")
             text = text.strip()
             log.info(
-                "表情包：抽了 %d 张给它挑，它回了 %r",
-                len(candidates), text[:20],
+                "表情包：给了 %d 张候选它挑，回了 %r",
+                len(candidates), text[:16],
             )
 
-            # 从回答里抠出第一个数字
             import re as _re
 
             m = _re.search(r"\d+", text)
@@ -6587,11 +6594,11 @@ class Gateway:
                 return None
             n = int(m.group(0))
             if n <= 0:
-                log.info("表情包：它说都不合适（回了 0），这次不发")
+                log.info("表情包：它说不合适（回了 0），这次不发")
                 return None
             return sticker_mod.pick_from_sample(candidates, n)
         except Exception:  # noqa: BLE001 —— 挑图失败不该影响回复
-            log.warning("表情包：让宠物挑 other 时出错（已忽略）", exc_info=True)
+            log.warning("表情包：让它挑图时出错（已忽略）", exc_info=True)
             return None
 
     async def _maybe_send_sticker(self, reply_text: str) -> None:
@@ -6654,26 +6661,54 @@ class Gateway:
         """
         intent = sticker_mod.intent_to_sticker(reply_text)
         mood = sticker_mod.emotion_to_sticker(dominant)
-        if not sticker_mod.should_attach(
-            reply_text=reply_text, dominant=dominant, rate=rate
-        ):
-            # 说清是哪一道门挡的 —— 比一句"没发"有用得多
-            if not intent and not mood:
-                log.info(
-                    "表情包：不发 —— 既没意图线索也没心情映射"
-                    "（dominant=%s，回复 %d 字：%s）",
-                    dominant or "?", len(reply_text), reply_text[:24],
-                )
-            elif len(reply_text) > sticker_mod.MAX_TEXT_FOR_STICKER:
-                log.info(
-                    "表情包：不发 —— 回复太长（%d 字 > %d）",
-                    len(reply_text), sticker_mod.MAX_TEXT_FOR_STICKER,
-                )
-            else:
-                log.info(
-                    "表情包：不发 —— 概率没抽中（rate=%.2f，意图=%s 心情=%s）",
-                    rate, intent or "-", mood or "-",
-                )
+        """
+        🔴 2026-11-16：**去掉概率门**，连"要不要配图"也交给它
+
+        用户要求：「整个挑图都交给它」→「去掉概率门，完全交给它」。
+
+        ## 改之前
+
+        `should_attach` 里有三道门，其中第三道是**掷骰子**：
+
+            ① 有意图线索 或 心情能映射
+            ② 回复 <= 200 字
+            ③ random() < rate（0.5）      <- 这一道是纯随机
+
+        ③ 让一半回复**根本没机会问它** —— 那和"它自己决定"是矛盾的。
+
+        ## 现在
+
+        ①② 保留（它们是**前置条件**，不是意愿判断）：
+
+            ① 没有可用类别   -> 问了也白问（候选池建不出来）
+            ② 回复超过 200 字 -> 长回复配图显得碎，这是排版决定
+
+        ③ 去掉。改成：**每次都问它**，由它回 0 表示"这句不需要配图"。
+
+        ⚠️ 代价：每次回复多一次模型调用（约 ¥0.0015）。
+           用户明确接受这个成本换"完全由它决定"。
+
+        ⚠️ `emoji_sticker_rate` 这个配置项**现在不再影响要不要发**，
+           但那不代表它没用 —— 留着是因为用户可能想用它做全局开关
+           （设为 0 就完全不问模型，省掉所有调用）。
+           
+        所以这里保留一个**最低限度的**开关判断：rate=0 时直接不发。
+        """
+        if rate <= 0.0:
+            log.info("表情包：不发 —— emoji_sticker_rate=0（全局关）")
+            return
+        if not intent and str(dominant or "") not in sticker_mod._EMOTION_CANDIDATES:
+            log.info(
+                "表情包：不发 —— 既没意图线索也没心情映射"
+                "（dominant=%s，回复 %d 字：%s）",
+                dominant or "?", len(reply_text), reply_text[:24],
+            )
+            return
+        if len(reply_text.strip()) > sticker_mod.MAX_TEXT_FOR_STICKER:
+            log.info(
+                "表情包：不发 —— 回复太长（%d 字 > %d）",
+                len(reply_text), sticker_mod.MAX_TEXT_FOR_STICKER,
+            )
             return
 
         # 🔴 把回复内容也传进去（2026-11-06）：让它能按**意图**挑图，
@@ -6697,47 +6732,56 @@ class Gateway:
             mood_height = float(getattr(self.conversation.emotion, "mood", 0.5) or 0.5)
         except (AttributeError, TypeError, ValueError):
             pass
-        item = sticker_mod.pick_for_emotion(
-            self.media,
-            dominant,
-            reply_text=reply_text,
-            mood_height=mood_height,
+
+        """
+        🔴 整张图都交给它挑（2026-11-16 用户要求）
+
+        ## 用户原话
+
+        > 「整个挑图都交给它」
+
+        ## 改之前是什么样
+
+        规则挑图（`sticker.pick_for_emotion`）：
+
+            意图类 -> 相邻类 -> 心情候选，按顺序找**第一个有素材的**
+            心情候选里随机抽一个（避免固定发第一类）
+
+        也就是"类别由规则定、具体哪张由随机定"。宠物**没有话语权** ——
+        它不知道自己发的是什么图。
+
+        ## 现在
+
+            ① 构建候选池：意图类 3 张 + 相邻类 2 张 + 心情类 4 张 + other 3 张
+            ② 把池子（含类别标签和描述）给它，让它回一个数字
+            ③ 回 0 = 这句话不配图 / 都不合适
+
+        它现在**真的在挑**：能看到候选的类别和画面描述，自己判断配不配。
+
+        ## 成本
+
+            输入  约 600~800 token（12 行短描述 + 类别标签）
+            输出  1~3 token（一个数字）
+            ≈ ¥0.0015 一次
+
+        ⚠️ 比原来"规则挑"多一次模型调用。但这是用户明确要的：
+           「整个挑图都交给它」。
+
+        ⚠️ `_allow_other` 的语义没变：候选池里**始终**包含 other 几张
+           （用户要求"由它决定要不要用"）。心情只影响进不进 other 分支
+           的旧逻辑已经**不再使用** —— 现在 other 是候选之一，由它挑。
+        """
+        picked = await self._pick_sticker_by_feeling(
+            reply_text, dominant, mood_height,
         )
-        if item is None:
+        if picked is None:
             log.info(
-                "表情包：不发 —— 目标类别没素材"
-                "（意图=%s 心情=%s；已分类 %d 张）",
-                intent or "-", mood or "-",
-                sum(1 for it in self.media.load().values()
-                    if it.path.startswith("stickers/") and it.caption),
+                "表情包：不发 —— 它挑不出来/说不合适"
+                "（意图=%s 心情=%s mood=%.2f）",
+                intent or "-", mood or "-", mood_height,
             )
             return
-
-        # 🔴 走的是 other（随性分支）-> 抽样给宠物**自己挑**（2026-11-15）
-        #
-        # 用户要求：
-        #
-        # > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
-        # > 「算了随机挑选5张吧，这样花销不大。」
-        #
-        # ## 为什么这样比"随机发一张"好
-        #
-        # 随机发一张时，宠物**不知道自己发的是什么** —— 正在聊"好累"，
-        # 可能发出去一张烹饪视频截图。抽样后它看着 5 条描述挑，
-        # 结果贴合得多。
-        #
-        # ## 成本
-        #
-        # 多一次模型调用，输入约 200~400 token（5 行短描述），
-        # 输出只有 1~2 个 token（一个数字）。按 DeepSeek 定价约 ¥0.001。
-        # 而且**只在 other 分支**（约 18% 的配图）才发生。
-        if item.emotion == "other":
-            picked = await self._pick_other_by_feeling(reply_text)
-            if picked is None:
-                # 宠物说"哪张都不合适"或者调用失败 -> 这次不发
-                log.info("表情包：抽样的 5 张里它都不想要，这次不发")
-                return
-            item = picked
+        item = picked
 
         payload = sticker_mod.build_payload(self.media, item)
         if not payload:

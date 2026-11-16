@@ -697,6 +697,156 @@ def pick_from_sample(
     return None
 
 
+#: 候选池总共给几张（2026-11-16 全权交给宠物时用）。
+#:
+#: ## 用户要求
+#:
+#: > 「整个挑图都交给它」
+#:
+#: 所以不再是"规则挑类别 -> 随机取一张"，而是**给一堆候选让它挑**。
+#:
+#: ## 12 这个数的取舍
+#:
+#: 实测观察：候选超过 12 张后模型的选择质量下降（挑花眼），
+#: 而且提示词 token 涨得快（每张约 40~60 字描述）。
+#:
+#:     太少（<5）  -> 选择空间小，"它自己挑"没意义
+#:     太多（>15） -> 挑不准 + 成本上去
+#:     12          -> 够挑，token 也控制在 600 字内
+POOL_SIZE = 12
+
+
+def build_candidates(
+    store: MediaStore,
+    dominant: str,
+    *,
+    reply_text: str = "",
+    size: int = POOL_SIZE,
+    rng: Optional[random.Random] = None,
+) -> list[MediaItem]:
+    """给宠物准备一个**候选池**，让它自己挑（2026-11-16 用户要求）。
+
+    ## 用户要求
+
+    > 「整个挑图都交给它」
+
+    之前是"规则挑类别 -> 再随机取一张"。现在改成：
+    **把各类相关的图混在一起给模型，由它决定发哪张。**
+
+    ## 池子怎么配
+
+        意图类（「对不起」-> sorry）      最多 3 张
+        相邻类（害怕 -> 震惊/焦虑）       最多 2 张
+        心情候选（neutral -> smile/ok…）  最多 4 张
+        other（无明确分类的）             最多 3 张
+
+    ⚠️ 为什么不全给：候选太多模型会挑花眼（实测 >12 张后
+       选择质量下降，而且 token 也上去了）。12 张是折中。
+
+    ⚠️ 为什么要混 other：用户明确要"由它决定要不要用 other"。
+       全给明确类别的话，other 永远没机会 —— 那是回到老问题。
+
+    ⚠️ 每类内部按 `used_count` 优先取用得少的，避免总发同几张。
+    """
+    picker = rng or random
+    seen: set[str] = set()
+    out: list[MediaItem] = []
+
+    def _take(key: str, n: int) -> None:
+        """从某个类别里取 n 张（按用得少的优先）。"""
+        if n <= 0 or len(out) >= size:
+            return
+        try:
+            pool = store.stickers_for(key)
+        except Exception:  # noqa: BLE001
+            return
+        # 用得少的优先，同分随机打散
+        pool = [it for it in pool if it.path not in seen]
+        if not pool:
+            return
+        picker.shuffle(pool)
+        pool.sort(key=lambda it: it.used_count)
+        for it in pool[:n]:
+            if len(out) >= size:
+                return
+            seen.add(it.path)
+            out.append(it)
+
+    # ① 意图类
+    intent_key = intent_to_sticker(reply_text)
+    if intent_key:
+        _take(intent_key, 3)
+        # 相邻兜底（害怕 -> 震惊/焦虑）
+        for extra in _FALLBACK_CHAIN.get(intent_key, ())[:2]:
+            _take(extra, 2)
+
+    # ② 心情候选
+    mood_cands = _EMOTION_CANDIDATES.get(str(dominant or ""), ())
+    if mood_cands:
+        # 随机选两个候选类，各取几张（避免固定取前两个）
+        picks = list(mood_cands)
+        picker.shuffle(picks)
+        for key in picks[:2]:
+            _take(key, 2)
+
+    # ③ other：用户要求"由它决定要不要用"，所以一定要给它机会
+    _take("other", 3)
+
+    # ④ 还不够就补心情候选的其余类
+    for key in mood_cands:
+        if len(out) >= size:
+            break
+        _take(key, 1)
+
+    return out[:size]
+
+
+def build_pick_prompt(
+    candidates: list[MediaItem],
+    reply_text: str,
+    dominant: str = "",
+) -> str:
+    """构造"让宠物自己挑图"的提示词（2026-11-16 全权交给它）。
+
+    ## 和 `build_sample_prompt` 的区别
+
+    那个是**只在 other 分支**用的（候选全是无标签图）。
+    这个是**整个挑图流程**用 —— 候选混着各类，由它决定发哪张。
+
+    ## 为什么要把类别也告诉它
+
+    caption 是客观描述（"蓝发角色举着手"），但**类别名**是意图标签
+    （"开心"、"道歉"、"无语"）。两者一起给，它更容易判断"配不配得上
+    我刚才那句话"。
+
+    ## 为什么允许它回 0
+
+    不是每句话都适合配图。允许说"不配"比强行挑一张更像人。
+    """
+    lines = [
+        "你刚说完这句话：",
+        f"「{reply_text[:60]}」",
+        "",
+    ]
+    if dominant:
+        lines.append(f"（你现在的心情：{dominant}）")
+        lines.append("")
+    lines += [
+        "想配一张表情包。备选：",
+        "",
+    ]
+    for i, it in enumerate(candidates, 1):
+        tag = it.emotion if it.emotion and it.emotion != "other" else "未分类"
+        lines.append(f"{i}. [{tag}] {_brief_caption(it.caption)}")
+    lines += [
+        "",
+        f"挑最贴合的一张，只回数字 1~{len(candidates)}。",
+        "哪张都不合适、或者这句话不需要配图，就回 0。",
+        "只回数字，别解释。",
+    ]
+    return "\n".join(lines)
+
+
 def build_sample_prompt(candidates: list[MediaItem], reply_text: str) -> str:
     """构造"让宠物挑一张"的提示词。
 
