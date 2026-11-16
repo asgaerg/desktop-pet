@@ -6510,6 +6510,90 @@ class Gateway:
                 log.exception("随机事件单轮异常（已忽略，继续下一轮）")
             await asyncio.sleep(max(1.0, float(self.config.autonomy.get("tick_s", 5.0))))
 
+    async def _pick_other_by_feeling(self, reply_text: str) -> Any:
+        """从 other 里抽 5 张，让宠物**自己挑**一张（2026-11-15 用户要求）。
+
+        用户原话：
+
+        > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
+        > 「算了随机挑选5张吧，这样花销不大。」
+
+        ## 为什么让它挑，而不是随机发
+
+        `other` 里那 1151 张没有明确类别（烹饪截图、立牌照片、模糊表情包混在一起）。
+        随机发一张 = 宠物不知道自己在发什么，"聊着好累突然发张米饭图"。
+
+        抽样之后它看着 5 条描述挑，能选贴合当下的那个。
+
+        ## 成本（实测过）
+
+            输入  约 200~400 token（5 行短描述 + 回复原文）
+            输出  1~3 token（就一个数字）
+            ≈ ¥0.001 一次
+
+        ⚠️ 只在 other 分支发生，而 other 约占总配图的 18%。
+           所以真实开销是"配图的 18% × ¥0.001"，可以忽略。
+
+        ## 失败时返回 None = 这次不发
+
+        ⚠️ 模型说 0 或回答解析不出来时**不发图**，而不是退回随机发
+           —— 用户要的是"它自己选"，选不出来就不发，比乱发强。
+        """
+        try:
+            candidates = sticker_mod.sample_other(self.media)
+            if not candidates:
+                return None
+
+            prompt = sticker_mod.build_sample_prompt(candidates, reply_text)
+            # ⚠️ `LLMRequest` 的字段是 `system / history / user_text`，
+            #    **不是** `messages=`（那是 OpenAI 原始格式）。
+            #    实测踩过：写成 `messages=` 会 TypeError，然后被外层
+            #    `except` 吞掉，表现是"挑图静默失效、每次都发不出去"。
+            from .brains.base import LLMRequest
+
+            req = LLMRequest(
+                system="你只在挑表情包。只回一个数字。",
+                history=[],
+                user_text=prompt,
+                temperature=0.2,
+                # ⚠️ 不能给小值！实测 `max_tokens=8` 时模型回**空字符串** ——
+                #    推理模式把额度吃光了，正文一个字都没输出。
+                #    这个项目在 50 token 上踩过同一个坑（见 persona.yaml
+                #    里 screenshot 段那段实测）。
+                #    给 100 留足余量：正常只要 1~3 个 token。
+                max_tokens=100,
+                # ⚠️ 必须**关掉思考模式**。开着的话推理会先把额度用完。
+                thinking=False,
+                timeout_s=20.0,
+            )
+            text = ""
+            # ⚠️ `stream()` 吐的是 dict，用 `kind == "delta"` 过滤，
+            #    不是对象属性（`chunk.text` 那种写法会 AttributeError）
+            async for item in self.brain.stream(req):
+                if item.get("kind") == "delta":
+                    text += str(item.get("text") or "")
+            text = text.strip()
+            log.info(
+                "表情包：抽了 %d 张给它挑，它回了 %r",
+                len(candidates), text[:20],
+            )
+
+            # 从回答里抠出第一个数字
+            import re as _re
+
+            m = _re.search(r"\d+", text)
+            if not m:
+                log.info("表情包：它没回数字，这次不发")
+                return None
+            n = int(m.group(0))
+            if n <= 0:
+                log.info("表情包：它说都不合适（回了 0），这次不发")
+                return None
+            return sticker_mod.pick_from_sample(candidates, n)
+        except Exception:  # noqa: BLE001 —— 挑图失败不该影响回复
+            log.warning("表情包：让宠物挑 other 时出错（已忽略）", exc_info=True)
+            return None
+
     async def _maybe_send_sticker(self, reply_text: str) -> None:
         """回复说完之后，按情绪可能补一张表情包（2026-11-02 用户要求）。
 
@@ -6606,6 +6690,32 @@ class Gateway:
                     if it.path.startswith("stickers/") and it.caption),
             )
             return
+
+        # 🔴 走的是 other（随性分支）-> 抽样给宠物**自己挑**（2026-11-15）
+        #
+        # 用户要求：
+        #
+        # > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
+        # > 「算了随机挑选5张吧，这样花销不大。」
+        #
+        # ## 为什么这样比"随机发一张"好
+        #
+        # 随机发一张时，宠物**不知道自己发的是什么** —— 正在聊"好累"，
+        # 可能发出去一张烹饪视频截图。抽样后它看着 5 条描述挑，
+        # 结果贴合得多。
+        #
+        # ## 成本
+        #
+        # 多一次模型调用，输入约 200~400 token（5 行短描述），
+        # 输出只有 1~2 个 token（一个数字）。按 DeepSeek 定价约 ¥0.001。
+        # 而且**只在 other 分支**（约 18% 的配图）才发生。
+        if item.emotion == "other":
+            picked = await self._pick_other_by_feeling(reply_text)
+            if picked is None:
+                # 宠物说"哪张都不合适"或者调用失败 -> 这次不发
+                log.info("表情包：抽样的 5 张里它都不想要，这次不发")
+                return
+            item = picked
 
         payload = sticker_mod.build_payload(self.media, item)
         if not payload:

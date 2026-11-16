@@ -10731,6 +10731,94 @@ def test_reading(suite: "Suite") -> None:
 
         return f"other 占比 {ratio:.0%}（目标 18%）；关掉开关后完全不发"
 
+    @suite.check("表情包：other 抽样 5 张让宠物自己挑（不是随机摸一张）")
+    def _() -> str:
+        """用户 2026-11-15 要求：
+
+        > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
+        > 「算了随机挑选5张吧，这样花销不大。」
+
+        ## 为什么从"随机发一张"改成"抽样让它挑"
+
+        随机发时宠物**不知道自己发的是什么** —— 正在聊"好累"，
+        可能发出去一张烹饪视频截图。抽样后它看着 5 条描述挑，结果贴合得多。
+
+        用户自己把 50 降到 5 是因为成本，那 5 张也确实够：
+        提示词多 200~400 token，输出只要 1 个数字。
+
+        ## 这条守什么
+
+        ① 抽的是 5 张、且**每次不同**（长期不会总发同几张）
+        ② 抽样只取 `stickers/other/` 下**有 caption** 的
+           （没描述的话模型无法判断）
+        ③ 选出来的编号能正确映射回那一张
+        ④ **编号越界/为 0 时返回 None**（不发图），不兜底发第一张
+
+        ⚠️ ④ 是修过的一个真 bug：第一版越界兜底发第一张，于是
+           `max_tokens` 太小导致模型回空串时，**每次都发第一张** ——
+           看起来功能在跑，实际宠物从没参与过选择。
+        """
+        import random as _r
+
+        from . import sticker as _st
+        from .media import MediaStore
+        from pathlib import Path as _P
+
+        store = MediaStore(_P(r"F:\ai\pet-media"))
+
+        # ① 抽 5 张、每次不同
+        a = _st.sample_other(store)
+        b = _st.sample_other(store)
+        _assert(
+            len(a) <= _st.OTHER_SAMPLE_SIZE,
+            f"最多抽 {_st.OTHER_SAMPLE_SIZE} 张，实际 {len(a)}",
+        )
+        _assert(a, "other 里应当有可抽的图")
+        _assert(
+            {x.path for x in a} != {x.path for x in b},
+            "两次抽样不该完全相同 —— 否则等于固定发那几张",
+        )
+
+        # ② 只取 other 下有 caption 的
+        for it in a:
+            _assert(
+                it.path.startswith("stickers/other/"),
+                f"只能从 stickers/other/ 抽，实际抽到 {it.path}",
+            )
+            _assert(
+                it.caption,
+                "必须有描述 —— 没描述的图模型无法判断该不该选",
+            )
+
+        # ③ 编号能映射回那一张
+        picked = _st.pick_from_sample(a, 2)
+        _assert(
+            picked is not None and picked.path == a[1].path,
+            "回 2 应当取第 2 张",
+        )
+
+        # ④ 越界 / 0 -> None（**不兜底发第一张**）
+        for bad in (0, -1, 99, len(a) + 1):
+            _assert(
+                _st.pick_from_sample(a, bad) is None,
+                f"编号 {bad} 越界时应当返回 None（这次不发），"
+                "而不是兜底发第一张 —— 那样会让"
+                "「模型回空串」这个 bug 被掩盖",
+            )
+
+        # ⑤ 提示词里要有编号和"只回数字"的约束
+        prompt = _st.build_sample_prompt(a, "我好困啊")
+        _assert("1." in prompt, "提示词里要有编号列表")
+        _assert("只回数字" in prompt or "只回一个数字" in prompt, "要约束输出格式")
+        _assert("回 0" in prompt or "回0" in prompt, "要允许它说「都不合适」")
+        # 提示词不该太长（成本控制）
+        _assert(
+            len(prompt) < 1200,
+            f"提示词应当控制在 1200 字内，实际 {len(prompt)} —— 5 张描述别给太长",
+        )
+
+        return "抽 5 张且随机；只取有描述的；编号映射正确；越界不发图"
+
     @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
     def _() -> str:
         """用户要求：「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注」。

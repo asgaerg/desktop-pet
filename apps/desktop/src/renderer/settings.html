@@ -1187,7 +1187,7 @@
               <span class="setting-title">允许偶尔截图</span>
               <span class="setting-desc">
                 开启后，宠物在「好奇」「自言自语」两档里会偶尔自己截一帧，看看你在干什么，
-                再决定要不要搭话。默认关闭。
+                再决定要不要搭话。<strong>默认关闭。</strong>
                 <br />
                 这是权限，不是频率：活泼度只决定它多常想说话，永远不能替你打开这一项。
                 窗口标题含「密码 / 银行 / 私密 / 无痕」等词时会整帧跳过，不读取内容。
@@ -1197,6 +1197,50 @@
               <input id="vision" type="checkbox" />
               <span class="slider"></span>
             </label>
+          </div>
+
+          <!--
+            🔴 截图成本（2026-11-15 用户要求「计算原像素截图成本，写在允许偶尔截图中」）
+
+            这是**实测数据**，不是估算 —— 用真实 1920x1080 屏幕发请求，
+            读接口返回的 `usage.prompt_tokens`。
+
+            ⚠️ 图像 token 不是"像素数除以常数"，取决于厂商的分块算法，
+               所以必须实测。三个分辨率的输入 token：
+                   768px   233
+                   1280px  589
+                   1920px  979
+
+            ⚠️ 价格按 DeepSeek 官方（¥2/百万输入、¥8/百万输出）。
+               价格会变，改了这里也要通知用户。
+          -->
+          <div class="setting setting-note">
+            <div class="setting-text">
+              <span class="setting-title">截图要花多少钱</span>
+              <span class="setting-desc">
+                <strong>实测</strong>（1920×1080 屏幕、deepseek-flash）：
+                <br />
+                一次截图 ≈ <strong>979 个输入 token</strong>，约 <strong>¥0.002</strong>。
+                <br />
+                按「好奇」档 30 分钟一张、每天开机 8 小时算：
+                <strong>每天 16 张 ≈ ¥0.04，每月约 ¥1.1</strong>。
+                <br />
+                <br />
+                想把成本减半可以调低分辨率（设置文件里
+                <code>screenshot.max_edge_px</code>）：
+                <br />
+                · <code>1280</code> —— 589 token，每月约 ¥0.7，小字仍然看得清
+                <br />
+                · <code>768</code> —— 233 token，每月约 ¥0.4，但小字会糊、识别变差
+                <br />
+                · <code>0</code>（当前）—— 979 token，原像素最清楚
+                <br />
+                <br />
+                ⚠️ 改这个参数<strong>要重启才生效</strong>。
+                <br />
+                ⚠️ 价格按 DeepSeek 官方 ¥2/百万输入 token 算，会随官方调价变化。
+              </span>
+            </div>
           </div>
 
           <!--

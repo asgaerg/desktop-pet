@@ -155,7 +155,50 @@ MAX_TEXT_FOR_STICKER = 200
 #: ⚠️ 这个判断在**顺序查找之前**做（见 `pick_for_emotion` 的说明）：
 #:    第一版把 other 插进候选列表，实测占比 0% ——
 #:    因为按顺序查找永远被前面的候选抢走。
+#: 这一轮**要不要进 other 分支**的概率（2026-11-07 加，2026-11-15 保留）。
+#:
+#: ## 为什么还需要它
+#:
+#: 现在的流程是：
+#:
+#:     掷骰子（18%）-> 进 other 分支 -> 抽 5 张 -> 让宠物挑
+#:
+#: 18% 决定的是"这一轮要不要走随性路线"。进了分支之后才开始抽样，
+#: 由宠物从 5 张里挑一张（见 `sample_other`）。
+#:
+#: ## 18% 的取舍
+#:
+#: 太低（5%）-> 用户感觉不到它在用 other
+#: 太高（40%）-> 经常发不知道是什么的图，显得乱
 OTHER_WEIGHT = 0.18
+
+#: other 里**随机抽几张让宠物自己挑**（2026-11-15 用户要求）。
+#:
+#: ## 用户原话
+#:
+#: > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
+#: > 「算了随机挑选5张吧，这样花销不大。」
+#:
+#: ## 为什么最后定 5 张
+#:
+#: 用户先说 50，然后自己改成 5（「这样花销不大」）。
+#: 5 张的取舍是合理的：
+#:
+#:     · 每多一张，提示词里多一行 caption（几十字）
+#:     · 5 张约 200~400 token，几乎不影响成本
+#:     · 50 张会有 2000+ token，而且**选择太多反而选不准**
+#:
+#: ## 这和随机抽一张的区别
+#:
+#: 之前是"随机摸一张，宠物不知道是哪张"。现在是：
+#:
+#:     ① 从 other 里随机抽 5 张（含 caption）
+#:     ② 把这 5 条 caption 给模型，让它挑一条
+#:     ③ 挑中的那张才发
+#:
+#: 宠物**知道**自己在发什么，能挑贴合当下的。
+#: 而且抽样是随机的，长期看不会总发同几张。
+OTHER_SAMPLE_SIZE = 5
 
 #: 🔴 回复内容 -> 表情包类别的**意图线索**（2026-11-06 加）。
 #:
@@ -537,6 +580,145 @@ def pick_for_emotion(
 
     # ⑤ 都没有：安静地不发（只用文字是很正常的状态）
     return None
+
+
+def sample_other(
+    store: MediaStore,
+    *,
+    size: int = OTHER_SAMPLE_SIZE,
+    rng: Optional[random.Random] = None,
+) -> list[MediaItem]:
+    """从 `other` 里**随机抽几张**，让宠物自己挑（2026-11-15 用户要求）。
+
+    ## 用户原话
+
+    > 「表情包的other可以让随机挑选50张，让宠物自己选用什么图」
+    > 「算了随机挑选5张吧，这样花销不大。」
+
+    ## 为什么"抽样"而不是"直接给一张"
+
+    直接随机给一张，宠物**不知道**自己发的是什么 —— 可能正在聊"好累"，
+    结果发出去一张烹饪视频截图。它没有选择权，只能碰运气。
+
+    抽样之后：把 5 条 caption 一起给它，它**看着挑**。
+    成本上只多 200~400 token（5 行短描述），但结果贴合得多。
+
+    ## 为什么 `other` 里也有 caption
+
+    那些图虽然没分到 72 类（`emotion == "other"`），但**都有描述** ——
+    标注循环对每张都跑过视觉模型。所以这里有东西可给模型看。
+
+    ⚠️ 只要**有 caption** 的：没描述的图给模型也无法判断。
+    ⚠️ 随机性在这里：每次抽到的 5 张不同，长期看不会总发同几张。
+    """
+    self_items = [
+        it
+        for it in store.load().values()
+        if it.path.startswith("stickers/other/") and it.caption
+    ]
+    if not self_items:
+        return []
+    picker = rng or random
+    n = min(size, len(self_items))
+    return picker.sample(self_items, n)
+
+
+def pick_from_sample(
+    candidates: list[MediaItem],
+    chosen_index: int,
+) -> Optional[MediaItem]:
+    """宠物挑了第几条（1-based）。**越界返回 None**（= 这次不发图）。
+
+    ## ⚠️ 第一版越界返回第一张，掩盖了真 bug
+
+    原来写的是"越界就兜底发第一张，因为抽样已经拿到图了，不发可惜"。
+
+    但实测发现：`max_tokens=8` 让模型回**空字符串**，解析出 0，
+    于是每次都"兜底发第一张" —— 看起来功能在跑（每次都发图），
+    实际**宠物从来没参与过选择**。
+
+    用户要的是"让它自己选"。选不出来就不发，比假装选了强 ——
+    否则这个功能永远不会有正确的信号。
+    """
+    if not candidates:
+        return None
+    idx = int(chosen_index or 0)
+    if 1 <= idx <= len(candidates):
+        return candidates[idx - 1]
+    return None
+
+
+def build_sample_prompt(candidates: list[MediaItem], reply_text: str) -> str:
+    """构造"让宠物挑一张"的提示词。
+
+    ## 设计取舍
+
+    · 给**编号 + 描述**，不给路径（路径对它没意义，还占 token）
+    · 明确要求"只回一个数字"（回一段话就解析不出来）
+    · 说明"哪张都不合适可以回 0" —— 否则它被迫挑一张不贴切的
+    """
+    lines = [
+        "你刚说完这句话：",
+        f"「{reply_text[:60]}」",
+        "",
+        "想配一张表情包。备选：",
+        "",
+    ]
+    for i, it in enumerate(candidates, 1):
+        lines.append(f"{i}. {_brief_caption(it.caption)}")
+    lines += [
+        "",
+        f"挑最贴合的一张，只回数字 1~{len(candidates)}。",
+        "哪张都不合适就回 0。只回数字，别解释。",
+    ]
+    return "\n".join(lines)
+
+
+_SIGNAL_WORDS = (
+    "表情", "笑", "哭", "怒", "生气", "叹", "囧", "汗", "瞪", "眯",
+    "举", "抱", "指", "伸", "握", "躺", "坐", "跪", "趴", "站",
+    "配文", "字幕", "文字", "写着", "配有", "字样",
+)
+
+
+def _brief_caption(caption: str) -> str:
+    """把一段长 caption 压成**能用来选图**的短句（12~60 字）。
+
+    优先级：
+
+        ① 引号里的配字   最直接表达意图
+        ② 含情绪/动作的词所在的短句
+        ③ 兜底：前 60 字
+
+    ⚠️ 不做 NLP —— 这是给模型看的提示，粗糙没关系，
+       但丢了关键信息它就只能瞎猜。
+    """
+    import re as _re
+
+    text = (caption or "").replace("\n", " ").strip()
+    if not text:
+        return "（无描述）"
+    if len(text) <= 40:
+        return text
+
+    # ① 引号里的配字（「」""'' 都认）
+    quote = _re.search(r"[「“\"']([^」”\"']{2,20})[」”\"']", text)
+    head = f"「{quote.group(1)}」 " if quote else ""
+
+    # ② 找含信号词的短句
+    bits = _re.split(r"[，。；,;]", text)
+    picked: list[str] = []
+    for seg in bits:
+        s = seg.strip()
+        if s and any(w in s for w in _SIGNAL_WORDS):
+            picked.append(s)
+            if len("，".join(picked)) >= 26:
+                break
+    if picked:
+        return (head + "，".join(picked))[:60]
+
+    # ③ 兜底
+    return (head + text)[:60]
 
 
 def read_bytes(store: MediaStore, item: MediaItem) -> Optional[bytes]:
