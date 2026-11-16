@@ -10819,6 +10819,79 @@ def test_reading(suite: "Suite") -> None:
 
         return "抽 5 张且随机；只取有描述的；编号映射正确；越界不发图"
 
+    @suite.check("表情包：心情越高 other 触发越多（上限就是 OTHER_WEIGHT）")
+    def _() -> str:
+        """用户 2026-11-16 要求：
+
+        > 「如果不触发除other种类的表情包时，现在是会概率触发other是吧，
+        >   这个概率还是由宠物决定吧，心情越高，触发越高，最高就现在的概率。」
+
+        ## 公式
+
+            概率 = OTHER_WEIGHT × mood      （mood 是 0~1 的原始值）
+
+        ⚠️ 用**原始 mood 值**，不是 `dominant` 那个离散标签 ——
+           标签只有 7 档（happy/sad/annoyed…），算不出连续曲线。
+
+        ## 这条守什么
+
+        ① 单调递增：心情越高概率越高
+        ② **上限**就是 `OTHER_WEIGHT` —— 用户明确说「最高就现在的概率」
+        ③ 心情 0 时概率 0（低落时完全不随性）
+        ④ 非法/缺失按 0.5（平常）算，**不是** 1.0
+           （当成 1.0 会在状态异常时给出最高概率，方向反了）
+        """
+        from . import sticker as _st
+
+        # ① 单调递增
+        prev = -1.0
+        for m in (0.0, 0.2, 0.4, 0.6, 0.8, 1.0):
+            c = _st.other_chance(m)
+            _assert(
+                c >= prev,
+                f"概率必须随心情单调不减（mood={m} 时 {c} < 上一个 {prev}）",
+            )
+            prev = c
+
+        # ② 上限 = OTHER_WEIGHT
+        _assert(
+            abs(_st.other_chance(1.0) - _st.OTHER_WEIGHT) < 1e-9,
+            f"心情最好时应当正好是上限 {_st.OTHER_WEIGHT}，"
+            f"实际 {_st.other_chance(1.0)}",
+        )
+        _assert(
+            _st.other_chance(5.0) <= _st.OTHER_WEIGHT + 1e-9,
+            "心情超界也不能超过上限 —— 用户要的是「最高就现在的概率」",
+        )
+
+        # ③ 心情 0 -> 0
+        _assert(
+            _st.other_chance(0.0) == 0.0,
+            "心情为 0 时不该随性发图",
+        )
+
+        # ④ 缺失/非法按平常算，不是最高
+        for bad in (None, "abc"):
+            c = _st.other_chance(bad)  # type: ignore[arg-type]
+            _assert(
+                0 < c < _st.OTHER_WEIGHT,
+                f"非法输入 {bad!r} 应当按平常算（0~上限之间），实际 {c} —— "
+                "不能给最高概率",
+            )
+
+        # ⑤ 心情好的时候明显更高
+        low = _st.other_chance(0.3)
+        high = _st.other_chance(0.9)
+        _assert(
+            high > low * 2,
+            f"心情 0.9 的概率（{high:.4f}）应当明显高于 0.3（{low:.4f}）",
+        )
+
+        return (
+            f"单调递增；上限 {_st.OTHER_WEIGHT}；"
+            f"mood 0.3 -> {low:.3f}、0.9 -> {high:.3f}"
+        )
+
     @suite.check("表情包标注：视觉可用时分类并挪进对应目录")
     def _() -> str:
         """用户要求：「用户自己放，放完之后让宠物熟悉下，自己个图片的内容打标注」。

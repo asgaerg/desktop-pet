@@ -365,6 +365,41 @@ _FALLBACK_CHAIN: dict[str, tuple[str, ...]] = {
 }
 
 
+def other_chance(mood_height: Optional[float] = None) -> float:
+    """心情 -> 这一轮走 other（随性发图）的概率（2026-11-16 用户要求）。
+
+    ## 用户原话
+
+    > 「如果不触发除other种类的表情包时，现在是会概率触发other是吧，
+    >   这个概率还是由宠物决定吧，心情越高，触发越高，最高就现在的概率。」
+
+    ## 公式
+
+        概率 = OTHER_WEIGHT × mood
+
+    `mood` 是主观层的 0~1 值（`EmotionState.mood`）：
+
+        mood 0.0  ->  0.00   完全不随性（低落时很克制）
+        mood 0.2  ->  0.036
+        mood 0.5  ->  0.09   平常
+        mood 0.8  ->  0.144
+        mood 1.0  ->  0.18   = `OTHER_WEIGHT`（**上限**）
+
+    ⚠️ 用户明确说「最高就现在的概率」，所以 `OTHER_WEIGHT` 是天花板，
+       `min()` 兜一道 —— mood 被写成 1.5 也不会超。
+
+    ⚠️ `mood` 缺失/非法时按 **0.5（平常）** 算，不是 1.0。
+       当成 1.0 会在状态异常时给出最高概率，那是错的方向。
+    """
+    try:
+        mood = float(mood_height) if mood_height is not None else 0.5
+    except (TypeError, ValueError):
+        mood = 0.5
+    # 夹到 0~1（主观层理论上就是这个范围，但别信跨模块传来的数）
+    mood = max(0.0, min(1.0, mood))
+    return min(OTHER_WEIGHT, OTHER_WEIGHT * mood)
+
+
 def emotion_to_sticker(dominant: str) -> str:
     """把立绘情绪映射成表情包类别；映射不到返回空串。"""
     return _EMOTION_TO_STICKER.get(str(dominant or ""), "")
@@ -422,6 +457,7 @@ def pick_for_emotion(
     rng: Optional[random.Random] = None,
     *,
     reply_text: str = "",
+    mood_height: Optional[float] = None,
     _allow_other: bool = True,
 ) -> Optional[MediaItem]:
     """挑一个表情包。返回 None = 安静地不发。
@@ -531,34 +567,47 @@ def pick_for_emotion(
     ⚠️ `_allow_other=False` 时不参与（给测试和特殊场景用）。
     """
     """
-    🔴 现在：先掷一次骰子决定"这一轮要不要随性"
+    🔴 现在：心情越好，越愿意"随性"发 other（2026-11-16 用户要求）
 
-    上一版把 other 插进 candidates 里，实测占比还是 **0%** ——
-    因为 `neutral` 有 6 个候选且全都有素材，按顺序查找时 other
-    排在后面永远轮不到。
+    ## 用户原话
 
-    顺序查找的本质是"第一个有素材的就赢"，插在哪里都改变不了
-    "前面一定有素材"这个事实。
+    > 「如果不触发除other种类的表情包时，现在是会概率触发other是吧，
+    >   这个概率还是由宠物决定吧，心情越高，触发越高，最高就现在的概率。」
 
-    ## 所以改成：先决定分支
+    ## 之前是什么样
 
-        掷一次骰子
-          ├── 命中（约 18%）-> 就走 other，不管有没有贴切类别
-          └── 没中      -> 按原顺序找贴切类别
+    固定 18%，和心情无关。用户觉得那不对 —— **心情好的时候更愿意乱发图**，
+    低落的时候更克制。这确实更像人。
 
-    这样 other 的占比是**可控的**，和候选数量无关。
+    ## 现在怎么算
 
-    ⚠️ 18% 这个数（`OTHER_WEIGHT`）的取舍：
-       · 太低（5%）-> 用户感觉不到"它会用 other"
-       · 太高（40%）-> 经常发不知道是什么的图，显得乱
+        概率 = OTHER_WEIGHT × mood
+
+    `mood` 是主观层的 0~1 值（`EmotionState.mood`）：
+
+        mood 0.0（很低落） -> 概率 0，完全不随性
+        mood 0.5（平常）   -> 概率 0.09
+        mood 1.0（很好）   -> 概率 0.18（= `OTHER_WEIGHT`，**上限**）
+
+    ⚠️ 用户明确说「最高就现在的概率」，所以 `OTHER_WEIGHT` 封顶，
+       **不会**超过它。mood 再高也就 0.18。
+
+    ## 为什么用乘法而不是别的曲线
+
+    线性最直观、可解释（"心情打几折，概率就打几折"）。
+    加平方之类会让低心情时几乎为 0、高心情时陡增，用户不容易预期。
+
+    ⚠️ `mood` 缺失/非法时按 0.5 算（平常），不要当成 1.0 ——
+       那样会在状态异常时给出最高概率。
     """
     if _allow_other and store.has_stickers("other"):
-        if (rng or random).random() < OTHER_WEIGHT:
+        chance = other_chance(mood_height)
+        if (rng or random).random() < chance:
             item = store.pick_sticker("other", rng=rng)
             if item is not None:
                 log.info(
-                    "表情包：这一轮随性发了张 other 里的（%s）",
-                    item.path.rsplit("/", 1)[-1],
+                    "表情包：心情 %.2f -> 随性概率 %.3f，发了张 other 里的（%s）",
+                    mood_height, chance, item.path.rsplit("/", 1)[-1],
                 )
                 return item
             # other 里挑不到（理论上不会）-> 继续走正常路径

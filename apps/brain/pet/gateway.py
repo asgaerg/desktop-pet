@@ -6678,8 +6678,30 @@ class Gateway:
 
         # 🔴 把回复内容也传进去（2026-11-06）：让它能按**意图**挑图，
         #    而不是只看心情。说「对不起我错了」时配道歉图，比配"悲伤"图贴切。
+        #
+        # 🔴 `mood_height`（2026-11-16 用户要求）：other 分支的概率由心情决定
+        #
+        # 用户原话：
+        #
+        # > 「如果不触发除other种类的表情包时，现在是会概率触发other是吧，
+        # >   这个概率还是由宠物决定吧，心情越高，触发越高，最高就现在的概率。」
+        #
+        # 把主观层的 `mood`（0~1）传下去，由 `sticker.other_chance` 算成概率。
+        #
+        # ⚠️ 用**原始 mood 值**，不是 `dominant` 那个离散标签 ——
+        #    标签只有 7 档，算不出"心情越高概率越高"的连续曲线。
+        # ⚠️ `getattr` 兜底：`conversation.emotion` 是 Conversation 的属性，
+        #    而这里是 Gateway 的方法（这个项目踩过 N 次跨类引用）。
+        mood_height = 0.5
+        try:
+            mood_height = float(getattr(self.conversation.emotion, "mood", 0.5) or 0.5)
+        except (AttributeError, TypeError, ValueError):
+            pass
         item = sticker_mod.pick_for_emotion(
-            self.media, dominant, reply_text=reply_text
+            self.media,
+            dominant,
+            reply_text=reply_text,
+            mood_height=mood_height,
         )
         if item is None:
             log.info(
