@@ -1753,6 +1753,39 @@ export class PetWindow {
       if (!window || window.isDestroyed() || !rect) return;
       // 拖拽中不抢决策权：那时渲染层强制保持可交互（见 reportInteractive 的守卫）
       if (this.dragging) return;
+      /*
+       * 🔴 聊天窗口开着时**一律穿透**（2026-11-20 修「打字时窗口往右跑」）
+       *
+       * ## 用户报的现象
+       *
+       * > 「现在输入框我打字还是会自动往右边缩」
+       * > 「整个窗口往右跑」
+       *
+       * ## 日志证据
+       *
+       *     09:16:34~40  9 秒内 7 次 drag-start @1324..1532
+       *     09:16:40.550~604  对话条定位 × 5 次（宠物被拖着走，对话框跟着重排）
+       *
+       * 这些 7 次拖拽**不是用户拖的** —— 用户当时在点输入框。
+       *
+       * ## 根因
+       *
+       * 这个轮询**只看光标在不在立绘矩形内**，不看用户此刻在操作谁。
+       * 而立绘正好在右下角、和对话条重叠 —— 鼠标移过去打字，
+       * 宠物窗口 40ms 内就切成"可交互"，把本该给输入框的点击吃掉了。
+       *
+       * 于是：点输入框 -> 宠物开始被拖 -> 对话框跟着重排 -> "往右跑"。
+       *
+       * ## 为什么"一律穿透"是对的
+       *
+       * 对话条开着时，用户的操作意图明确集中在对话条上。
+       * 这时宠物本体**不需要**接收点击 —— 想拖宠物，先关掉对话条即可
+       * （而且对话条本身也能拖，位置存在 `chatX/chatY`）。
+       */
+      if (this.suspendInteractive) {
+        this.setInteractive(false);
+        return;
+      }
       const bounds = window.getBounds();
       const cursor = screen.getCursorScreenPoint();
       const pad = 4; // 给边缘一点宽容，免得贴边时抖动
@@ -1766,6 +1799,31 @@ export class PetWindow {
   }
 
   private cursorWatch: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * 暂停"光标命中立绘就吃鼠标"的判定（2026-11-20 加）。
+   *
+   * 对话条打开时把它设成 true —— 否则鼠标移过去打字会被宠物窗口
+   * 抢走点击（见 `startCursorWatch` 里的说明）。
+   */
+  private suspendInteractive = false;
+
+  /**
+   * 设置是否暂停交互判定。
+   *
+   * ⚠️ 置 true 时**立刻**切到穿透，不等下一次 40ms 轮询 ——
+   *    否则打开对话条的瞬间仍可能漏进一次点击。
+   */
+  setSuspendInteractive(suspend: boolean): void {
+    if (suspend === this.suspendInteractive) return;
+    this.suspendInteractive = suspend;
+    if (suspend) {
+      this.setInteractive(false);
+      this.diagnostic?.('[穿透] 对话条开着 -> 宠物窗口一律穿透（不再抢输入框的点击）');
+    } else {
+      this.diagnostic?.('[穿透] 对话条关了 -> 恢复按光标位置判定');
+    }
+  }
 
   /** 探头时气泡的**基线**平移（按气泡最大宽度估的，见 applyPeekLayout） */
   private peekBubbleShiftBase = 0;

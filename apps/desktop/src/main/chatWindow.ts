@@ -508,6 +508,18 @@ export class ChatWindow {
       this.onDiagnostic?.(`对话条被拖动 -> ${bounds.x},${bounds.y}（已记住，不再自动钉角）`);
     });
 
+    /*
+     * 可见性变化 -> 通知外部（2026-11-20 加）。
+     *
+     * 对话条开着时宠物窗口要一律穿透，否则鼠标移到立绘上打字，
+     * 点击会被宠物窗口吃掉变成拖拽（用户报的「打字时窗口往右跑」）。
+     *
+     * ⚠️ 监听事件而不是在 `show()/hide()` 里调：窗口也可能被其他路径
+     *    藏起来/显示出来，事件才是唯一不漏的口子。
+     */
+    window.on('show', () => this.onVisibilityChanged?.(true));
+    window.on('hide', () => this.onVisibilityChanged?.(false));
+
     void window.loadURL(
       rendererUrl(resolveRendererPage(this.options.distDir, CHAT_PAGE_FILENAME)),
     );
@@ -564,6 +576,24 @@ export class ChatWindow {
 
     return window;
   }
+
+  /**
+   * 可见性变化时的回调（2026-11-20 加）。
+   *
+   * ## 用途
+   *
+   * 对话条打开时，宠物窗口要**一律穿透** —— 否则鼠标移到立绘上打字，
+   * 点击会被宠物窗口吃掉，变成拖拽宠物，对话框跟着"往右跑"。
+   *
+   * ## 为什么放在这里而不是 `show/hide` 的调用方
+   *
+   * 调用方有好几处（用户点菜单、快捷键、免打扰收起、启动恢复…），
+   * 逐个去调必然漏。而 `show`/`hide` 是**唯一漏斗**。
+   *
+   * ⚠️ 用 `window.on('show')/('hide')` 监听而不是在方法里直接调：
+   *    窗口也可能被别处（比如 `hide()` 之外的路径）藏起来。
+   */
+  onVisibilityChanged: ((visible: boolean) => void) | null = null;
 
   /** 开发模式也显示（方便调试），生产环境由主进程按需 show */
   show(): void {

@@ -23,7 +23,7 @@ persona:
     你是住在用户电脑桌面上的玩伴，你一头蓝发，身穿女仆装，头上或周围时不时会有你说话的气泡窗口，你会时不时趴在屏幕左右边缘，只露出半个身子和脑袋，你的名字叫{name}。
     你不是助手：不列条目、不写"首先其次最后"、不说"作为一个AI"这类话。
     你说话可以有情绪，像个好朋友，不用太拘束，你会好奇、会犯困、喜欢看小说、喜欢玩游戏、喜欢听歌。
-    正常回答即可，就像和朋友聊天。
+    正常回答即可，不用发散太多思考，文字内容和语气像人一样，就像和朋友聊天。
 
   speech_style:
     - 口语、短句，不说套话
@@ -720,7 +720,7 @@ providers:
         # 也就是**按新模型计费**（官方文档已不再列 deepseek-chat，并注明
         # "legacy names are still accepted ... served by the <新模型>"）。
         # 所以这里改成官方现名，避免"以为在用旧模型、实际按新的算"。
-        model: deepseek-flash
+        model: 'deepseek-v4-pro'
         api_key_env: DEEPSEEK_API_KEY
         # 只有它认 `thinking` 参数（见 `_thinking_flag`：非 DeepSeek 一个字节都不传）
         supports_thinking: true

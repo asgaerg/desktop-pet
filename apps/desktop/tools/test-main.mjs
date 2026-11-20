@@ -7199,6 +7199,94 @@ console.log('\n文字等语音同步（SpeakSyncGate）');
   );
 }
 
+/*
+ * ---- 对话条开着时宠物窗口必须穿透（2026-11-20 修）----
+ *
+ * ## 用户报的现象
+ *
+ *   「现在输入框我打字还是会自动往右边缩」
+ *   「整个窗口往右跑」
+ *
+ * ## 根因（日志查出来的）
+ *
+ * `PetWindow.startCursorWatch()` 每 40ms 检查光标是否落在立绘矩形内，
+ * 是就切成"可交互"。立绘正好在右下角、和对话条重叠 —— 鼠标移过去打字，
+ * 宠物窗口 40ms 内抢走点击，变成拖拽宠物，对话框跟着重排。
+ *
+ * 日志证据：9 秒内 7 次 `drag-start`，坐标在 1324~1532 之间乱跳，
+ * 每次都有配对的 `drag-end` —— 那显然不是人手拖的。
+ *
+ * ## 这条守什么
+ *
+ * ① 轮询里必须有"对话条开着就一律穿透"的早退
+ * ② 设 suspend 时要**立刻**切穿透，不等下一次 40ms
+ * ③ 可见性变化要真的接到宠物窗口上
+ */
+{
+  const mainDir = path.join(here, '..', 'src', 'main');
+  const petSrc = readFileSync(path.join(mainDir, 'petWindow.ts'), 'utf-8');
+  const chatSrc = readFileSync(path.join(mainDir, 'chatWindow.ts'), 'utf-8');
+  const idxSrc = readFileSync(path.join(mainDir, 'index.ts'), 'utf-8');
+
+  // 取 startCursorWatch 的函数体
+  const watchStart = petSrc.indexOf('startCursorWatch()');
+  const watchBody = petSrc.slice(watchStart, watchStart + 2600);
+
+  check(
+    '穿透轮询：对话条开着时早退成一律穿透',
+    /if \(this\.suspendInteractive\)\s*\{[\s\S]{0,140}setInteractive\(false\)/.test(
+      watchBody,
+    ),
+    '不早退的话，光标移到立绘上就会抢走输入框的点击',
+  );
+
+  check(
+    '穿透轮询：suspend 检查在光标命中判定之前',
+    watchBody.indexOf('suspendInteractive') <
+      watchBody.indexOf('getCursorScreenPoint'),
+    '顺序反了就没意义 —— 先判命中再判 suspend，照样会切成可交互',
+  );
+
+  check(
+    'setSuspendInteractive：置 true 时立刻切穿透（不等 40ms）',
+    /setSuspendInteractive\(suspend: boolean\)[\s\S]{0,700}?if \(suspend\)\s*\{[\s\S]{0,140}setInteractive\(false\)/.test(
+      petSrc,
+    ),
+    '等下一次轮询会漏进一次点击',
+  );
+
+  check(
+    'chatWindow 暴露 onVisibilityChanged',
+    /onVisibilityChanged:\s*\(\(visible: boolean\) => void\) \| null = null/.test(
+      chatSrc,
+    ),
+    '没有这个回调，主进程就不知道对话条什么时候开着',
+  );
+
+  check(
+    'chatWindow 监听 show/hide 事件（不是只在 show() 里调）',
+    /window\.on\('show'[\s\S]{0,140}onVisibilityChanged\?\.\(true\)/.test(chatSrc) &&
+      /window\.on\('hide'[\s\S]{0,140}onVisibilityChanged\?\.\(false\)/.test(chatSrc),
+    '窗口也可能被其他路径隐藏，监听事件才不漏',
+  );
+
+  check(
+    'index.ts 把可见性接到 setSuspendInteractive',
+    /onVisibilityChanged = \(visible\) => \{[\s\S]{0,120}setSuspendInteractive\(visible\)/.test(
+      idxSrc,
+    ),
+    '没接上就完全没生效',
+  );
+
+  check(
+    'index.ts 挂完回调后主动同步一次初始状态',
+    /onVisibilityChanged =[\s\S]{0,500}?setSuspendInteractive\(chatWindow\.isVisible\(\)\)/.test(
+      idxSrc,
+    ),
+    '对话条可能在回调挂上之前就显示了，只靠事件会漏掉初始状态',
+  );
+}
+
 /* ------------------------------------------------------------------ 收尾 */
 
 console.log('');
