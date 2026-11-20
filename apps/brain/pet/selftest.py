@@ -10911,6 +10911,84 @@ def test_reading(suite: "Suite") -> None:
             f"mood 0.3 -> {low:.3f}、0.9 -> {high:.3f}"
         )
 
+    @suite.check("表情包：进原文记忆只存路径，不存画面描述")
+    def _() -> str:
+        """用户 2026-11-20 要求：
+
+        > 「宠物回复的表情包在原文记忆中显示的表情包解析文字还是不加入吧，
+        >   原文记忆不加入表情包分析文字了」
+
+        ## 改之前记的是什么
+
+            （我回了一张表情包：画面显示的是一个蓝发蓝瞳、带有鲸鱼尾巴元素的
+             Q版女仆装角色插画，角色手持蓝色花球，旁边配有"加油加油！"的文字气泡）
+            [图：stickers/cheer/s00123.webp]
+
+        ## 为什么要去掉那段描述
+
+        ① **太吵**：caption 是视觉模型的原始输出，动辄一百多字，
+           记忆列表里一条占三四行
+        ② **污染检索**：那些字会进索引，搜「角色」「画面」会命中一堆表情包 —
+           正是这个项目反复踩的"检索噪声"问题
+        ③ **本来就不该记忆扛**：用户要的是"记得我给过你一张图"，
+           要看画的是什么，记忆管理里点开图就行
+
+        ## 现在
+
+            [表情包：stickers/cheer/s00123.webp]
+
+        只留路径。类别在路径里已经有了（`stickers/cheer/`），不重复写。
+        """
+        import inspect as _ins
+
+        from .gateway import Gateway
+
+        raw = _ins.getsource(Gateway._maybe_send_sticker)
+
+        # ⚠️ 必须先**剥离注释**再断言。
+        #
+        # 我在这段代码的说明里写了旧格式的示例（「我回了一张表情包：…」），
+        # 直接用原始源码查会被自己的注释误伤 —— 这个坑在本项目
+        # 已经踩过至少两次（`or 768` 那次、`_EMOTION_CANDIDATES` 那次）。
+        def _strip_comments(text: str) -> str:
+            import re as _re
+
+            text = _re.sub(r"/\*[\s\S]*?\*/", "", text)
+            return _re.sub(r"#[^\n]*", "", text)
+
+        src = _strip_comments(raw)
+
+        # ⚠️ 也不能简单断言 `"item.caption" not in src` ——
+        #    那段源码里还有**日志行**在用 `item.caption[:30]`，
+        #    那是排查用的，应当保留。要断言的是"写记忆那一段"没有它。
+        #
+        # 所以先切出 `remember_turn(...)` 调用所在的片段。
+        start = src.find("remember_turn(")
+        _assert(start >= 0, "应当找得到写记忆那一段")
+        # 取到下一个右括号收尾（够用：这一段不含嵌套括号）
+        end = src.find(")", start)
+        mem_call = src[start : end + 1]
+
+        # ① 写记忆那一段不能再出现 caption
+        _assert(
+            "item.caption" not in mem_call,
+            "写记忆的那一段不该再出现 `item.caption` —— "
+            f"用户明确要求去掉表情包分析文字。实际片段：{mem_call[:120]!r}",
+        )
+        # ② 也不能写「我回了一张表情包：」这种带描述的前缀
+        _assert(
+            "我回了一张表情包" not in src,
+            "前缀「我回了一张表情包：…」后面跟的就是描述，一并去掉",
+        )
+        # ③ 必须还保留路径引用（不然就变成"什么都没记"）
+        _assert(
+            "[表情包：{item.path}]" in mem_call,
+            "应当保留 `[表情包：{item.path}]` 这个路径引用 —— "
+            "完全不留记录的话，宠物就不记得自己发过图了",
+        )
+
+        return "只存 [表情包：路径]，不存 caption/类别文字"
+
     @suite.check("表情包：整个挑图交给宠物（候选池混合 + 它自己选）")
     def _() -> str:
         """用户 2026-11-16 要求：
