@@ -138,6 +138,8 @@ const { findPython, computeRestartDelay } = requireCjs(target('sidecar'));
 
 const { AudioPairer } = requireCjs(target('audioPairer'));
 
+const { SpeakSyncGate, DEFAULT_TTS_WAIT_MS } = requireCjs(target('speakSync'));
+
 const { DragTracker } = requireCjs(target('dragTracker'));
 
 const { QuitCoordinator, quitRequestPath } = requireCjs(target('quitCoordinator'));
@@ -6891,6 +6893,202 @@ console.log('\n12.9 statusWindow：状态文字全称 + 胶囊高度随字数伸
       /stickerSize:\s*size/.test(bubbleWinSrc),
     '没有这个方法，index.ts 的调用会 TypeError',
   );
+}
+
+/*
+ * ---- 文字等语音同步（2026-11-20 用户要求）----
+ *
+ * 用户原话：
+ *
+ *   「现在将文字和语音同步输出，在有宠物语音开始时，文字将会等待语音
+ *     合成完毕一起输出。」
+ *
+ * ## 为什么要测这么多边界
+ *
+ * 这个门是"扣住消息、等信号再放"的模型，写错任何一条边界都会让
+ * **文字永远不出现** —— 那比"不同步"糟糕得多。所以每个出口都要测：
+ *
+ *   · 语音没开 -> 立刻放（不能拖慢纯文字用户）
+ *   · TTS 成功 -> 放
+ *   · TTS 失败 -> 立刻放（用户明确选的）
+ *   · 超时     -> 放（云端可能一直不回应）
+ *   · 新的一句到了 -> 先放旧的（否则文字整段丢失）
+ */
+console.log('\n文字等语音同步（SpeakSyncGate）');
+{
+  /** 造一个门，并收集放行记录 */
+  function makeGate(waitMs = DEFAULT_TTS_WAIT_MS) {
+    const released = [];
+    const logs = [];
+    const gate = new SpeakSyncGate({
+      waitMs,
+      onRelease: (message, why) => released.push({ message, why }),
+      log: (line) => logs.push(line),
+    });
+    return { gate, released, logs };
+  }
+
+  const MSG = { type: 'pet.say.end', text: '你好呀' };
+
+  // ① 语音没开 -> 立刻放，不扣
+  {
+    const { gate, released } = makeGate();
+    const held = gate.hold(MSG, false);
+    check('语音没开时不扣住', held === false && released.length === 0);
+  }
+
+  // ② 语音开着 -> 扣住
+  {
+    const { gate, released } = makeGate();
+    const held = gate.hold(MSG, true);
+    check('语音开着时扣住 say.end', held === true && released.length === 0);
+    check('扣住时 isHolding 为真', gate.isHolding === true);
+
+    gate.release('TTS 好了');
+    check(
+      'release 后放行且内容一字不改',
+      released.length === 1 &&
+        released[0].message === MSG &&
+        released[0].message.text === '你好呀',
+    );
+    check('放行后不再 holding', gate.isHolding === false);
+  }
+
+  // ③ release 幂等：多来一次不该重复放行
+  {
+    const { gate, released } = makeGate();
+    gate.hold(MSG, true);
+    gate.release('第一次');
+    gate.release('第二次');
+    check('重复 release 不会放行两次', released.length === 1);
+  }
+
+  // ④ 新的一句到了 -> 先放旧的，再扣新的
+  {
+    const { gate, released } = makeGate();
+    const first = { type: 'pet.say.end', text: '第一句' };
+    const second = { type: 'pet.say.end', text: '第二句' };
+    gate.hold(first, true);
+    gate.hold(second, true);
+    check(
+      '新的一句到达时先放旧的（否则旧文字丢失）',
+      released.length === 1 && released[0].message.text === '第一句',
+    );
+    check('新的一句被扣住', gate.isHolding === true);
+    check('扣住的是第二句', gate.heldForMs >= 0);
+    gate.release('TTS 好了');
+    check(
+      '第二句随后也能放行',
+      released.length === 2 && released[1].message.text === '第二句',
+    );
+  }
+
+  // ⑤ 上一条还扣着，下一条语音没开 -> 也要把旧的放掉
+  {
+    const { gate, released } = makeGate();
+    gate.hold({ type: 'pet.say.end', text: '旧的' }, true);
+    const held = gate.hold({ type: 'pet.say.end', text: '新的' }, false);
+    check(
+      '语音关掉后到达的新句：旧的要放掉、新的立刻放',
+      held === false && released.length === 1 && released[0].message.text === '旧的',
+    );
+  }
+
+  // ⑥ drop：丢掉且不转发
+  {
+    const { gate, released } = makeGate();
+    gate.hold(MSG, true);
+    gate.drop('窗口销毁');
+    check('drop 不转发', released.length === 0 && gate.isHolding === false);
+  }
+
+  // ⑦ 非 say.end 的消息不该被 hold 逻辑处理（由调用方先挡过，
+  //    这里只验"传 false 就立刻放"这条契约）
+  {
+    const { gate, released } = makeGate();
+    gate.hold({ type: 'pet.say.delta', text: 'x' }, false);
+    check('非 say.end / 不等语音时立刻放行', released.length === 0);
+  }
+
+  /*
+   * ⑧ 超时兜底 —— **最重要的一条**
+   *
+   * 云端 TTS 可能一直不回应。扣住不放会让文字**永远不出现**，
+   * 那比"文字和语音不同步"糟糕得多。所以必须有上限。
+   */
+  {
+    const { gate, released } = makeGate(30); // 30ms，测起来快
+    gate.hold({ type: 'pet.say.end', text: '等不到语音的那句' }, true);
+    check('超时前是扣住的', released.length === 0 && gate.isHolding === true);
+
+    await new Promise((r) => setTimeout(r, 90));
+    check(
+      '超时后自动放行（否则文字永远不出现）',
+      released.length === 1 &&
+        released[0].message.text === '等不到语音的那句' &&
+        /超时/.test(released[0].why),
+    );
+    check('超时放行后不再 holding', gate.isHolding === false);
+  }
+
+  // ⑨ 放行后计时器要清掉，不能在之后又放一次
+  {
+    const { gate, released } = makeGate(30);
+    gate.hold(MSG, true);
+    gate.release('TTS 好了');
+    await new Promise((r) => setTimeout(r, 90));
+    check('放行后再等也不会重复放（计时器已清）', released.length === 1);
+  }
+
+  /*
+   * ⑩ 🔴 **信号比 say.end 先到**（2026-11-20 实测踩到的真 bug）
+   *
+   * 时序：
+   *
+   *     16:36:04.614  收到 tts_skipped 信号
+   *     16:36:04.635  扣住 say.end            ← 晚了 21ms
+   *     16:36:10.636  等了 6000ms 还没等到 TTS ← 白等 6 秒
+   *
+   * 根因：sidecar 里 `speak()` 在 `say.end` 的订阅链里先跑、发了跳过信号，
+   * 而主进程转发 `say.end` 的订阅者在后面 —— 信号**先到**。
+   *
+   * 修法：信号来时**记下时刻**，`say.end` 到了查一眼，刚记过就不扣。
+   */
+  {
+    const { gate, released } = makeGate();
+    gate.notifySkipped('免打扰');       // 信号先到
+    const held = gate.hold(MSG, true);  // 然后 say.end 才到
+    check(
+      '信号比 say.end 先到时：不扣、直接显示（否则白等超时）',
+      held === false && released.length === 0,
+    );
+  }
+
+  // ⑪ 信号太旧就不该影响新的一句（不能"上一句跳过"拖累"下一句该等"）
+  {
+    const { gate, released } = makeGate();
+    gate.notifySkipped('免打扰');
+    await new Promise((r) => setTimeout(r, 1100)); // 超过 1 秒窗口
+    const held = gate.hold(MSG, true);
+    check(
+      '跳过信号超过有效期后不再影响（新的一句该等还是得等）',
+      held === true && released.length === 0,
+    );
+    gate.release('TTS 好了');
+    check('这句仍然能正常放行', released.length === 1);
+  }
+
+  // ⑫ 已经扣住了才收到跳过信号 -> 立刻放行
+  {
+    const { gate, released } = makeGate();
+    gate.hold(MSG, true);
+    check('先扣住了', gate.isHolding === true);
+    gate.notifySkipped('免打扰');
+    check(
+      '扣住之后收到跳过信号 -> 立刻放',
+      released.length === 1 && gate.isHolding === false,
+    );
+  }
 }
 
 /* ------------------------------------------------------------------ 收尾 */

@@ -36,6 +36,7 @@ import fs, {
 import { spawn, type ChildProcess, execFile } from 'node:child_process';
 import { PetSocket } from './petSocket.js';
 import { AudioPairer } from './audioPairer.js';
+import { SpeakSyncGate } from './speakSync.js';
 import { synthesizeSpeech } from './ttsLocal.js';
 import { findPython, SidecarManager, type ReadyInfo } from './sidecar.js';
 import { PetWindow } from './petWindow.js';
@@ -2172,6 +2173,68 @@ function connectSocket(port: number, brain: string): void {
    * 一个 WebSocket 上文本与二进制是两条独立通道，必须靠序号配对。
    * 逻辑抽在 audioPairer 里，便于单独测试各种到达顺序。
    */
+    /**
+   * 把一条消息送到它该去的地方（气泡窗口优先，否则宠物窗口）。
+   *
+   * 抽成函数是因为它现在有**两个调用点**：
+   *   ① 正常路径（非 `say.end`，或语音没开时的 `say.end`）
+   *   ② `speakSync` 放行被扣住的 `say.end` 时
+   */
+  function deliver(message: { type?: string }): void {
+    if (forwardToBubble(message)) {
+      // 已由气泡窗口消费；不再往宠物窗口发（那里已经没有气泡了）
+    } else {
+      petWindow?.sendToRenderer('pet:message', message);
+    }
+  }
+
+  /**
+   * 文字等语音的门（2026-11-20 用户要求）。
+   *
+   * > 「现在将文字和语音同步输出，在有宠物语音开始时，文字将会等待语音
+   * >   合成完毕一起输出。」
+   *
+   * 逻辑全在 `speakSync.ts`（纯函数、可单测）；这里只负责
+   * 把"放行"接回真正的转发，以及把 TTS 信号喂给它。
+   */
+  const speakSync = new SpeakSyncGate({
+    onRelease: (heldMessage, why) => {
+      log(`[语音同步] ${why} —— 显示文字`);
+      deliver(heldMessage);
+    },
+    log: (line) => log(line),
+  });
+
+  /**
+   * 判断这条 `say.end` 要不要**扣住**等 TTS（2026-11-20 用户要求）。
+   *
+   * 用户原话：
+   *
+   * > 「现在将文字和语音同步输出，在有宠物语音开始时，文字将会等待语音
+   * >   合成完毕一起输出。」
+   *
+   * @returns true = 已扣住（调用方**不要**再转发）
+   */
+  function holdSayEndForTts(message: { type?: string }): boolean {
+    if (message.type !== 'pet.say.end') return false;
+    /*
+     * ⚠️ 「有宠物语音」的判据必须和 `decideBubble` 里那条一致，
+     *    否则会出现"以为有语音、结果永远等不到"。
+     *
+     *      provider !== 'none'（配了真实引擎）
+     *      && ttsSpeechEnabled（菜单里那个"语音播报"勾着）
+     *
+     * 另外 `reason` 不是 `done` 时不等 —— 被打断/出错的回复，
+     * 用户最想**立刻**看到那句话，而不是再等几秒。
+     */
+    const reason = String((message as { reason?: unknown }).reason ?? 'done');
+    const shouldWait =
+      reason === 'done' &&
+      readTtsConfig().provider !== 'none' &&
+      ttsSpeechEnabled;
+    return speakSync.hold(message, shouldWait);
+  }
+
   const audioPairer = new AudioPairer();
 
   socket.on('binary', (payload: Buffer) => {
@@ -2541,6 +2604,18 @@ function connectSocket(port: number, brain: string): void {
       })();
     }
     if (message.type === 'voice.audio') {
+      /*
+       * 🔴 语音合成好了 -> **放行被扣住的文字**（2026-11-20 用户要求）
+       *
+       * 用户原话：
+       *
+       * > 「现在将文字和语音同步输出，在有宠物语音开始时，文字将会等待
+       * >   语音合成完毕一起输出。」
+       *
+       * ⚠️ 放在**最前面**：后面那些音频配对逻辑可能提前 return
+       *    （index <= 0 之类），不能让文字因为音频配对的细节被扣住不放。
+       */
+      speakSync.release('语音合成好了');
       // 记下格式，等对应的二进制帧到达后一起交给渲染层
       const index = Number((message as { index?: number }).index ?? 0);
       /*
@@ -2585,6 +2660,13 @@ function connectSocket(port: number, brain: string): void {
      * 文字被主动隐藏、语音又没有，两头都收不到。
      */
     if (message.type === 'voice.tts_failed') {
+      /*
+       * 🔴 TTS 失败 -> **立刻放行文字**（2026-11-20 用户要求）
+       *
+       * 用户明确选了「立刻显示文字」而不是「等超时」：
+       * 语音没响已经够糟了，再让文字卡着等只会更糟。
+       */
+      speakSync.release('语音合成失败，立刻显示文字');
       const reason = String((message as { reason?: string }).reason ?? '');
       if (ttsHealthy !== false) {
         ttsHealthy = false;
@@ -2598,7 +2680,26 @@ function connectSocket(port: number, brain: string): void {
        * 结果没声音，红灯说明"出了问题"而不是"没事情"。
        * 下一回合的 pet.thinking 会把它带出异常态。
        */
-      setStatus(reason ? `TTS 合成失败：${reason}` : 'TTS 合成失败');}
+      setStatus(reason ? `TTS 合成失败：${reason}` : 'TTS 合成失败');
+    }
+
+    /*
+     * TTS **主动跳过**（2026-11-20 加）。
+     *
+     * 引擎是 none、语音开关关了、免打扰/静音时段 —— 这些情况 sidecar
+     * 没合成也没出错，原来**什么信号都不发**，于是主进程只能干等
+     * 6 秒超时才把文字放出来。
+     *
+     * 实测：用户开着免打扰发了句话，日志里
+     * `免打扰/静音中：这句不合成语音`，而文字白等了 6 秒。
+     *
+     * ⚠️ 这**不算失败**，不进异常态 —— 用户主动选的"不出声"是正常状态。
+     */
+    if (message.type === 'voice.tts_skipped') {
+      const reason = String((message as { reason?: string }).reason ?? '');
+      log(`[语音同步] 收到 tts_skipped 信号：${reason || '(无原因)'}`);
+      speakSync.notifySkipped(`这句不合成语音（${reason || '原因未知'}）`);
+    }
     /*
      * 说话状态 -> 状态条（2026-10-16 用户要求）。
      *
@@ -2896,12 +2997,16 @@ function connectSocket(port: number, brain: string): void {
     // 但实测加高**不增加头顶以上的空间**（画布贴窗口顶，多出来的高度只能落在
     // 下方），所以长回复在宠物窗口内必然压到脸。
     // 独立窗口的位置只受屏幕工作区约束，长回复也能完整显示。
-    if (forwardToBubble(message)) {
-      // 已由气泡窗口消费；不再往宠物窗口发（那里已经没有气泡了）
-    } else {
-      petWindow?.sendToRenderer('pet:message', message);
+    //
+    // 🔴 2026-11-20：`say.end` 可能被**扣住**，等 TTS 合成完再一起显示。
+    //    见 `speakSync.ts` 顶部那段说明（用户要求文字和语音同步输出）。
+    if (holdSayEndForTts(message)) {
+      // 已扣住，等 TTS 的信号到了再走下面的转发（由 flush 回调触发）
+      return;
     }
+    deliver(message);
   });
+
 
   socket.connect();
 }

@@ -2031,6 +2031,38 @@ class VoiceSession:
         if self.voice_config.enabled:
             await self._set_state(VoiceState.LISTENING)
 
+    async def _notify_tts_skipped(self, reason: str) -> None:
+        """告诉主进程"这句**不会**念了"，让它立刻放行被扣住的文字。
+
+        ## 为什么需要它（2026-11-20 发现）
+
+        用户要求「有宠物语音时，文字等语音合成完一起输出」，于是主进程
+        收到 `say.end` 后会**扣住文字**，等 TTS 的信号。
+
+        但 TTS 有多个"主动跳过"的出口：
+          · 引擎是 none/mock
+          · 语音播报开关关了
+          · 免打扰 / 静音时段（`_speech_allowed` 返回假）
+
+        这些情况**没合成、也没失败** —— 原来什么都不发。主进程于是
+        只能干等 6 秒超时才把文字放出来。
+
+        实测就是这样：用户开着免打扰发了句话，
+        日志里 `免打扰/静音中：这句不合成语音`，而文字被白等了 6 秒。
+
+        ## 所以补一个明确的"跳过"信号
+
+        主进程收到后立刻放行 —— 语义上它就是"这条不会有声音了，
+        不用再等"。
+
+        ⚠️ 失败要**安静**：上报失败不能影响对话（只记 debug）。
+        """
+        try:
+            await self.bus.publish("voice.tts_skipped", {"reason": reason[:120]})
+            log.info("已上报 TTS 跳过信号：%s", reason)
+        except Exception:  # noqa: BLE001
+            log.warning("上报 TTS 跳过信号时出错", exc_info=True)
+
     async def _on_pet_say_end_speak(self, event: Any) -> None:
         """
         宠物说完一句话 -> **把它合成成语音播出来**（TTS 的入口）。
@@ -2100,6 +2132,7 @@ class VoiceSession:
         if self.tts.__class__.__name__ == "MockTtsEngine":
             # `tts.provider: none` 或 `mock` —— 合成出来是等长静音，不必走一遍
             log.debug("不读这句：TTS 是 mock/none（providers.tts.provider）")
+            await self._notify_tts_skipped("TTS 引擎是 none/mock")
             return
         # 「语音播报」开关（2026-10-14）。⚠️ **每次现读**而不是构造时固定：
         # 用户在菜单里点了就要立刻生效，而 `config.update` 会替换
@@ -2107,6 +2140,7 @@ class VoiceSession:
         # 的说明：现读拿到的就是最新值）。
         if not (self.config.providers.get("tts", {}) or {}).get("enabled", True):
             log.debug("不读这句：语音播报开关已关（providers.tts.enabled=false）")
+            await self._notify_tts_skipped("语音播报开关已关")
             return
         say_id = str(payload.get("id") or "")
         if not say_id:
@@ -2936,6 +2970,7 @@ class VoiceSession:
             try:
                 if not check():
                     log.info("免打扰/静音中：这句不合成语音（%d 字）", len(text))
+                    await self._notify_tts_skipped("免打扰 / 静音时段")
                     return
             except Exception:  # noqa: BLE001 —— 判定失败就照常说
                 log.debug("语音放行判定失败（按允许处理）", exc_info=True)

@@ -167,6 +167,11 @@ _BUS_TO_WIRE: dict[str, str] = {
     #
     # ✅ 改成 `#` 注释后 key 才是 `voice.tts_failed`。
     "voice.tts_failed": "voice.tts_failed",
+    # TTS **主动跳过**（不是失败）—— 2026-11-20 加。
+    #
+    # 引擎是 none、语音开关关了、免打扰/静音时段 —— 这些情况没合成、
+    # 也没出错。主进程收到后可立刻放行被扣住的文字，不用干等超时。
+    "voice.tts_skipped": "voice.tts_skipped",
 }
 
 HISTORY_LIMIT = 200

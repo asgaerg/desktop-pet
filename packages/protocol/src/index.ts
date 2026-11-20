@@ -305,6 +305,36 @@ export interface VoiceTtsFailedMsg {
   reason?: string;
 }
 
+/**
+ * TTS **主动跳过**（不是失败）—— 2026-11-20 加。
+ *
+ * ## 什么时候发
+ *
+ *   · 引擎是 `none` / `mock`
+ *   · 「语音播报」开关关了（`providers.tts.enabled = false`）
+ *   · 免打扰 / 静音时段（`speech_allowed()` 返回假）
+ *
+ * 这几种情况 sidecar **既不合成、也不失败**，原来什么信号都不发。
+ *
+ * ## 为什么需要它
+ *
+ * 用户要求「有宠物语音时，文字等语音合成完一起输出」，于是主进程
+ * 收到 `say.end` 会**扣住文字**等 TTS 信号。如果跳过时没有信号，
+ * 文字只能干等 6 秒超时 —— 实测就是这个：
+ *
+ *     免打扰/静音中：这句不合成语音（46 字）
+ *     [语音同步] 等了 6000ms 还没等到 TTS —— 放弃等待，直接显示文字
+ *
+ * ⚠️ 和 `voice.tts_failed` 的区别：那个是**出错了**（进异常态），
+ *    这个是**用户选择不出声**（正常状态，状态条不动）。
+ */
+export interface VoiceTtsSkippedMsg {
+  type: 'voice.tts_skipped';
+  ts?: number;
+  /** 为什么跳过（给人看的，会进日志） */
+  reason?: string;
+}
+
 export interface VoiceAudioMsg {
   type: 'voice.audio';
   ts?: number;
@@ -1001,6 +1031,7 @@ export type ToUiMsg =
    * 分桶，两边能对上。
    */
   | VoiceTtsFailedMsg
+  | VoiceTtsSkippedMsg
   | VisionSnapDoneMsg
   | ActivityTierMsg;
 
@@ -1270,6 +1301,22 @@ const TO_UI_TYPES = new Set<string>([
   'tts.synthesize',
   // 设置页试听：让宠物读一句话（走真实合成链路）
   'voice.say',
+  /*
+   * TTS 的两个**状态信号**（Python -> 主进程，终点是主进程自己）。
+   *
+   * 🔴 2026-11-20 补：这两条以前**一直不在白名单里**，于是全被静默丢弃 ——
+   * 日志里就是「丢弃无法识别的消息：{"type":"voice.tts_failed",...}」。
+   *
+   *   voice.tts_failed    合成失败/出错 -> 主进程降级显示文字 + 进异常态
+   *   voice.tts_skipped   主动跳过（免打扰/引擎none/开关关）-> 只放行文字
+   *
+   * ⚠️ 为什么以前没被发现：`ttsFailed` 只是"沉浸模式下降级显示文字"，
+   *    而沉浸模式很少有人开 —— 失败了也没人注意。直到 2026-11-20
+   *    做「文字等语音」时，文字被扣住等不到信号，才暴露出来
+   *    （用户看到文字白等 6 秒）。
+   */
+  'voice.tts_failed',
+  'voice.tts_skipped',
   /*
    * 浏览器兜底读网页（2026-10-13 用户要求）。
    *
