@@ -7091,6 +7091,114 @@ console.log('\n文字等语音同步（SpeakSyncGate）');
   }
 }
 
+/*
+ * ---- "只显示文字就不等语音"（2026-11-20 用户补充）----
+ *
+ * 用户原话：
+ *
+ *   「如果只显示文字那就不等待语音」
+ *
+ * ## 判据必须在主进程先判一遍
+ *
+ * 之前只靠 sidecar 发 `voice.tts_skipped`，但那个信号要走一趟
+ * WebSocket + 事件总线，实测比 `say.end` 晚 20~40ms。
+ *
+ * 而且主进程**本来就该知道**免打扰开着 —— 那是它自己维护的 `paused`。
+ * 绕一圈问 sidecar 既慢，又多一个可能对不上的地方。
+ */
+{
+  // index.ts 的 `src` 是别的块里的局部变量，这里自己读一份
+  const mainSrc = readFileSync(
+    path.join(here, '..', 'src', 'main', 'index.ts'),
+    'utf-8',
+  );
+
+  const fn = mainSrc.slice(
+    mainSrc.indexOf('function holdSayEndForTts'),
+    mainSrc.indexOf('const audioPairer'),
+  );
+
+  check(
+    '只显示文字时不等：免打扰开着就不等',
+    /!paused/.test(fn),
+    '免打扰时语音被明确禁用，等它就是白等',
+  );
+
+  check(
+    '只显示文字时不等：语音播报关着就不等',
+    /ttsSpeechEnabled/.test(fn),
+    '菜单里"语音播报"没勾，不会出声',
+  );
+
+  check(
+    '只显示文字时不等：引擎是 none 就不等',
+    /readTtsConfig\(\)\.provider !== 'none'/.test(fn),
+    'mock/none 合成出来是静音',
+  );
+
+  /*
+   * 🔴 全屏 / 专注保护（2026-11-20 实测漏判）
+   *
+   * 第一次只判了免打扰/开关/引擎，实测仍然走了"收到跳过信号"那条路 ——
+   * 因为当时开着全屏应用，sidecar 的 `focus_guard` 判定"不该出声"，
+   * 而主进程三个条件全不成立，于是还是扣住了。
+   */
+  check(
+    '只显示文字时不等：全屏/专注保护时也不等',
+    /fullscreenWatcher\?\.isFullscreen !== true/.test(fn),
+    '全屏时 sidecar 的 focus_guard 会禁声，主进程不判这一条就会白等',
+  );
+
+  check(
+    '只显示文字时不等：被打断的回复不等',
+    /reason === 'done'/.test(fn),
+    '被中断时用户最想立刻看到那句话',
+  );
+
+  /*
+   * 🔴 安静档（2026-11-20 实测漏判的第二个）
+   *
+   * sidecar 的 `_suppression()` 最后一条是 `quiet_tier` ——
+   * 安静档连**回复用户**也不出声（不只是不主动说话）。
+   *
+   * 阈值 0.5 来自 `tiers.py`：安静 overall=0.1、无聊=0.5，
+   * `nearest()` 按中点分，所以 < 0.5 就是安静档。
+   */
+  check(
+    '只显示文字时不等：安静档也不等',
+    /activity >= 0\.5/.test(fn),
+    '安静档 sidecar 不合成语音，主进程不判就会白等 6 秒',
+  );
+
+  /*
+   * 覆盖 sidecar `_suppression()` 的每一条（除 quiet_hours）
+   *
+   * 这个断言的意义：以后 sidecar 加了新的抑制条件却没同步到主进程，
+   * 会在这里露出来。
+   */
+  const suppressionCovered = [
+    ['muted', /!paused/],
+    ['focus_guard', /isFullscreen/],
+    ['quiet_tier', /activity >= 0\.5/],
+    ['tts.enabled', /ttsSpeechEnabled/],
+    ['provider', /provider !== 'none'/],
+  ];
+  const missing = suppressionCovered.filter(([, re]) => !re.test(fn)).map(([n]) => n);
+  check(
+    '主进程覆盖了 sidecar 各条禁声条件',
+    missing.length === 0,
+    `漏了：${missing.join('、')} —— ` +
+      'sidecar 的 _suppression 里那些条件会让它不合成语音，' +
+      '主进程不知道就只能干等超时',
+  );
+
+  check(
+    '等待条件叫 willSpeak（语义清晰，四个条件 AND）',
+    /const willSpeak\s*=/.test(fn),
+    '用一个语义化的变量名，别写成四个裸条件',
+  );
+}
+
 /* ------------------------------------------------------------------ 收尾 */
 
 console.log('');

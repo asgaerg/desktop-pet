@@ -2218,21 +2218,61 @@ function connectSocket(port: number, brain: string): void {
   function holdSayEndForTts(message: { type?: string }): boolean {
     if (message.type !== 'pet.say.end') return false;
     /*
-     * ⚠️ 「有宠物语音」的判据必须和 `decideBubble` 里那条一致，
-     *    否则会出现"以为有语音、结果永远等不到"。
+     * 🔴 只有**真的会出声**时才等（2026-11-20 用户补充要求）
      *
-     *      provider !== 'none'（配了真实引擎）
-     *      && ttsSpeechEnabled（菜单里那个"语音播报"勾着）
+     * 用户原话：
      *
-     * 另外 `reason` 不是 `done` 时不等 —— 被打断/出错的回复，
-     * 用户最想**立刻**看到那句话，而不是再等几秒。
+     * > 「如果只显示文字那就不等待语音」
+     *
+     * ## 为什么要在主进程**先判一遍**，而不是等 sidecar 的信号
+     *
+     * 之前只靠 sidecar 发 `voice.tts_skipped` 告诉主进程"这句不念"。
+     * 但那个信号要**走一趟 WebSocket + 事件总线**，实测比 `say.end`
+     * 晚 20~40ms —— 于是"扣住 -> 收到信号 -> 放行"这个来回仍然存在。
+     *
+     * 更根本的是：**主进程本来就该知道这些状态**。
+     * 判一下是零成本，没必要绕一圈问 sidecar。
+     *
+     * ## 五个"一定不会出声"的状态
+     *
+     *   ① `paused`              免打扰开着（主进程自己维护）
+     *   ② `!ttsSpeechEnabled`   菜单里"语音播报"没勾
+     *   ③ `provider === 'none'`  没配真实引擎（mock 出来是静音）
+     *   ④ `isFullscreen()`      全屏/专注保护中（sidecar 的 `focus_guard`）
+     *   ⑤ `activity < 0.5`      安静档（sidecar 的 `quiet_tier`）
+     *
+     * 任一成立 -> 立刻显示文字，一秒都不等。
+     *
+     * ⚠️ 还要看 `reason`：被打断/出错的回复，用户最想**立刻**看到那句话。
+     *
+     * ## ⚠️ ④⑤ 都是 2026-11-20 实测发现的漏判
+     *
+     * 第一次只判了 ①②③，实测仍然走了"收到跳过信号"那条路。
+     * 查下来 sidecar 的 `_suppression()` 一共五条，主进程漏了两条：
+     *
+     *     muted / focus_guard / quiet_hours / quiet_tier / autonomy.disabled
+     *
+     * 其中 `muted` 对应 ①，`focus_guard` 对应 ④，`quiet_tier` 对应 ⑤。
+     * `quiet_hours`（静音时段）主进程**不知道**，只能靠 sidecar 的信号兜底
+     * ——那是唯一必须等信号的场景。
+     *
+     * 教训：**"该不该出声"的判据分散在两边**。主进程能判的要判全，
+     * 判不了的才靠信号。
+     *
+     * ⚠️ ⑤ 的阈值 0.5 来自 `tiers.py`：安静档 overall=0.1、无聊档=0.5，
+     *    `nearest()` 按中点划分，所以 < 0.5 就是安静档。
      */
     const reason = String((message as { reason?: unknown }).reason ?? 'done');
-    const shouldWait =
+    const willSpeak =
       reason === 'done' &&
+      !paused &&
+      ttsSpeechEnabled &&
       readTtsConfig().provider !== 'none' &&
-      ttsSpeechEnabled;
-    return speakSync.hold(message, shouldWait);
+      // 全屏时不显示气泡也不出声（专注保护），此时等语音就是白等
+      fullscreenWatcher?.isFullscreen !== true &&
+      // 安静档连回复也不出声（sidecar 的 quiet_tier，见 autonomy._suppression）
+      activity >= 0.5;
+    return speakSync.hold(message, willSpeak);
   }
 
   const audioPairer = new AudioPairer();
