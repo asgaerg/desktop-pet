@@ -1437,6 +1437,11 @@ async function main(): Promise<void> {
 
   // 对话条是**独立窗口**（见 chatWindow.ts 的说明：挤在一个窗口里
   // 既躲不开屏幕边缘、又会被 45° 旋转带跑）。
+  //
+  // ⚠️ 这个 ref 是给 `onPositionChanged` 用的：那个回调在 ChatWindow
+  //    构造参数里定义（早于 `syncChatExclusion` 的声明），直接用会 TDZ。
+  //    用一个可写的 ref 中转，构造时是空的、挂完函数后才生效。
+  const syncChatExclusionRef: { fn: (() => void) | null } = { fn: null };
   chatWindow = new ChatWindow(
     {
       distDir: DIST_DIR,
@@ -1454,6 +1459,14 @@ async function main(): Promise<void> {
         if (!result.ok) {
           log(`对话条位置落盘失败：${result.error ?? '未知原因'}（路径 ${result.path}）`);
         }
+        /*
+         * 对话条挪了 -> 它"不该被宠物抢点击"的区域也跟着挪（2026-11-20）。
+         *
+         * ⚠️ 用可选调用（`?.`）：`syncChatExclusion` 定义在下面，
+         *    这里首次触发时可能还没赋值。窗口刚创建时不会触发 moved，
+         *    所以实际不会走到空值分支 —— 但写成可选更安全。
+         */
+        syncChatExclusionRef.fn?.();
       },
     },
     (line) => {
@@ -1462,38 +1475,33 @@ async function main(): Promise<void> {
     },
   );
   /*
-   * 对话条可见性 -> 宠物窗口穿透（2026-11-20 加）
+   * 对话条位置 -> 宠物窗口的"强制穿透区"（2026-11-20 加）
    *
-   * ## 用户报的现象
+   * ## 用户报的两个问题（第一版修坏了一个）
    *
-   * > 「现在输入框我打字还是会自动往右边缩」
-   * > 「整个窗口往右跑」
+   * > 「现在输入框我打字还是会自动往右边缩」   <- 要修的
+   * > 「现在宠物拖拽和右键菜单都没了」         <- 第一版修出来的新问题
    *
-   * ## 根因（日志查出来的）
+   * 第一版是"对话条开着就**一律**穿透"，而对话条默认一直开着，
+   * 等于把宠物本体也废了 —— 拖不动、右键没反应。
    *
-   * `PetWindow.startCursorWatch()` 每 40ms 检查光标是否落在立绘矩形内，
-   * 是就切成"可交互"。而立绘正好在右下角、和对话条重叠 ——
-   * 鼠标移过去打字时，宠物窗口在 40ms 内抢走点击，变成拖拽宠物，
-   * 对话框跟着重排（日志里 9 秒内 7 次 `drag-start`）。
+   * ## 现在
    *
-   * ## 修法
+   * 只把**对话条那块矩形**告诉宠物窗口，让它只在那块放弃点击，
+   * 宠物身上别的地方照常可拖、可右键。
    *
-   * 对话条开着时，宠物窗口**一律穿透** —— 用户的操作意图明确在对话条上。
-   * 想拖宠物先关掉对话条即可。
+   * ⚠️ 位置会变（用户拖动对话条、换分辨率），所以包装成函数，
+   *    在可见性变化、位置变化、尺寸变化时都调一次。
    */
-  chatWindow.onVisibilityChanged = (visible) => {
-    petWindow?.setSuspendInteractive(visible);
+  const syncChatExclusion = (): void => {
+    const visible = Boolean(chatWindow?.isVisible());
+    const bounds = visible ? chatWindow?.browserWindow?.getBounds() : null;
+    petWindow?.setSuspendInteractive(visible, bounds ?? null);
   };
-  /*
-   * 初始同步一次（2026-11-20）。
-   *
-   * ⚠️ 不能只靠 `show` 事件：对话条可能在这个回调挂上**之前**就显示了
-   *    （`create()` 里 `ready-to-show` 会无条件 show 一次）。
-   *    那种情况下事件早就过去，宠物窗口会一直不穿透。
-   *
-   * 所以挂完回调立刻查一次当前真实可见性。
-   */
-  petWindow?.setSuspendInteractive(chatWindow.isVisible());
+  // 让上面的 `onPositionChanged` 能调到它（那里定义在前，有 TDZ 不能直接用）
+  syncChatExclusionRef.fn = syncChatExclusion;
+  chatWindow.onVisibilityChanged = () => syncChatExclusion();
+  syncChatExclusion();
 
   /*
    * 恢复对话条上次被拖到的位置（2026-10-12 用户要求可拖拽）。

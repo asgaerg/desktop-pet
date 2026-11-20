@@ -7233,11 +7233,12 @@ console.log('\n文字等语音同步（SpeakSyncGate）');
   const watchBody = petSrc.slice(watchStart, watchStart + 2600);
 
   check(
-    '穿透轮询：对话条开着时早退成一律穿透',
-    /if \(this\.suspendInteractive\)\s*\{[\s\S]{0,140}setInteractive\(false\)/.test(
+    '穿透轮询：只在光标落在对话条矩形内时才强制穿透',
+    /if \(this\.suspendInteractive && this\.chatScreenRect\)\s*\{[\s\S]{0,400}overChat/.test(
       watchBody,
     ),
-    '不早退的话，光标移到立绘上就会抢走输入框的点击',
+    '⚠️ 不能"对话条开着就一律穿透" —— 第一版这么写，用户报' +
+      '「宠物拖拽和右键菜单都没了」（对话条默认一直开着，等于把宠物本体也废了）',
   );
 
   check(
@@ -7248,11 +7249,15 @@ console.log('\n文字等语音同步（SpeakSyncGate）');
   );
 
   check(
-    'setSuspendInteractive：置 true 时立刻切穿透（不等 40ms）',
-    /setSuspendInteractive\(suspend: boolean\)[\s\S]{0,700}?if \(suspend\)\s*\{[\s\S]{0,140}setInteractive\(false\)/.test(
-      petSrc,
-    ),
-    '等下一次轮询会漏进一次点击',
+    '对话条区域要放宽一点（6px），别在边缘漏进点击',
+    /const pad = 6/.test(watchBody) && /overChat/.test(watchBody),
+    '对话条边缘不是像素级精确',
+  );
+
+  check(
+    'setSuspendInteractive 接收矩形参数（不能只传布尔）',
+    /setSuspendInteractive\(\s*suspend: boolean,\s*rect\?:/.test(petSrc),
+    '只传布尔就只能整只宠物穿透 —— 那正是第一版的错误',
   );
 
   check(
@@ -7271,16 +7276,22 @@ console.log('\n文字等语音同步（SpeakSyncGate）');
   );
 
   check(
-    'index.ts 把可见性接到 setSuspendInteractive',
-    /onVisibilityChanged = \(visible\) => \{[\s\S]{0,120}setSuspendInteractive\(visible\)/.test(
+    'index.ts 把对话条的实际矩形传给宠物窗口',
+    /syncChatExclusion = \(\): void => \{[\s\S]{0,400}?browserWindow\?\.getBounds\(\)/.test(
       idxSrc,
     ),
-    '没接上就完全没生效',
+    '不传矩形就只能整只穿透',
+  );
+
+  check(
+    'index.ts 在对话条移动时也重新同步（位置会变）',
+    /onPositionChanged:[\s\S]{0,900}?syncChatExclusionRef\.fn\?\.\(\)/.test(idxSrc),
+    '用户拖动对话条后，若不同步，穿透区还停在旧位置',
   );
 
   check(
     'index.ts 挂完回调后主动同步一次初始状态',
-    /onVisibilityChanged =[\s\S]{0,500}?setSuspendInteractive\(chatWindow\.isVisible\(\)\)/.test(
+    /syncChatExclusionRef\.fn = syncChatExclusion;[\s\S]{0,200}?syncChatExclusion\(\);/.test(
       idxSrc,
     ),
     '对话条可能在回调挂上之前就显示了，只靠事件会漏掉初始状态',

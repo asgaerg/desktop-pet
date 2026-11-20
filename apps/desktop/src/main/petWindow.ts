@@ -1754,7 +1754,7 @@ export class PetWindow {
       // 拖拽中不抢决策权：那时渲染层强制保持可交互（见 reportInteractive 的守卫）
       if (this.dragging) return;
       /*
-       * 🔴 聊天窗口开着时**一律穿透**（2026-11-20 修「打字时窗口往右跑」）
+       * 🔴 光标落在**对话条矩形内**时强制穿透（2026-11-20 修「打字时窗口往右跑」）
        *
        * ## 用户报的现象
        *
@@ -1770,21 +1770,36 @@ export class PetWindow {
        *
        * ## 根因
        *
-       * 这个轮询**只看光标在不在立绘矩形内**，不看用户此刻在操作谁。
-       * 而立绘正好在右下角、和对话条重叠 —— 鼠标移过去打字，
-       * 宠物窗口 40ms 内就切成"可交互"，把本该给输入框的点击吃掉了。
+       * 这个轮询只看光标在不在立绘矩形内，不看用户此刻在操作谁。
+       * 而立绘和对话条重叠 —— 鼠标移过去打字，宠物窗口 40ms 内
+       * 就切成"可交互"，把本该给输入框的点击吃掉了。
        *
-       * 于是：点输入框 -> 宠物开始被拖 -> 对话框跟着重排 -> "往右跑"。
+       * ## ⚠️ 第一版修错了：整只宠物都穿透
        *
-       * ## 为什么"一律穿透"是对的
+       * 第一版是"对话条开着就**一律**穿透"，结果用户报：
        *
-       * 对话条开着时，用户的操作意图明确集中在对话条上。
-       * 这时宠物本体**不需要**接收点击 —— 想拖宠物，先关掉对话条即可
-       * （而且对话条本身也能拖，位置存在 `chatX/chatY`）。
+       *     「现在宠物拖拽和右键菜单都没了」
+       *
+       * 因为对话条默认一直开着，等于把宠物本体也废了。
+       *
+       * ## 现在：只在**重叠区域**穿透
+       *
+       * 只判光标在不在对话条那块矩形里。宠物身上别的部分照常可拖、可右键。
        */
-      if (this.suspendInteractive) {
-        this.setInteractive(false);
-        return;
+      if (this.suspendInteractive && this.chatScreenRect) {
+        const c = screen.getCursorScreenPoint();
+        const chr = this.chatScreenRect;
+        // 放宽 6px：对话条边缘不是像素级精确，宁多让一点，别漏进一次点击
+        const pad = 6;
+        const overChat =
+          c.x >= chr.x - pad &&
+          c.x <= chr.x + chr.width + pad &&
+          c.y >= chr.y - pad &&
+          c.y <= chr.y + chr.height + pad;
+        if (overChat) {
+          this.setInteractive(false);
+          return;
+        }
       }
       const bounds = window.getBounds();
       const cursor = screen.getCursorScreenPoint();
@@ -1803,25 +1818,44 @@ export class PetWindow {
   /**
    * 暂停"光标命中立绘就吃鼠标"的判定（2026-11-20 加）。
    *
-   * 对话条打开时把它设成 true —— 否则鼠标移过去打字会被宠物窗口
-   * 抢走点击（见 `startCursorWatch` 里的说明）。
+   * ⚠️ **不是整只宠物都禁**（第一版就是这个错误，用户报
+   *    「宠物拖拽和右键菜单都没了」）。真正要禁的只有
+   *    光标落在 `chatScreenRect` 里的时候 —— 那一块本该归对话条。
    */
   private suspendInteractive = false;
 
   /**
-   * 设置是否暂停交互判定。
+   * 对话条在屏幕上的矩形（2026-11-20 加）。
    *
-   * ⚠️ 置 true 时**立刻**切到穿透，不等下一次 40ms 轮询 ——
-   *    否则打开对话条的瞬间仍可能漏进一次点击。
+   * 由主进程在对话条**移动/显示/隐藏**时推送。没有它就没法判断
+   * "光标是不是在对话条上"，只能退化成整只宠物穿透（那会废掉拖拽）。
+   *
+   * ⚠️ 必须是**屏幕坐标**，和 `getCursorScreenPoint()` 同一坐标系。
    */
-  setSuspendInteractive(suspend: boolean): void {
-    if (suspend === this.suspendInteractive) return;
+  private chatScreenRect: { x: number; y: number; width: number; height: number } | null = null;
+
+  /**
+   * 设置"是否暂停"以及对话条的屏幕矩形。
+   *
+   * @param suspend   对话条是否开着
+   * @param rect      对话条的屏幕矩形（`null` = 不知道位置，此时**不做**特殊处理）
+   *
+   * ⚠️ 对话条位置会变（用户拖动、换分辨率）。所以这个方法要在
+   *    **每次位置变化时**重新调，不能只在显示时调一次。
+   */
+  setSuspendInteractive(
+    suspend: boolean,
+    rect?: { x: number; y: number; width: number; height: number } | null,
+  ): void {
     this.suspendInteractive = suspend;
+    this.chatScreenRect = rect ?? null;
     if (suspend) {
-      this.setInteractive(false);
-      this.diagnostic?.('[穿透] 对话条开着 -> 宠物窗口一律穿透（不再抢输入框的点击）');
+      this.diagnostic?.(
+        `[穿透] 对话条区域 ${rect ? `${rect.x},${rect.y} ${rect.width}x${rect.height}` : '（未知）'}` +
+          ' —— 只有这块强制穿透，宠物本体照常可拖',
+      );
     } else {
-      this.diagnostic?.('[穿透] 对话条关了 -> 恢复按光标位置判定');
+      this.diagnostic?.('[穿透] 对话条关了 —— 恢复全部按光标判定');
     }
   }
 
