@@ -3885,6 +3885,30 @@ function registerRendererIpc(): void {
   //    `writeSettings` 内部会用 `clampStickerSize()` 归一化 ——
   //    渲染层传 187 也会落到 200，不会出现"谁都没见过的尺寸"。
   ipcMain.handle('settings:sticker-size', () => readSettings().stickerSizePx);
+  /*
+   * 表情包频率档位（2026-11-21 用户要求三档）
+   *
+   *   active  活跃 —— 随性图约每 2 句一张（1/2）
+   *   normal  普通 —— 约每 4 句一张（1/4，默认）
+   *   calm    冷静 —— 约每 8 句一张（1/8）
+   *
+   * 明确情绪类（意图/心情命中）不受档位限制，自由发。
+   * 写 `persona.yaml` 的 `activity.sticker_mode`，Python 侧现读。
+   * ⚠️ 只写文件不热更 —— sidecar 每轮现读 config，下一轮就生效。
+   */
+  ipcMain.handle('settings:sticker-mode', () => {
+    const v = readDeepScalar(CONFIG_ROOT, ['activity', 'sticker_mode'], true);
+    return { mode: String(v ?? 'normal') };
+  });
+  ipcMain.handle('settings:set-sticker-mode', (_event, payload: { value?: unknown }) => {
+    const mode = String(payload?.value ?? 'normal');
+    const valid = mode === 'active' || mode === 'normal' || mode === 'calm';
+    if (!valid) return { ok: false, message: `未知档位：${mode}`, mode: 'normal' };
+    const r = writeDeepScalar(CONFIG_ROOT, ['activity', 'sticker_mode'], mode);
+    return { ok: r.ok, mode, message: r.message };
+  });
+
+
   ipcMain.handle('settings:set-sticker-size', (_event, payload: { value?: unknown }) => {
     const result = writeSettings({ stickerSizePx: Number(payload?.value) });
     // 立刻推进气泡窗口 —— 正在显示的表情包也跟着变大，不用等下一句

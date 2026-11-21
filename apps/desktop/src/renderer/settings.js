@@ -192,6 +192,7 @@ const ui = {
   openDirSandbox: el('open-dir-sandbox'),
   // 表情包显示尺寸（5 档，2026-11-16）
   stickerSize: el('sticker-size'),
+  stickerMode: el('sticker-mode'),
   bubbleGapAbove: el('bubble-gap-above'),
   bubbleGapSide: el('bubble-gap-side'),
   bubbleCoreShrink: el('bubble-core-shrink'),
@@ -972,7 +973,29 @@ bindSelect(
   (value) => Number(value),
 );
 
-/*
+
+// 表情包频率档位（2026-11-21 用户要求三档）
+//
+// 明确情绪类（道歉配道歉图这种）不受档位限制；档位只管"随性图"。
+// 用 bindSelect 复用（回显主进程返回值，防止界面和实际生效值不一致）。
+bindSelect(
+  ui.stickerMode,
+  async () => {
+    const r = await api.stickerMode();
+    return String((r && r.mode) || 'normal');
+  },
+  async (mode) => {
+    const r = await api.setStickerMode(mode);
+    return {
+      applied: r && r.mode ? r.mode : mode,
+      saved: r && r.ok,
+      error: r && r.message,
+    };
+  },
+  (value) => String(value),
+);
+
+/**
  * 探头时的平移距离（像素，**可以是负数**）。
  *
  * 🔴 2026-10-21 修：这里原来**注释没闭合**，把整个绑定吞进注释里了 ——

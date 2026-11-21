@@ -6750,15 +6750,35 @@ class Gateway:
         if not self.modules.enabled("stickers"):
             log.debug("表情包：模块关着")
             return
+        # 🔴 2026-11-21：频率分**两路**（用户要求三档 + 明确情绪类自由发）
+        #
+        #   意图命中（「对不起」-> sorry 等）或心情映射命中
+        #     -> **自由发**，不受档位限制（贴切的图不算成本，算表达）
+        #   都没命中（只能走 other / 随性）
+        #     -> 受档位限制，且**概率没中就不调模型**（这才是省钱的点）
+        #
+        # 档位（设置页三选一，写 activity.sticker_mode）：
+        #
+        #   active  活跃 —— 1/2（约每 2 句一张随性图）
+        #   normal  普通 —— 1/4（约每 4 句一张，默认）
+        #   calm    冷静 —— 1/8（约每 8 句一张，成本最低）
+        mode = str((self.config.activity or {}).get("sticker_mode") or "").strip().lower()
+        if mode == "active":
+            random_rate = 1.0 / 2.0
+        elif mode == "calm":
+            random_rate = 1.0 / 8.0
+        else:
+            random_rate = 1.0 / 4.0  # normal（默认）
+        # 全局开关：`emoji_sticker_rate = 0` 时完全不发（老配置兼容）
+        global_rate = 0.5
         try:
-            rate = float(
-                (self.config.activity or {}).get("emoji_sticker_rate", 0.35)
+            global_rate = float(
+                (self.config.activity or {}).get("emoji_sticker_rate", 0.5)
             )
         except (TypeError, ValueError):
-            rate = 0.35
-        # `emoji_sticker_rate` 是 0~1 的"幅度"参数，不是概率上限 ——
-        # 用它乘一个基准，让用户拖到 0 就是完全不发。
-        rate = max(0.0, min(1.0, rate))
+            pass
+        if max(0.0, min(1.0, global_rate)) <= 0.0:
+            random_rate = 0.0
 
         dominant = str(self.conversation.emotion.dominant or "")
         """
@@ -6811,8 +6831,21 @@ class Gateway:
            
         所以这里保留一个**最低限度的**开关判断：rate=0 时直接不发。
         """
-        if rate <= 0.0:
+        if random_rate <= 0.0 and not intent:
             log.info("表情包：不发 —— emoji_sticker_rate=0（全局关）")
+            return
+        # 🔴 2026-11-21：**随性图过概率门**（用户要求三档控频）
+        #
+        #   明确情绪类（intent / mood 命中）在上面已经放行 —— 自由发。
+   #   走到这里说明两类都没命中，只能发 other（随性）——
+        #   按档位概率抽，没抽中就**不调模型**（每次挑图要一次模型调用，
+        #   这是成本大头；抽中才调）。
+        import random as _rand_gate
+        if _rand_gate.random() >= random_rate:
+            log.info(
+                "表情包：不发 —— 随性概率没抽中（mode=%s，rate=%.2f）",
+                mode or "normal", random_rate,
+            )
             return
         if not intent and str(dominant or "") not in sticker_mod._EMOTION_CANDIDATES:
             log.info(

@@ -208,6 +208,38 @@
               -->
               <select id="pet-scale"></select>
             </div>
+
+            <!--
+              表情包频率档位（2026-11-21 用户要求三档）
+
+              明确情绪类（说「对不起」配道歉图这类）不受档位限制，自由发；
+              档位只限制「随性图」（没有明确情绪、宠物随手发的）。
+
+              活跃 = 随性图约每 2 句一张；普通 = 约 4 句；冷静 = 约 8 句。
+              越冷静越省钱（每次挑图要一次模型调用）。
+            -->
+            <div class="setting">
+              <div class="setting-text">
+                <span class="setting-title">表情包频率</span>
+                <span class="setting-desc">
+                  它随手发图（没有明确情绪配图时）的频率，
+                  <strong>默认「普通」</strong>。改完<strong>下一句回复生效</strong>。
+                  <br />
+                  · <strong>活跃</strong> —— 约每 2 句一张
+                  <br />
+                  · <strong>普通</strong> —— 约每 4 句一张
+                  <br />
+                  · <strong>冷静</strong> —— 约每 8 句一张（最省钱）
+                  <br />
+                  明确的情绪配图（道歉配道歉图这种）不受此档位限制。
+                </span>
+              </div>
+              <select id="sticker-mode">
+                <option value="active">活跃 · 约2句一张</option>
+                <option value="normal">普通 · 约4句一张（推荐）</option>
+                <option value="calm">冷静 · 约8句一张</option>
+              </select>
+            </div>
           </div>
 
           <div class="setting">

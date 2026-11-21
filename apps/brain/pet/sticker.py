@@ -778,9 +778,9 @@ def pick_from_sample(
 #: 而且提示词 token 涨得快（每张约 40~60 字描述）。
 #:
 #:     太少（<5）  -> 选择空间小，"它自己挑"没意义
-#:     太多（>15） -> 挑不准 + 成本上去
+#:     太多（>6） -> 挑不准 + 成本上去
 #:     12          -> 够挑，token 也控制在 600 字内
-POOL_SIZE = 12
+POOL_SIZE = 3
 
 
 def build_candidates(
@@ -808,7 +808,7 @@ def build_candidates(
         other（无明确分类的）             最多 3 张
 
     ⚠️ 为什么不全给：候选太多模型会挑花眼（实测 >12 张后
-       选择质量下降，而且 token 也上去了）。12 张是折中。
+       选择质量下降，而且 token 也上去了）。3 张是折中（2026-11-21 用户要求「随机挑选3个」）。
 
     ⚠️ 为什么要混 other：用户明确要"由它决定要不要用 other"。
        全给明确类别的话，other 永远没机会 —— 那是回到老问题。
@@ -839,31 +839,39 @@ def build_candidates(
             seen.add(it.path)
             out.append(it)
 
-    # ① 意图类
+    # 🔴 2026-11-21：**总共只给 3 张**（用户要求「随机挑选3个，不要5个了」）
+    #
+    # ## 为什么砍这么狠
+    #
+    # 用户报「成本很高」。提示词里**每张候选一行描述**（40~60 字），
+    # 12 张就是 600~800 token；3 张只要 150~200 —— 直接省 4 倍。
+    #
+    # 配比（按贴合度优先，类别不够时往后顶）：
+    #   ① 意图类（「对不起」-> sorry）   1~2 张   最贴切
+    #   ② 心情候选类                      1 张
+    #   ③ other（无明确分类的）           1 张   保住「由它挑」的设计
     intent_key = intent_to_sticker(reply_text)
     if intent_key:
-        _take(intent_key, 3)
-        # 相邻兜底（害怕 -> 震惊/焦虑）
-        for extra in _FALLBACK_CHAIN.get(intent_key, ())[:2]:
-            _take(extra, 2)
+        _take(intent_key, 1)
+        # 相邻兜底：意图类只有 1 个素材时补一张近亲
+        if len(out) < size:
+            for extra in _FALLBACK_CHAIN.get(intent_key, ())[:1]:
+                _take(extra, 1)
 
-    # ② 心情候选
+    # 🔴 other **先占一张**（2026-11-21 修）：
+    #    池子只有 3 张，如果让意图/心情先取，other 永远被挤掉
+    #    （实测：{wait, smile, sorry} 三张全是明确类）。
+    #    用户要「由它决定要不要用 other」，就必须给它固定名额。
+    _take("other", 1)
+
     mood_cands = _EMOTION_CANDIDATES.get(str(dominant or ""), ())
     if mood_cands:
-        # 随机选两个候选类，各取几张（避免固定取前两个）
         picks = list(mood_cands)
         picker.shuffle(picks)
-        for key in picks[:2]:
-            _take(key, 2)
-
-    # ③ other：用户要求"由它决定要不要用"，所以一定要给它机会
-    _take("other", 3)
-
-    # ④ 还不够就补心情候选的其余类
-    for key in mood_cands:
-        if len(out) >= size:
-            break
-        _take(key, 1)
+        for key in picks:
+            if len(out) >= size:
+                break
+            _take(key, 1)
 
     return out[:size]
 

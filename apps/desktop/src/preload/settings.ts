@@ -37,6 +37,9 @@ const CHANNEL = {
   /** 表情包显示尺寸（5 档，2026-11-16 加） */
   stickerSize: 'settings:sticker-size',
   setStickerSize: 'settings:set-sticker-size',
+  /** 表情包频率档位（active/normal/calm，2026-11-21 加） */
+  stickerMode: 'settings:sticker-mode',
+  setStickerMode: 'settings:set-sticker-mode',
   /** 气泡摆放参数（上方/左右间距 + 贴合度，2026-10-18 加） */
   bubbleGapAbove: 'settings:bubble-gap-above',
   setBubbleGapAbove: 'settings:set-bubble-gap-above',
@@ -424,6 +427,15 @@ const api = {
 
   setStickerSize(value: number): Promise<unknown> {
     return ipcRenderer.invoke(CHANNEL.setStickerSize, { value });
+  },
+
+  /** 表情包频率档位（2026-11-21）：读回当前档位，写用 setStickerMode。 */
+  stickerMode(): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.stickerMode);
+  },
+
+  setStickerMode(value: string): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.setStickerMode, { value });
   },
 
   /** 气泡与头顶间距（px，默认 6）。 */
