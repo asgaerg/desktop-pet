@@ -3228,6 +3228,31 @@ class Gateway:
         self._reading_from_tool: Any = None
         # 这次阅读是不是**用户要求的**（见 `_execute_tool_calls` 里的标记）
         self._reading_from_dialog: bool = False
+        # 🔴 对话路径的阅读回调（2026-11-21 修「知识库一直是空的」）
+        #
+        # ## 排查记录
+        #
+        # 用户问「信息存储存哪了」-> `pet-knowledge/` 完全是空的。
+        # 日志里有一次完整的阅读（《美食供应商》5 章 11271 字），却没有任何归档。
+        #
+        # 深挖：**两条阅读路径用了不同的回调**——
+        #
+        #     自主阅读（_reading_via_model）: on_read=self._reading_note_from_tool
+        #     对话工具（_tool_list 主清单）  : on_read=getattr(self, "_reading_on_read", None)
+        #
+        # 而后者**从未被赋值**（2916 行只把它注入给 conversation，
+        # Gateway 自己没有）—— getattr 返回 None，回调永远不触发。
+        # 于是"用户指定的书"从不归档，只有它半夜自己读的才归档。
+        #
+        # ## 修法
+        #
+        # 直接指向 `_reading_note_from_tool`（里面已经会区分
+        # from_dialog 并走后台归档）。2916 行注入给 conversation 的
+        # 保持不变 —— 那是同一个函数对象，两条路径现在汇合到一个入口。
+        self._reading_on_read = self._reading_note_from_tool
+        # 后台归档任务的引用集（2026-11-21 加）。见 `_archive_reading_later`：
+        # 局部变量会被 GC，任务半路消失会变成"有时归档有时不归"。
+        self._archive_tasks: set[Any] = set()
         # 阅读循环的 task 引用（和 `_autosnap_task` 同一套约定）
         self._reading_task: Any = None
         # ⚠️ `self.reader` **不在这里建** —— 它在 `__init__` 靠前的位置
@@ -5449,14 +5474,78 @@ class Gateway:
         self._reading_from_tool = None
         return chunk
 
+    def _archive_reading_later(self, chunk: Any) -> None:
+        """后台归档（fire-and-forget），失败只记日志。
+
+        ## 为什么不直接 await `_archive_reading`
+
+        这个回调在**工具执行链**里 —— 归档里有一次模型调用（几秒），
+        await 会把整条工具链拖住，用户看着气泡转圈只是"它在归档"。
+
+        所以扔进后台任务。⚠️ 任务引用要存下来：局部变量可能被 GC
+        （asyncio 文档明确警告过），任务半路消失会变成"有时归档有时不归"。
+        """
+        task = asyncio.get_running_loop().create_task(self._safe_archive(chunk))
+        self._archive_tasks.add(task)
+        task.add_done_callback(self._archive_tasks.discard)
+
+    async def _safe_archive(self, chunk: Any) -> None:
+        try:
+            await self._archive_reading(chunk)
+        except Exception:  # noqa: BLE001 —— 归档失败不该影响读
+            log.warning("阅读归档失败（已忽略）", exc_info=True)
+
     def _reading_note_from_tool(self, chunk: Any) -> None:
         """阅读工具读完后的回调：记下"读了什么"。
 
         ⚠️ 只**记下**，不立刻说话 —— 说什么、什么时候说由
         `_reading_via_model` + `maybe_speak` 决定。
         在工具回调里直接开口会导致"模型还在思考就插话"。
+
+        ## 🔴 用户要求读的也归档（2026-11-21 修「知识库一直是空的」）
+
+        ## 排查发现
+
+        用户问「信息存储模块存哪了」→ 查下来 `pet-knowledge/`
+        **完全是空的**。而日志里明明有一次完整的阅读：
+
+            14:17:42.865  网上阅读：这轮是**用户要求**读的
+            14:17:42.865  工具轮 1 完成，继续生成
+            （读完《美食供应商》5 章 11271 字 —— 没有任何归档动作）
+
+        ## 根因
+
+        `_archive_reading` 只挂在**自主阅读事件**（`_event_read_book`，
+        5578 行）上。而**用户在对话里让它读**走的是工具路径
+        （`read_book` -> `_reading_note_from_tool`）——
+        这条路只记 `self._reading_from_tool`，**没有归档**。
+
+        结果：最该沉淀的"用户指定的书"反而没进知识库；
+        只有它半夜自己随机找的书才会归档 —— 本末倒置。
+
+        ## 修法
+
+        回调里看 `_reading_from_dialog` 标记（工具调用解析时已置上，
+        见 2284 行）：是用户要求读的 -> **当场归档**。
+
+        ⚠️ 归档里有模型调用（几秒），放在回调里会不会卡住工具链？
+            不会 —— 这个回调是 fire-and-forget 的同步登记，
+            归档用 `asyncio.create_task` 后台跑，失败只记日志。
         """
         self._reading_from_tool = chunk
+
+        from_dialog = bool(getattr(self, "_reading_from_dialog", False))
+        log.info(
+            "阅读回调：chunk=%s from_dialog=%s title=%s 字数=%s",
+            "有" if chunk is not None else "无",
+            from_dialog,
+            getattr(chunk, "title", "?"),
+            getattr(chunk, "chars", "?"),
+        )
+        if from_dialog and chunk is not None:
+            # 先把标记清掉，别让下一轮误判
+            self._reading_from_dialog = False
+            self._archive_reading_later(chunk)
 
     # ------------------------------------------------------------------ 事件：读书
     #
@@ -6835,10 +6924,28 @@ class Gateway:
         #    （`stickers/cheer/...`），重复写反而更长。
         try:
             if self.memory is not None:
+                import base64 as _base64
+
+                # 🔴 2026-11-21：**把图本体一起存进记忆**（BLOB）
+                #
+                # ## 用户报「路径没问题也打不开」
+                #
+                # 原来只存路径字符串。路径会过期（用户删文件、索引重建），
+                # 一旦文件没了，记忆管理里点「查看图片」就什么都看不到 ——
+                # 正是用户遇到的现象。
+                #
+                # 截图对话 / 自主截图 / 免打扰截图早就是"带 BLOB 存"的
+                # （`remember_turn(image=...)`），表情包没理由例外。
+                # 而且这一步在 `build_payload` 成功之后 —— base64 都
+                # 已经编码好了，直接复用，不用再读一次文件。
+                image_bytes = _base64.b64decode(payload.get("data") or "")
+                mime = str(payload.get("mime") or "image/webp")
                 self.memory.remember_turn(
                     self.conversation.session_id,
                     "assistant",
                     f"[表情包：{item.path}]",
+                    image=image_bytes,
+                    image_mime=mime,
                 )
         except Exception:  # noqa: BLE001
             log.debug("表情包写记忆失败（已忽略）", exc_info=True)
