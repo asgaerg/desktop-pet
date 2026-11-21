@@ -806,6 +806,29 @@ class Conversation:
         """
         if self.memory is None:
             return
+        # 🔴 2026-11-21：剥离正文里混进的 [表情包：...]（2026-11-21 修）
+        #
+        # ## 为什么会混进来（诊断日志抓到的实锤）
+        #
+        # 模型在回复正文里**自己写出了** [表情包：stickers/tired/...webp]。
+        # 提示词里没有这条指令 —— 它是从**历史记忆**学的：
+        # 原文记忆里自己的回复全带这个前缀（旧协议残留），
+        # 模型照着历史模仿，写出来又被记进历史 —— 恶性循环。
+        #
+        # ## 修法
+        #
+        # ① 写记忆前把整行剥掉（用户要求「不要显示路径」——
+        #    图本体已在 BLOB 里，路径没有任何展示价值）
+        # ② BLOB 那条（_maybe_send_sticker 写的）**不再带路径前缀**，
+        #    只留一句「（发了张表情包）」
+        cleaned_lines = [
+            ln for ln in (text or "").splitlines()
+            if not ln.strip().startswith("[表情包：")
+        ]
+        stripped = "\n".join(cleaned_lines).strip()
+        if stripped != (text or "").strip():
+            log.info("已从回复正文剥离表情包前缀（模型模仿历史写出的）")
+        text = stripped
         image = self._pending_image
         mime = self._pending_image_mime
         self._pending_image = None
@@ -6940,10 +6963,16 @@ class Gateway:
                 # 已经编码好了，直接复用，不用再读一次文件。
                 image_bytes = _base64.b64decode(payload.get("data") or "")
                 mime = str(payload.get("mime") or "image/webp")
+                # 🔴 2026-11-21：文字里**不再写路径**（用户要求
+                #    「现在不要显示路径了」）。
+                #
+                # 图本体就在这条记录的 BLOB 里，记忆管理点「查看图片」
+                # 直接显示 —— 路径没有任何展示价值，反而会让模型学着
+                # 在回复正文里照抄（历史里有几十条这种前缀）。
                 self.memory.remember_turn(
                     self.conversation.session_id,
                     "assistant",
-                    f"[表情包：{item.path}]",
+                    "（发了一张表情包）",
                     image=image_bytes,
                     image_mime=mime,
                 )
