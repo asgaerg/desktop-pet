@@ -156,3 +156,6 @@ pet-media/
 #   ② 隐私 —— 里面有它读了什么、想了什么，是他和宠物之间的事
 #   ③ 版权 —— 归档里会带原文片段（小说章节），进公开仓库不合适
 pet-knowledge/
+
+# 书源原始数据（5.88 MB 下载物，解释器用的是筛选后的 config/book-sources-legado.json）
+build/sources/
