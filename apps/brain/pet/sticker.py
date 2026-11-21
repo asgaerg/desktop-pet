@@ -728,11 +728,10 @@ def sample_other(
     ⚠️ 只要**有 caption** 的：没描述的图给模型也无法判断。
     ⚠️ 随机性在这里：每次抽到的 5 张不同，长期看不会总发同几张。
     """
-    self_items = [
-        it
-        for it in store.load().values()
-        if it.path.startswith("stickers/other/") and it.caption
-    ]
+    # ⚠️ 2026-11-21：改成走 `stickers_for("other")` 而不是直接遍历
+    #    `store.load()` —— 前者会过滤掉文件已被删的幽灵条目，
+    #    直接遍历的话挑出来的图发不出去（用户报的「记忆里是不存在的路径」）。
+    self_items = store.stickers_for("other")
     if not self_items:
         return []
     picker = rng or random

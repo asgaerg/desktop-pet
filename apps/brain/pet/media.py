@@ -866,15 +866,34 @@ class MediaStore:
 
         ⚠️ 只要标注过的：没标注的不知道画的是什么，
            发出去可能闹笑话（用户看到的是一张莫名其妙的图）。
+
+        ## 🔴 只返回**文件还存在**的（2026-11-21 修）
+
+        索引是内存态，用户手动删文件后索引不知道。不过滤的话
+        `pick_sticker` / `sample_other` / `build_candidates` 都会
+        挑出幽灵条目 —— 发图静默失败，记忆里留一条指向不存在文件的路径。
         """
         self.load()
-        return [
-            it
-            for it in self._items.values()
-            if it.path.startswith("stickers/")
-            and it.emotion == emotion
-            and it.caption
-        ]
+        out: list[MediaItem] = []
+        ghosted: list[str] = []
+        for it in self._items.values():
+            if not it.path.startswith("stickers/"):
+                continue
+            if it.emotion != emotion or not it.caption:
+                continue
+            if (self.root / it.path).is_file():
+                out.append(it)
+            else:
+                ghosted.append(it.path)
+        if ghosted:
+            for p in ghosted:
+                self._items.pop(p, None)
+            self.save()
+            log.info(
+                "表情包：类别 %s 里清掉 %d 个幽灵索引条目（文件已被删）",
+                emotion, len(ghosted),
+            )
+        return out
 
     def search_stickers(
         self,
@@ -981,14 +1000,41 @@ class MediaStore:
 
         老发同一张图会很呆。按 `used_count` 升序，前几名里随机挑 ——
         既保证轮换，又不是死板地按顺序发。
+
+        ## 🔴 只挑**文件真的存在**的（2026-11-21 修）
+
+        用户报「宠物发出的表情包在记忆里是不存在的路径」。
+
+        ## 根因
+
+        索引是启动时加载进内存的，之后**不随文件系统实时变化**。
+        用户手动删过一批图（2026-11-06 前后删了约 170 个），内存里的
+        条目还留着 —— 挑图就会选中一个**磁盘上已经没有**的文件。
+
+        后果链：
+
+            pick_sticker 选中 s01520
+            -> build_payload 读文件 -> 空字节 -> 返回 {}
+            -> 这次配图静默失败（用户只看到没图）
+            -> 但记忆是发图前就写好的路径?  不对，记忆写在成功后……
+
+        ⚠️ 实际上记忆里的路径是 `item.path`，写记忆那步不看文件。
+           所以症状是"图没显示，但记忆里留了个指向不存在文件的路径"。
+
+        ## 修法
+
+        挑之前过滤掉文件不存在的条目。顺手**清掉索引里的幽灵**
+        （既然已经知道它没了，留着只会反复踩）。
         """
         import random as _random
 
+        # `stickers_for` 已过滤掉文件不存在的幽灵条目（2026-11-21 修）
         pool = self.stickers_for(emotion)
         if not pool:
             return None
-        pool.sort(key=lambda it: (it.used_count, it.last_used_at))
-        top = pool[: max(1, min(3, len(pool)))]
+        alive = pool
+        alive.sort(key=lambda it: (it.used_count, it.last_used_at))
+        top = alive[: max(1, min(3, len(alive)))]
         return (rng or _random).choice(top)
 
     def stats(self) -> dict[str, Any]:
