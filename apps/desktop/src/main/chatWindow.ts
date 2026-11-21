@@ -502,7 +502,49 @@ export class ChatWindow {
     window.on('moved', () => {
       if (window.isDestroyed()) return;
       if (this.programmaticMove) return;
-      const bounds = window.getBounds();
+      let bounds = window.getBounds();
+
+      /*
+       * 🔴 拖完要**纠正尺寸**（2026-11-20 修「拖一下输入框就变长」）
+       *
+       * ## 用户报的现象
+       *
+       * > 「有一次我拖拽输入框出来它就变长了」
+       *
+       * ## 日志证据
+       *
+       *     05:39:15.272  [穿透] 对话条区域 1298,760 273x41
+       *                                        ^^^^^^ 正常是 241x36
+       *
+       * ## 根因
+       *
+       * 这个窗口是 `transparent + frameless + resizable:false`，而本机
+       * DWM 会给透明窗口多铺 25%（见 DPI_COMPENSATION 那段说明）。
+       * 我们平时用 `windowWidth()`（设计尺寸 ÷ 1.25）创建/钉角，
+       * DWM 再放大回来 —— 平时没问题。
+       *
+       * 但**用户手动拖动**走的是系统层，Windows 会按**物理像素**重设
+       * 窗口尺寸 —— 拖完就变成 273x41（物理值），比设计尺寸大了 13%。
+       * 渲染层 CSS 是固定的，多出来的部分全变成输入框右边的空白 ——
+       * 用户看到的就是"输入框变长了"。
+       *
+       * ## 修法
+       *
+       * `moved` 里发现尺寸偏离设计值就**立刻**缩回去。位置保留
+       * （用户拖到哪算哪），只纠正大小。
+       */
+      const wantW = windowWidth();
+      const wantH = windowHeight();
+      if (bounds.width !== wantW || bounds.height !== wantH) {
+        this.programmaticMove = true;
+        window.setBounds({ x: bounds.x, y: bounds.y, width: wantW, height: wantH });
+        this.onDiagnostic?.(
+          `[对话条] 拖完纠正尺寸 ${bounds.width}x${bounds.height} -> ${wantW}x${wantH}` +
+            '（DWM 按物理像素重设了窗口）',
+        );
+        bounds = { x: bounds.x, y: bounds.y, width: wantW, height: wantH };
+      }
+
       this.userPosition = { x: bounds.x, y: bounds.y };
       this.options.onPositionChanged?.({ x: bounds.x, y: bounds.y });
       this.onDiagnostic?.(`对话条被拖动 -> ${bounds.x},${bounds.y}（已记住，不再自动钉角）`);
