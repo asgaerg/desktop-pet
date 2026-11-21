@@ -776,6 +776,38 @@ class Reader:
                 log.warning("网上阅读：跳过格式不对的源（%s）", exc)
         self.sources = [s for s in specs if s.enabled]
         log.info("网上阅读：载入 %d 个书源（共 %d 条）", len(self.sources), len(specs))
+        self._load_legado_sources()
+
+    def _load_legado_sources(self) -> None:
+        """追加 Legado 格式书源（2026-11-20 加）。
+
+        ## 为什么单独一个文件
+
+        `book-sources.yaml` 是**结构化**的（一个字段一个键），
+        而 Legado 书源是**字符串表达式**（CSS + 正则 + 变量），
+        塞进 YAML 会丢掉语义。所以原样存 JSON。
+
+        ## 两者共存，不是替代
+
+        YAML 那套是手工挑过的、验证过的（虽然常常失效）；
+        Legado 这批是 601 个里挑出的 266 个可用源，量大但质量参差。
+
+        ⚠️ Legado 源**排在后面**：`Reader` 按顺序试，
+           YAML 里那几个（如果还活着）优先级更高。
+        """
+        path = paths.project_root() / "config" / "book-sources-legado.json"
+        if not path.is_file():
+            return
+        try:
+            from .legado import load_legado_sources
+
+            extra = load_legado_sources(path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("网上阅读：Legado 书源读不了（%s）", exc)
+            return
+        if extra:
+            self.sources.extend(extra)
+            log.info("网上阅读：追加 %d 个 Legado 书源", len(extra))
 
     def has_book_sources(self) -> bool:
         return bool(self.sources)
