@@ -185,6 +185,11 @@ const ui = {
   /** 「自言自语」持续多久（分钟，2026-10-17 用户要求；0 = 不回落） */
   monologueDecay: el('monologue-decay'),
   bubbleParaGap: el('bubble-para-gap'),
+  // 数据存放位置（2026-11-21）
+  openDirKnowledge: el('open-dir-knowledge'),
+  openDirMemory: el('open-dir-memory'),
+  openDirMedia: el('open-dir-media'),
+  openDirSandbox: el('open-dir-sandbox'),
   // 表情包显示尺寸（5 档，2026-11-16）
   stickerSize: el('sticker-size'),
   bubbleGapAbove: el('bubble-gap-above'),
@@ -2654,6 +2659,34 @@ function loadAsrInfo() {
 if (ui.asrOpenDir) {
   ui.asrOpenDir.addEventListener('click', () => {
     void api.openAsrDir().catch(() => {});
+  });
+}
+/*
+ * 数据存放位置（2026-11-21 用户要求）
+ *
+ * 用户问「信息存储模块存储在哪个文件」，宠物答"沙箱目录"——
+ * 一查两边都有：正式归档目录 pet-knowledge/（空的，宠物没用过）
+ * 和沙箱 pet-data/web-sandbox/（它自己写的小文件）。
+ * 所以在模块页把四个路径全列出来，一键打开。
+ */
+if (ui.openDirKnowledge) {
+  ui.openDirKnowledge.addEventListener('click', () => {
+    void api.openDataDir('knowledge').catch(() => {});
+  });
+}
+if (ui.openDirMemory) {
+  ui.openDirMemory.addEventListener('click', () => {
+    void api.openDataDir('memory').catch(() => {});
+  });
+}
+if (ui.openDirMedia) {
+  ui.openDirMedia.addEventListener('click', () => {
+    void api.openDataDir('media').catch(() => {});
+  });
+}
+if (ui.openDirSandbox) {
+  ui.openDirSandbox.addEventListener('click', () => {
+    void api.openDataDir('sandbox').catch(() => {});
   });
 }
 

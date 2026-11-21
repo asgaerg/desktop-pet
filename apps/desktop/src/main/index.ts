@@ -6741,6 +6741,51 @@ function registerSettingsIpc(): void {
   ipcMain.handle('settings:asr-config', () => readAsrConfig());
 
   /*
+   * 数据存放位置（2026-11-21 用户要求）
+   *
+   * 用户原话：
+   *
+   * > 「信息存储模块存储在哪个文件，我问宠物它说是写在沙箱目录里面，
+   * >   把这个路径写在桌面宠物设置里面，用户可以看到。」
+   *
+   * ## 排查发现的事实（2026-11-21）
+   *
+   * 信息存储（knowledge）模块的正式目录是 `pet-knowledge/`，
+   * 但**它一直是空的** —— 宠物实际用 `sandbox_write` 工具往
+   * `pet-data/web-sandbox/` 里写（比如「想尝尝的东西.md」）。
+   *
+   * 所以这里把**两个路径都**告诉用户，并支持一键打开：
+   *   · 信息存储归档   `pet-knowledge/`
+   *   · 沙箱（它自己写的小文件） `pet-data/web-sandbox/`
+   *   · 记忆库        `pet-data/memory/`
+   */
+  ipcMain.handle('settings:data-locations', () => ({
+    knowledgeDir: path.join(PROJECT_ROOT, 'pet-knowledge'),
+    sandboxDir: path.join(DATA_DIR, 'web-sandbox'),
+    memoryDir: path.join(DATA_DIR, 'memory'),
+    petMediaDir: path.join(PROJECT_ROOT, 'pet-media'),
+  }));
+
+  ipcMain.handle('settings:open-data-dir', async (_event, which: string) => {
+    const map: Record<string, () => string> = {
+      knowledge: () => path.join(PROJECT_ROOT, 'pet-knowledge'),
+      sandbox: () => path.join(DATA_DIR, 'web-sandbox'),
+      memory: () => path.join(DATA_DIR, 'memory'),
+      media: () => path.join(PROJECT_ROOT, 'pet-media'),
+    };
+    const maker = map[which];
+    if (!maker) return { ok: false, message: `未知位置：${which}` };
+    const dir = maker();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (error) {
+      return { ok: false, message: `建目录失败：${(error as Error).message}` };
+    }
+    const error = await shell.openPath(dir);
+    return error ? { ok: false, message: error } : { ok: true, dir };
+  });
+
+  /*
    * ---------------------------------------------------------------- 语音合成
    *
    * 用户要求 2026-10-09：「你放在设置隐私里面的语音系统，统一拉出来放在

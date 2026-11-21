@@ -772,6 +772,23 @@ const api = {
     return ipcRenderer.invoke('settings:open-asr-dir');
   },
 
+  /**
+   * 数据存放位置（2026-11-21 用户要求）。
+   *
+   * 用户问「信息存储模块存储在哪个文件」，宠物答"沙箱目录"——
+   * 一查两边都有：正式归档目录 `pet-knowledge/`（空的，宠物没用过）
+   * 和沙箱 `pet-data/web-sandbox/`（它自己写的小文件）。
+   * 所以把这些路径全列出来，让用户能看到、能打开。
+   */
+  dataLocations(): Promise<unknown> {
+    return ipcRenderer.invoke('settings:data-locations');
+  },
+
+  /** 在资源管理器里打开某个数据目录（knowledge / sandbox / memory / media） */
+  openDataDir(which: string): Promise<unknown> {
+    return ipcRenderer.invoke('settings:open-data-dir', which);
+  },
+
   /** 改语音识别配置。落盘到 persona.yaml + 热更新，立刻生效。 */
   setAsr(payload: {
     mode?: string;
