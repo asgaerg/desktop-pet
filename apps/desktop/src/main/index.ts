@@ -3893,8 +3893,19 @@ function registerRendererIpc(): void {
    *   calm    冷静 —— 约每 8 句一张（1/8）
    *
    * 明确情绪类（意图/心情命中）不受档位限制，自由发。
-   * 写 `persona.yaml` 的 `activity.sticker_mode`，Python 侧现读。
-   * ⚠️ 只写文件不热更 —— sidecar 每轮现读 config，下一轮就生效。
+   * 写 `persona.yaml` 的 `activity.sticker_mode`。
+   *
+   * ## 🔴 必须发 `config.update`（2026-11-22 修「改了重启还是活跃」）
+   *
+   * 我原来只写文件，注释里还写着「sidecar 每轮现读 config，下一轮就生效」——
+   * **这是错的**。`Config` 是启动时解析一次的快照，`self.config.activity`
+   * 是内存里的 dict，文件改了它不会跟着变。
+   *
+   * 表现：设置页选了「冷静」、写盘成功、重启后读文件确实是 calm，
+   * 但运行中的 sidecar 内存里一直是旧值 —— 用户看到的就是"改了没用"。
+   *
+   * 修法：写盘之后再发一条 `config.update` 深合并进运行内存
+   * （和「思考模式」「语音开关」那些设置同一套两步走）。
    */
   ipcMain.handle('settings:sticker-mode', () => {
     const v = readDeepScalar(CONFIG_ROOT, ['activity', 'sticker_mode'], true);
@@ -3905,6 +3916,8 @@ function registerRendererIpc(): void {
     const valid = mode === 'active' || mode === 'normal' || mode === 'calm';
     if (!valid) return { ok: false, message: `未知档位：${mode}`, mode: 'normal' };
     const r = writeDeepScalar(CONFIG_ROOT, ['activity', 'sticker_mode'], mode);
+    // ② 热更新：只写盘的话运行中的 sidecar 还拿着旧快照
+    send({ type: 'config.update', patch: { activity: { sticker_mode: mode } } });
     return { ok: r.ok, mode, message: r.message };
   });
 

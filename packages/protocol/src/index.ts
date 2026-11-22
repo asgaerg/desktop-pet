@@ -67,6 +67,17 @@ export interface ActivityConfig {
    * 设置页显示的是**分钟**，转换只发生在主进程那两个 IPC 里。
    */
   monologue_decay_s?: number;
+  /**
+   * 表情包频率档位（2026-11-21）。
+   *
+   *   active  活跃 —— 随性图约每 2 句一张
+   *   normal  普通 —— 约每 4 句一张（默认）
+   *   calm    冷静 —— 约每 8 句一张
+   *
+   * 只影响"随性图"（other）；明确情绪类（意图/心情命中）不受限。
+   * Python 侧见 `gateway._maybe_send_sticker`。
+   */
+  sticker_mode?: string;
 }
 
 /* ------------------------------------------------------------------ *
