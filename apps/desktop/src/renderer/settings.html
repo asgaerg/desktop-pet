@@ -185,6 +185,7 @@
         <section id="tab-pet" class="tab-panel">
           <!--
             ⚠️ 「活泼度」滑杆**已删除**（2026-10-17 用户要求：
+
                「把设置里面的活泼度调节删除吧，现在用菜单调节就行」）。
             现在只有宠物右键菜单里那四档（安静 / 无聊 / 好奇 / 自言自语），
             因为档位是一等公民，滑杆那种"0.73"没有对应的行为语义。
@@ -217,47 +218,6 @@
 
               活跃 = 随性图约每 2 句一张；普通 = 约 4 句；冷静 = 约 8 句。
               越冷静越省钱（每次挑图要一次模型调用）。
-            -->
-            <div class="setting">
-              <div class="setting-text">
-                <span class="setting-title">表情包频率</span>
-                <span class="setting-desc">
-                  它随手发图（没有明确情绪配图时）的频率，
-                  <strong>默认「普通」</strong>。改完<strong>下一句回复生效</strong>。
-                  <br />
-                  · <strong>活跃</strong> —— 约每 2 句一张
-                  <br />
-                  · <strong>普通</strong> —— 约每 4 句一张
-                  <br />
-                  · <strong>冷静</strong> —— 约每 8 句一张（最省钱）
-                  <br />
-                  明确的情绪配图（道歉配道歉图这种）不受此档位限制。
-                </span>
-              </div>
-              <select id="sticker-mode">
-                <option value="active">活跃 · 约2句一张</option>
-                <option value="normal">普通 · 约4句一张（推荐）</option>
-                <option value="calm">冷静 · 约8句一张</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">「自言自语」持续多久</span>
-              <span class="setting-desc">
-                活泼度切到「自言自语」后，它念叨多久会自己回落到「安静」（情绪发泄完了）。
-                <strong>默认 20 分钟</strong>，最多 180 分钟（3 小时）。
-                <br />
-                <strong>0 = 不回落</strong>：会一直念念叨叨，直到你手动换档位。
-                <br />
-                改完<strong>立刻生效</strong>，重启也会记住。
-              </span>
-            </div>
-            <div class="setting-control">
-              <input id="monologue-decay" class="narrow-num" type="number" min="0" max="180" step="1" />
-              <span class="suffix">分钟</span>
-            </div>
           </div>
 
           <h2>边缘探头</h2>
@@ -285,35 +245,7 @@
             所以实际观感已经是"几乎贴上去"才触发。）
           -->
 
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">文字弹窗存在时间</span>
-              <span class="setting-desc">
-                宠物上方的回应气泡显示多久后自动消失，<strong>默认 10 秒</strong>。
-                若在这段时间内出现下一条回应，旧气泡会先做动画消失、新气泡再出现。
-                改完<strong>立刻生效</strong>，重启也会记住。
-              </span>
-            </div>
-            <div class="setting-control">
-              <!-- 数字输入框（原来滑杆：整数参数拖不准，用户要求改输入框） -->
-              <input id="bubble-linger" class="narrow-num" type="number" min="1" max="600" step="1" />
-              <span class="suffix">秒</span>
-            </div>
-          </div>
 
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">气泡段间距</span>
-              <span class="setting-desc">
-                气泡里段落之间留多宽的缝，<strong>默认 4px</strong>（0 = 完全贴合，
-                24 = 分段很明显）。改完<strong>立刻生效</strong>，重启也会记住。
-              </span>
-            </div>
-            <div class="setting-control">
-              <input id="bubble-para-gap" class="narrow-num" type="number" min="0" max="24" step="1" />
-              <span class="suffix">px</span>
-            </div>
-          </div>
 
           <!--
             表情包显示尺寸（2026-11-16 用户要求）
@@ -324,59 +256,8 @@
               「做成这5档可调节，设置里面切换吧。」
 
             ## 为什么是下拉框而不是滑块
-
-            ① 与这一页其它控件一致（`wrapSelects()` 已经处理过箭头/配色/键盘）
-            ② 只用 5 档，滑块会滑出 187px 这种没意义的中间值
-
-            ## 档位怎么定的
-
-            表情包原图实测（采样 1200 张）：宽中位 400、高中位 400，
-            57% 接近正方形。所以：
-
-                120  改之前的旧值，只占原图 30%（用户说"看不太清楚"）
-                200  原图 50%，默认
-                280  原图 70%，最大档
-
-            ⚠️ 上限 280 是因为气泡窗口 `BUBBLE_MAX_WIDTH = 520`，
-               再大就会频繁触发"从下往上裁"那条兜底逻辑。
-          -->
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">表情包大小</span>
-              <span class="setting-desc">
-                气泡里表情包的最大边长，<strong>默认 200</strong>
-                （原来的 120 有点小，看不清画面）。改完<strong>立刻生效</strong>，
-                当前正显示的图也会跟着变大。
-                <br />
-                原图大多是 400×400：200 约等于原图一半，280 约等于七成。
-              </span>
-            </div>
-            <select id="sticker-size">
-              <option value="120">小 · 120</option>
-              <option value="160">中偏小 · 160</option>
-              <option value="200">中 · 200（推荐）</option>
               <option value="240">大 · 240</option>
               <option value="280">特大 · 280</option>
-            </select>
-          </div>
-
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">气泡上方间距</span>
-              <span class="setting-desc">
-                气泡显示在宠物头顶时，与头顶留多宽的空隙，<strong>默认 6px</strong>。
-                改完<strong>立刻生效</strong>，重启也会记住。
-              </span>
-            </div>
-            <div class="setting-control">
-              <input id="bubble-gap-above" class="narrow-num" type="number" min="0" max="120" step="1" />
-              <span class="suffix">px</span>
-            </div>
-          </div>
-
-          <div class="setting">
-            <div class="setting-text">
-              <span class="setting-title">气泡左右间距</span>
               <span class="setting-desc">
                 气泡改到宠物旁边显示时，与立绘留多宽的空隙，<strong>默认 10px</strong>。
                 改完<strong>立刻生效</strong>，重启也会记住。
@@ -420,34 +301,6 @@
             </div>
           </div>
           <!--
-            🔴 四个宠物大小分别调（2026-11-05 用户要求）
-
-            用户原话：
-
-            > 「将宠物的四个大小的探头时的平移距离都改成可调整，因为现在的
-            >   调整只能调整一部分……只是在宠物的四个大小时都能自动根据
-            >   参数变化，不那么死板了」
-
-            ## 为什么要分开
-
-            四个档位的立绘是 150 / 220 / 250 / 300 px —— **差一倍**。
-            而探头要让开的"留白"跟尺寸成正比，所以一个统一值必然顾此失彼：
-            按 150px 调好的值放到 300px 上显得"几乎没探出去"。
-
-            ## 为什么默认折叠
-
-            大多数人只会调当前用的那个大小（上面那个输入框）。
-            四个都摊开会把这一页撑得很长，而"我就是想微调一下"的人
-            会被一大堆数字劝退。
-          -->
-          <details class="peek-by-scale">
-            <summary>按宠物大小分别调整（四个档位各管各的）</summary>
-            <div class="peek-scale-rows">
-              <div class="peek-scale-row">
-                <label for="peek-offset-0.6">150px（0.6x）</label>
-                <input id="peek-offset-0.6" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.6" />
-                <span class="suffix">px</span>
-              </div>
               <div class="peek-scale-row">
                 <label for="peek-offset-0.88">220px（0.88x）</label>
                 <input id="peek-offset-0.88" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.88" />
@@ -469,6 +322,124 @@
               这里可以给每一档单独设值。没设过的档位沿用该档默认值。
             </p>
           </details>
+        </section>
+
+        <section id="tab-bubble" class="tab-panel">
+          <h2>气泡</h2>
+          <p class="hint">
+            宠物说话时弹出的文字浮窗。这里管它的**样式与节奏**；
+            要不要显示由「桌宠」页的气泡开关管。
+          </p>
+          -->
+
+
+
+            <div class="setting">
+              <div class="setting-text">
+                <span class="setting-title">文字弹窗存在时间</span>
+                <span class="setting-desc">
+                  宠物上方的回应气泡显示多久后自动消失，<strong>默认 10 秒</strong>。
+                  改完<strong>立刻生效</strong>，重启也会记住。
+                </span>
+              </div>
+              <div class="setting-control">
+                <input id="bubble-linger" class="narrow-num" type="number" min="1" max="600" step="1" />
+                <span class="suffix">秒</span>
+              </div>
+            </div>
+
+            <div class="setting">
+              <div class="setting-text">
+                <span class="setting-title">气泡段间距</span>
+                <span class="setting-desc">
+                  气泡里段落之间留多宽的缝，<strong>默认 4px</strong>（0 = 完全贴合，
+                  24 = 分段很明显）。改完<strong>立刻生效</strong>，重启也会记住。
+                </span>
+              </div>
+              <div class="setting-control">
+                <input id="bubble-para-gap" class="narrow-num" type="number" min="0" max="24" step="1" />
+                <span class="suffix">px</span>
+              </div>
+            </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">气泡上方间距</span>
+              <span class="setting-desc">
+                气泡显示在宠物头顶时，与头顶留多宽的空隙，<strong>默认 6px</strong>。
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-gap-above" class="narrow-num" type="number" min="0" max="120" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">气泡左右间距</span>
+              <span class="setting-desc">
+                气泡改到宠物旁边显示时，与立绘留多宽的空隙，<strong>默认 10px</strong>。
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="bubble-gap-side" class="narrow-num" type="number" min="0" max="120" step="1" />
+              <span class="suffix">px</span>
+            </div>
+          </div>
+        </section>
+
+        <section id="tab-sticker" class="tab-panel">
+          <h2>表情包</h2>
+          <p class="hint">
+            它随手发的图。频率管「多常发」，大小管「显示多大」。
+            明确情绪的配图（道歉配道歉图）不受频率限制。
+          </p>
+            <!-- 表情包频率档位（2026-11-21 用户要求三档） -->
+            <div class="setting">
+              <div class="setting-text">
+                <span class="setting-title">表情包频率</span>
+                <span class="setting-desc">
+                  它随手发图（没有明确情绪配图时）的频率，
+                  <strong>默认「普通」</strong>。改完<strong>下一句回复生效</strong>。
+                  <br />
+                  · <strong>活跃</strong> —— 约每 2 句一张
+                  <br />
+                  · <strong>普通</strong> —— 约每 4 句一张
+                  <br />
+                  · <strong>冷静</strong> —— 约每 8 句一张（最省钱）
+                  <br />
+                  明确的情绪配图（道歉配道歉图这种）不受此档位限制。
+                </span>
+              </div>
+              <select id="sticker-mode">
+                <option value="active">活跃 · 约2句一张</option>
+                <option value="normal">普通 · 约4句一张（推荐）</option>
+                <option value="calm">冷静 · 约8句一张</option>
+              </select>
+            </div>
+          -->
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">表情包大小</span>
+              <span class="setting-desc">
+                气泡里表情包的最大边长，<strong>默认 200</strong>
+                （原来的 120 有点小，看不清画面）。改完<strong>立刻生效</strong>，
+                当前正显示的图也会跟着变大。
+                <br />
+                原图大多是 400×400：200 约等于原图一半，280 约等于七成。
+              </span>
+            </div>
+            <select id="sticker-size">
+              <option value="120">小 · 120</option>
+              <option value="160">中偏小 · 160</option>
+              <option value="200">中 · 200（推荐）</option>
+              <option value="240">大 · 240</option>
+              <option value="280">特大 · 280</option>
+            </select>
+          </div>
         </section>
 
         <!-- ============================ AI ============================ -->
@@ -1319,6 +1290,34 @@
               <button id="open-dir-sandbox" class="btn">打开</button>
             </div>
           </div>
+
+          <!--
+            各模块的细分杂项（2026-11-21 用户要求「模块的细分杂类设置
+            分在模块下面搞个下拉框」）。用 <details> 原生折叠，不用 JS。
+          -->
+          <details style="margin-top: 18px;">
+            <summary style="cursor: pointer; font-weight: 600;">模块细分设置</summary>
+            <div style="margin-top: 10px;">
+
+          <div class="setting">
+            <div class="setting-text">
+              <span class="setting-title">「自言自语」持续多久</span>
+              <span class="setting-desc">
+                活泼度切到「自言自语」后，它念叨多久会自己回落到「安静」（情绪发泄完了）。
+                <strong>默认 20 分钟</strong>，最多 180 分钟（3 小时）。
+                <br />
+                <strong>0 = 不回落</strong>：会一直念念叨叨，直到你手动换档位。
+                <br />
+                改完<strong>立刻生效</strong>，重启也会记住。
+              </span>
+            </div>
+            <div class="setting-control">
+              <input id="monologue-decay" class="narrow-num" type="number" min="0" max="180" step="1" />
+              <span class="suffix">分钟</span>
+            </div>
+          </div>
+            </div>
+          </details>
         </section>
 
 <section id="tab-privacy" class="tab-panel">
@@ -1498,7 +1497,7 @@
 
         <!-- ============================ 关于 ============================ -->
         <section id="tab-about" class="tab-panel">
-          <h2>文件都在哪</h2>
+          <h2>数据</h2>
 
           <div class="setting">
             <div class="setting-text">
