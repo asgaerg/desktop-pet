@@ -667,7 +667,10 @@ function bindSelect(select, read, write, toValue) {
     try {
       const result = await write(value);
       const applied = result && toValue(result.applied);
-      if (Number.isFinite(applied) && String(applied) !== String(select.value)) {
+      // ⚠️ 同样要接受字符串（见下面回显那段的说明）
+      const hasApplied =
+        Number.isFinite(applied) || (typeof applied === 'string' && applied);
+      if (hasApplied && String(applied) !== String(select.value)) {
         select.value = String(applied);
       }
       reportPersist(result);
@@ -679,7 +682,22 @@ function bindSelect(select, read, write, toValue) {
   void (async () => {
     try {
       const value = toValue(await read());
-      if (Number.isFinite(value)) select.value = String(value);
+      /*
+       * 🔴 回显要同时接受数字和字符串（2026-11-22 修）
+       *
+       * 原来只有 `Number.isFinite(value)` —— 那只对**数字**成立。
+       * 表情包频率档位是字符串（'active'/'normal'/'calm'），
+       * 于是回显被整个跳过，下拉框永远停在第一个选项。
+       *
+       * 用户报的正是这个：「设置里面的表情包频率没变，打开还是活跃」——
+       * 配置里明明存着 calm，界面却显示 active。
+       *
+       * 而且 `change` 事件那条（670 行）也只认数字，
+       * 保存后想纠正显示值同样失效。两处一起改。
+       */
+      if (Number.isFinite(value) || (typeof value === 'string' && value)) {
+        select.value = String(value);
+      }
     } catch {
       /* 读不到就保持默认显示，不影响其它设置 */
     }
