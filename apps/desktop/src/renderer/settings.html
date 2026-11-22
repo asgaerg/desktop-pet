@@ -283,6 +283,59 @@
                 改完<strong>立刻生效</strong>，不用点保存，重启也会记住。
               </span>
             </div>
+
+          <!--
+            按宠物大小分别调整探头平移（2026-11-05 加，2026-11-22 恢复）
+
+            用户原话：
+              「我打算将宠物的四个大小的探头时的平移距离都改成可调整，因为
+                现在的调整只能调整一部分，四个都能调整就都能完美达成想要的
+                探头效果」
+
+            ## 为什么必须分四档
+
+            四个档位的立绘是 150 / 220 / 250 / 300 px —— 差一倍。
+            而探头要让开的"留白"跟尺寸成正比。所以一个统一值必然顾此失彼：
+
+                按 150px 调好（比如 30） -> 300px 档显得"几乎没探出去"
+                按 300px 调好（比如 90） -> 150px 档探过头，整只跑出屏幕
+
+            ## ⚠️ 2026-11-22 为什么在这里恢复
+
+            信息架构重组时这段 `<details>` 被误判成"旧残留"删掉了
+            （它当时和一段未闭合的注释搅在一起），但它是真实功能：
+            后端 `peekOffsetByScale` / preload 通道 / settings.js 的绑定
+            全都还在，只是界面丢了 —— 用户能看到的就是"四个档位消失了"。
+          -->
+          <details class="peek-by-scale">
+            <summary>按宠物大小分别调整（四个档位各管各的）</summary>
+            <div class="peek-scale-rows">
+              <div class="peek-scale-row">
+                <label for="peek-offset-0.6">150px（0.6x）</label>
+                <input id="peek-offset-0.6" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.6" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-0.88">220px（0.88x）</label>
+                <input id="peek-offset-0.88" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="0.88" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-1">250px（1.0x）</label>
+                <input id="peek-offset-1" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="1" />
+                <span class="suffix">px</span>
+              </div>
+              <div class="peek-scale-row">
+                <label for="peek-offset-1.2">300px（1.2x）</label>
+                <input id="peek-offset-1.2" class="narrow-num" type="number" min="-60" max="160" step="1" data-scale="1.2" />
+                <span class="suffix">px</span>
+              </div>
+            </div>
+            <p class="setting-desc peek-scale-hint">
+              上面那个输入框改的是<strong>当前宠物大小</strong>这一档；
+              这里可以给每一档单独设值。没设过的档位沿用上面那个值。
+            </p>
+          </details>
             <div class="setting-control">
               <!-- 数字输入框（原来滑杆）。`min` 是负的 —— 负数表示往回收，是合法值。 -->
               <input id="peek-offset" class="narrow-num" type="number" min="-60" max="160" step="1" />
