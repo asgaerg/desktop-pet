@@ -188,6 +188,14 @@ class Revision:
     #: `0` = 不适用（网页/搜索没有章节）
     chapter_from: int = 0
     chapter_to: int = 0
+    #: 🔴 这一版归档时消耗的 token（2026-11-28 用户要求「显示成本」）
+    #:
+    #: 归档要做一次模型调用（分析 + 想法），那是真实的钱。
+    #: 存下用量而不是存价格：价格会变，用量不会 ——
+    #: 换算成钱是展示层的事（见 `pet/pricing.py`）。
+    #: 0 表示"老版本没记"（这个字段是后加的，历史版本没有）。
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
     def covers(self, chapter: int) -> bool:
         """这一版是否覆盖了第 `chapter` 章。"""
@@ -206,6 +214,8 @@ class Revision:
             "chars": self.chars,
             "chapter_from": self.chapter_from,
             "chapter_to": self.chapter_to,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
         }
 
     @classmethod
@@ -230,6 +240,14 @@ class Revision:
             cto = int(data.get("chapter_to") or 0)
         except (TypeError, ValueError):
             cto = 0
+        try:
+            ptok = int(data.get("prompt_tokens") or 0)
+        except (TypeError, ValueError):
+            ptok = 0
+        try:
+            ctok = int(data.get("completion_tokens") or 0)
+        except (TypeError, ValueError):
+            ctok = 0
         return cls(
             n=n,
             path=str(data.get("path") or ""),
@@ -240,6 +258,8 @@ class Revision:
             chars=chars,
             chapter_from=cfrom,
             chapter_to=cto,
+            prompt_tokens=ptok,
+            completion_tokens=ctok,
         )
 
 
@@ -360,6 +380,9 @@ class KnowledgeStore:
         tags: Optional[list[str]] = None,
         chapter_from: int = 0,
         chapter_to: int = 0,
+        # 这次分析调用的真实用量（2026-11-28 用户要求显示成本）
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> Optional[Revision]:
         """**新增或更新**一个实体（有则加一版，无则建实体）。
 
@@ -434,6 +457,8 @@ class KnowledgeStore:
             chars=len(body or ""),
             chapter_from=int(chapter_from or 0),
             chapter_to=int(chapter_to or 0),
+            prompt_tokens=int(prompt_tokens or 0),
+            completion_tokens=int(completion_tokens or 0),
         )
         entity.revisions.append(rev)
 
@@ -686,14 +711,77 @@ class KnowledgeStore:
         return "\n".join(lines)
 
     def stats(self) -> dict[str, Any]:
+        """归档概览：按类别统计条目数、字数、token、成本（2026-11-28）。
+
+        ## 为什么成本要按类别分开
+
+        用户要求「用信息存储归档要显示成本，归类显示在数据页中」——
+        他要看的是"哪类归档烧了多少钱"，而不是一个总数。
+        这样才能判断"是不是该少让宠物读小说"。
+
+        ## ⚠️ 成本是**实时算的**，不存盘
+
+        `Revision` 里只存 token 用量（`prompt_tokens` / `completion_tokens`），
+        金额由 `pricing.cost_of` 现算 —— 厂商调价后历史数据的成本
+        自动跟着变，而不会焊死在旧价格上。
+
+        老版本（这个字段加上之前归档的）token 是 0，成本显示 0 ——
+        这是如实反映"当时没记"，不是算错。
+        """
+        from . import pricing
+
         by_cat: dict[str, int] = {}
         total_rev = 0
+        # 每类的聚合：条目数 / 版本数 / 字数 / token / 成本
+        detail: dict[str, dict[str, Any]] = {}
+        grand_tokens_in = 0
+        grand_tokens_out = 0
+        grand_chars = 0
+
         for e in self._entities.values():
-            by_cat[e.category] = by_cat.get(e.category, 0) + 1
+            cat = e.category or "other"
+            by_cat[cat] = by_cat.get(cat, 0) + 1
+            slot = detail.setdefault(
+                cat,
+                {
+                    "entities": 0,
+                    "revisions": 0,
+                    "chars": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cost": 0.0,
+                },
+            )
+            slot["entities"] += 1
             total_rev += len(e.revisions)
+            slot["revisions"] += len(e.revisions)
+            for rev in e.revisions:
+                slot["chars"] += int(rev.chars or 0)
+                slot["prompt_tokens"] += int(rev.prompt_tokens or 0)
+                slot["completion_tokens"] += int(rev.completion_tokens or 0)
+                grand_chars += int(rev.chars or 0)
+                grand_tokens_in += int(rev.prompt_tokens or 0)
+                grand_tokens_out += int(rev.completion_tokens or 0)
+
+        for cat, slot in detail.items():
+            slot["cost"] = pricing.cost_of(
+                slot["prompt_tokens"], slot["completion_tokens"]
+            )
+
+        total_cost = pricing.cost_of(grand_tokens_in, grand_tokens_out)
         return {
             "root": str(self.root),
             "entities": len(self._entities),
             "revisions": total_rev,
             "by_category": by_cat,
+            # 按类别的明细（数据页用它画表格）
+            "categories": detail,
+            "chars": grand_chars,
+            "prompt_tokens": grand_tokens_in,
+            "completion_tokens": grand_tokens_out,
+            "cost": total_cost,
+            # 展示用的格式化字符串，省得渲染层再算一遍
+            "cost_text": pricing.fmt_cost(total_cost),
+            "price_in_per_m": pricing.PRICE_IN_PER_M,
+            "price_out_per_m": pricing.PRICE_OUT_PER_M,
         }

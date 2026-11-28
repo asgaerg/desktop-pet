@@ -5868,7 +5868,7 @@ class Gateway:
             return
 
         # ② 分析 + 想法
-        analysis, thoughts = await knowledge_analysis.analyze(
+        analysis, thoughts, usage = await knowledge_analysis.analyze(
             text,
             brain=self.conversation.brain,
             title=title,
@@ -5900,6 +5900,9 @@ class Gateway:
             scope=scope,
             chapter_from=cf,
             chapter_to=ct,
+            # 这次分析的真实用量（用户要看到成本）
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
         )
         if rev is not None:
             log.info(

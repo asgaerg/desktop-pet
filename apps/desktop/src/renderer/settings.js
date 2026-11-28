@@ -190,6 +190,9 @@ const ui = {
   openDirMemory: el('open-dir-memory'),
   openDirMedia: el('open-dir-media'),
   openDirSandbox: el('open-dir-sandbox'),
+  knowledgeSummary: el('knowledge-summary'),
+  knowledgeTable: el('knowledge-table'),
+  knowledgeRows: el('knowledge-rows'),
   // 表情包显示尺寸（5 档，2026-11-16）
   stickerSize: el('sticker-size'),
   stickerMode: el('sticker-mode'),
@@ -2728,6 +2731,112 @@ if (ui.openDirMedia) {
 if (ui.openDirSandbox) {
   ui.openDirSandbox.addEventListener('click', () => {
     void api.openDataDir('sandbox').catch(() => {});
+  });
+}
+
+/*
+ * 归档统计与成本（2026-11-28 用户要求）
+ *
+ * ## 数字怎么来的
+ *
+ * 主进程读 `pet-knowledge/index.json`，按 `category` 聚合，
+ * 金额 = 输入 token × ¥2/百万 + 输出 token × ¥8/百万
+ * （单价与 `pet/pricing.py` 保持一致）。
+ *
+ * ## ⚠️ 老版本显示 ¥0
+ *
+ * `prompt_tokens` 字段是 2026-11-28 才加的。更早归档的条目里它是 0，
+ * 所以那些条目成本算出来是 0 —— 如实反映"当时没记"，不是算错。
+ * 摘要里会提示这一点，免得用户以为统计坏了。
+ */
+const CATEGORY_LABELS = {
+  reading: '小说阅读',
+  search: '联网搜索',
+  community: '社区浏览',
+  other: '其他',
+};
+
+/** 把 12345 显示成 "12,345" */
+function fmtInt(n) {
+  const v = Math.round(Number(n) || 0);
+  return v.toLocaleString('zh-CN');
+}
+
+/**
+ * 金额格式化 —— 与 `pet/pricing.py` 的 `fmt_cost` 同规则。
+ *
+ * 归档一次通常是 ¥0.01 级别，显示成 ¥0.00 会让人以为免费，
+ * 所以小额保留 4 位小数。
+ */
+function fmtCost(v) {
+  const n = Math.max(0, Number(v) || 0);
+  if (n === 0) return '¥0';
+  if (n < 0.01) return `¥${n.toFixed(4)}`;
+  if (n < 1) return `¥${n.toFixed(3)}`;
+  return `¥${n.toFixed(2)}`;
+}
+
+async function loadKnowledgeStats() {
+  if (!ui.knowledgeSummary) return;
+  let r;
+  try {
+    r = await api.knowledgeStats();
+  } catch (e) {
+    ui.knowledgeSummary.textContent = `读不到归档统计：${e.message}`;
+    return;
+  }
+  if (!r || r.ok === false) {
+    ui.knowledgeSummary.textContent = '读不到归档统计（索引文件可能坏了）';
+    return;
+  }
+  if (r.empty) {
+    ui.knowledgeSummary.textContent =
+      '还没有归档。让它读几章书、查点资料，这里就会出统计。';
+    if (ui.knowledgeTable) ui.knowledgeTable.style.display = 'none';
+    return;
+  }
+
+  // 摘要一行：总量 + 总成本
+  const parts = [
+    `${fmtInt(r.entities)} 个条目`,
+    `${fmtInt(r.revisions)} 个版本`,
+    `${fmtInt(r.chars)} 字`,
+    `共 <strong>${fmtCost(r.cost)}</strong>`,
+  ];
+  ui.knowledgeSummary.innerHTML = parts.join(' · ');
+
+  if (!ui.knowledgeRows || !ui.knowledgeTable) return;
+  const rows = (r.categories || []).map((c) => {
+    const label = CATEGORY_LABELS[c.category] || c.category;
+    return `<tr>
+      <td>${label}</td>
+      <td>${fmtInt(c.entities)}</td>
+      <td>${fmtInt(c.revisions)}</td>
+      <td>${fmtInt(c.chars)}</td>
+      <td>${fmtInt(c.promptTokens)}</td>
+      <td>${fmtInt(c.completionTokens)}</td>
+      <td>${fmtCost(c.cost)}</td>
+    </tr>`;
+  });
+  ui.knowledgeRows.innerHTML = rows.join('');
+  ui.knowledgeTable.style.display = '';
+
+  // 老数据提示：整体 token 为 0 但有条目，说明都是加字段之前归档的
+  if (r.promptTokens === 0 && r.completionTokens === 0 && r.revisions > 0) {
+    ui.knowledgeSummary.innerHTML +=
+      '<br /><span style="color: var(--warn);">'
+      + '（这些归档都早于成本统计功能，没记 token，所以成本显示 ¥0）'
+      + '</span>';
+  }
+}
+
+if (ui.knowledgeSummary) {
+  void loadKnowledgeStats();
+  // 切到「数据」页时刷新一次 —— 归档可能刚发生
+  document.querySelectorAll('.nav-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.target === 'tab-about') void loadKnowledgeStats();
+    });
   });
 }
 

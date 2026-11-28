@@ -164,7 +164,7 @@ async def analyze(
     """
     text = _clip_for_analysis(body)
     if not text.strip():
-        return "", ""
+        return "", "", {}
 
     head = f"你刚读完了{kind}《{title}》。" if title else f"你刚读完一段{kind}。"
     prompt = f"{head}\n\n---\n\n{text}\n\n---\n\n{ANALYZE_PROMPT}"
@@ -185,11 +185,19 @@ async def analyze(
             timeout_s=60.0,
         )
         collected: list[str] = []
+        # 🔴 记下这次分析的 token 用量（2026-11-28 用户要「显示成本」）
+        #
+        # 归档要做一次模型调用，那是真实的钱。用量交给上层存进
+        # `Revision.prompt_tokens` / `completion_tokens`，金额展示时现算
+        # （见 `pet/pricing.py`）。
+        usage: dict[str, Any] = {}
         async for item in brain.stream(req):
             if item.get("kind") == "delta":
                 piece = str(item.get("text") or "")
                 if piece:
                     collected.append(piece)
+            elif item.get("kind") == "usage":
+                usage = dict(item.get("usage") or {})
         reply = "".join(collected)
     except Exception as exc:  # noqa: BLE001 —— 总结失败不该影响读
         log.warning(
@@ -197,13 +205,13 @@ async def analyze(
             type(exc).__name__,
             str(exc)[:80],
         )
-        return "", ""
+        return "", "", {}
 
     analysis, thoughts = _split_sections(str(reply or ""))
     if not analysis and not thoughts:
         log.info("总结没产出内容（模型可能返回了空）")
-        return "", ""
-    return analysis, thoughts
+        return "", "", {}
+    return analysis, thoughts, usage
 
 
 def summarize_for_reply(analysis: str, thoughts: str, *, max_chars: int = 400) -> str:

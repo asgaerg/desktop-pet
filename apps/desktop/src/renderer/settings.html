@@ -1497,6 +1497,47 @@
                 按 community / reading / search / other 分类。
               </span>
             </div>
+
+            <!--
+              归档统计与成本（2026-11-28 用户要求）
+
+              用户原话：「用信息存储归档要显示成本，归类显示在数据页中」
+
+              ## 为什么单列一块，而不是塞进上面那个"打开"设置
+
+              上面那行只回答"东西在哪"；这里回答"存了多少、花了多少钱"。
+              两个问题不同频次 —— 路径看一次就够了，成本要盯着看。
+
+              ## ⚠️ 成本只对**新归档**准确
+
+              `prompt_tokens` / `completion_tokens` 是 2026-11-28 才加的字段。
+              更早的版本里它们是 0，所以那种条目会显示 ¥0 ——
+              那是"当时没记"，不是算错。界面里会标一句。
+            -->
+            <div class="setting">
+              <div class="setting-text">
+                <span class="setting-title">归档统计与成本</span>
+                <span class="setting-desc" id="knowledge-summary">
+                  正在读取…
+                </span>
+              </div>
+            </div>
+            <div id="knowledge-table" class="knowledge-table" style="display: none;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>类别</th>
+                    <th>条目</th>
+                    <th>版本</th>
+                    <th>字数</th>
+                    <th>输入 token</th>
+                    <th>输出 token</th>
+                    <th>成本</th>
+                  </tr>
+                </thead>
+                <tbody id="knowledge-rows"></tbody>
+              </table>
+            </div>
             <div class="setting-control">
               <button id="open-dir-knowledge" class="btn">打开</button>
             </div>

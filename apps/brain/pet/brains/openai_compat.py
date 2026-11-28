@@ -330,6 +330,15 @@ class OpenAIBrain(Brain):
         finally:
             # 上层提前退出（用户打断 / 前端断开）时也主动断开 HTTP 连接
             cancel.set()
+        # 🔴 用量单独报一条事件（2026-11-28）
+        #
+        # 原来只 `log.debug` 一下就丢了 —— 于是"这次调用了多少 token"
+        # 只有翻日志才能看到，知识归档那种"要算成本"的场合拿不到数。
+        #
+        # 放在 `done` **之前**：上层收到 done 通常就收尾了，
+        # 之后再发会被忽略。
+        if state.get("usage"):
+            yield {"kind": "usage", "usage": dict(state["usage"])}
         yield {"kind": "done", "text": "".join(full_text)}
 
     async def _forward(self, queue: "asyncio.Queue[Any]") -> AsyncIterator[dict[str, Any]]:

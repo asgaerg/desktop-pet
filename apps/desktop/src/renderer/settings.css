@@ -1773,3 +1773,46 @@ html[data-theme='dark'] {
 .tab-panel .hint {
   line-height: 1.55;
 }
+
+
+/*
+ * 归档统计表（2026-11-28）
+ *
+ * 为什么不用 .setting 那套：这是**表格**，不是「一行标题 + 一行说明」。
+ * 硬塞进 setting 会让七列挤在一起看不清。
+ */
+.knowledge-table {
+  margin: 4px 0 18px;
+  padding-left: 2px;
+  overflow-x: auto;
+}
+
+.knowledge-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.knowledge-table th,
+.knowledge-table td {
+  padding: 6px 10px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* 第一列（类别名）左对齐 —— 数字右对齐更好比对 */
+.knowledge-table th:first-child,
+.knowledge-table td:first-child {
+  text-align: left;
+}
+
+.knowledge-table th {
+  color: var(--text-dim);
+  font-weight: 600;
+  border-bottom-width: 2px;
+}
+
+.knowledge-table tbody tr:last-child td {
+  border-bottom: none;
+}

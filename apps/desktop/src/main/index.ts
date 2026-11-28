@@ -6803,6 +6803,119 @@ function registerSettingsIpc(): void {
     petMediaDir: path.join(PROJECT_ROOT, 'pet-media'),
   }));
 
+  /*
+   * 信息存储归档的统计 + 成本（2026-11-28 用户要求）
+   *
+   * 用户原话：「用信息存储归档要显示成本，归类显示在数据页中」
+   *
+   * ## 为什么由主进程读，而不是走 sidecar 的 IPC
+   *
+   * `index.json` 就在磁盘上（`pet-knowledge/index.json`），结构是公开的。
+   * 为这点展示数据起一条 WS 协议往返不划算 —— 而且设置页打开时
+   * sidecar 可能正忙（在读书/在说话），不该为一张统计表排队。
+   *
+   * ## 成本算法必须和 Python 一致
+   *
+   * Python 侧 `pet/pricing.py` 是权威（归档时也用它算）。
+   * 这里复制同样的两个单价 —— **改价要两边一起改**，
+   * 所以把这句话写在两处注释里。
+   */
+  ipcMain.handle('settings:knowledge-stats', () => {
+    const root = path.join(PROJECT_ROOT, 'pet-knowledge');
+    const indexPath = path.join(root, 'index.json');
+    const priceIn = 2.0; // ¥/百万 输入 —— 与 pet/pricing.py 保持一致
+    const priceOut = 8.0; // ¥/百万 输出
+
+    let entities: any[] = [];
+    try {
+      const raw = fs.readFileSync(indexPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      entities = Array.isArray(parsed?.entities) ? parsed.entities : [];
+    } catch {
+      // 文件不存在/坏了都按"还没归档"处理，不打扰用户
+      return {
+        ok: true,
+        root,
+        entities: 0,
+        revisions: 0,
+        chars: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        cost: 0,
+        categories: [],
+        empty: true,
+      };
+    }
+
+    type Slot = {
+      category: string;
+      entities: number;
+      revisions: number;
+      chars: number;
+      promptTokens: number;
+      completionTokens: number;
+      cost: number;
+    };
+    const slots = new Map<string, Slot>();
+    let revisions = 0;
+    let chars = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+
+    for (const e of entities) {
+      const cat = String(e?.category || 'other');
+      let slot = slots.get(cat);
+      if (!slot) {
+        slot = {
+          category: cat,
+          entities: 0,
+          revisions: 0,
+          chars: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          cost: 0,
+        };
+        slots.set(cat, slot);
+      }
+      slot.entities += 1;
+      const revs = Array.isArray(e?.revisions) ? e.revisions : [];
+      for (const r of revs) {
+        const p = Number(r?.prompt_tokens) || 0;
+        const c = Number(r?.completion_tokens) || 0;
+        const ch = Number(r?.chars) || 0;
+        slot.revisions += 1;
+        slot.chars += ch;
+        slot.promptTokens += p;
+        slot.completionTokens += c;
+        revisions += 1;
+        chars += ch;
+        promptTokens += p;
+        completionTokens += c;
+      }
+    }
+
+    const costOf = (p: number, c: number) =>
+      (p / 1_000_000) * priceIn + (c / 1_000_000) * priceOut;
+
+    const categories = [...slots.values()]
+      .map((s) => ({ ...s, cost: costOf(s.promptTokens, s.completionTokens) }))
+      .sort((a, b) => b.revisions - a.revisions);
+
+    const cost = costOf(promptTokens, completionTokens);
+    return {
+      ok: true,
+      root,
+      entities: entities.length,
+      revisions,
+      chars,
+      promptTokens,
+      completionTokens,
+      cost,
+      categories,
+      empty: entities.length === 0,
+    };
+  });
+
   ipcMain.handle('settings:open-data-dir', async (_event, which: string) => {
     const map: Record<string, () => string> = {
       knowledge: () => path.join(PROJECT_ROOT, 'pet-knowledge'),

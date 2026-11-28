@@ -37,6 +37,8 @@ const CHANNEL = {
   /** 表情包显示尺寸（5 档，2026-11-16 加） */
   stickerSize: 'settings:sticker-size',
   setStickerSize: 'settings:set-sticker-size',
+  /** 信息存储归档的统计与成本（2026-11-28 加） */
+  knowledgeStats: 'settings:knowledge-stats',
   /** 表情包频率档位（active/normal/calm，2026-11-21 加） */
   stickerMode: 'settings:sticker-mode',
   setStickerMode: 'settings:set-sticker-mode',
@@ -794,6 +796,11 @@ const api = {
    */
   dataLocations(): Promise<unknown> {
     return ipcRenderer.invoke('settings:data-locations');
+  },
+
+  /** 信息存储归档的统计与成本（2026-11-28 加） */
+  knowledgeStats(): Promise<unknown> {
+    return ipcRenderer.invoke(CHANNEL.knowledgeStats);
   },
 
   /** 在资源管理器里打开某个数据目录（knowledge / sandbox / memory / media） */
