@@ -1336,6 +1336,9 @@ class Conversation:
         """
         truncated_retried = False
         empty_retried = False
+        # 这一轮（整次 _generate）有没有真的调用过 read_book ——
+        # 用来抓"说了要去读却没调"的假动作（见下面的自纠逻辑）
+        self._turn_read_tool_used = False
         for round_index in range(MAX_TOOL_ROUNDS + 1):
             if self._interrupt.is_set():
                 reason = "interrupted"
@@ -1479,6 +1482,44 @@ class Conversation:
           · 记忆写入 + 后台提炼（少了就"聊过就忘"）
           · `conversation.finished`（少了调度器的冷却不重置，它会立刻再说一句）
         """
+        # ---------------------------------------------------------- 阅读自纠
+        #
+        # 🔴 2026-11-28（用户要求「让宠物真正开始用信息存储归档」）
+        #
+        # ## 抓的什么
+        #
+        # 模型常常**嘴上说去读、实际不调 read_book**：
+        #
+        #   实测 13:01  「诶，这就去…诶，读好了，七十六到八十五」（编的）
+        #   实测 13:05  「诶，好，真调 read_book，读两章。去了。」（没调）
+        #
+        # 后果不只是"没归档"——它会接着编具体情节（"二十六章写小笼包"），
+        # 用户以为它真看过了。这比直接说"读不到"更糟。
+        #
+        # ## 为什么会这样
+        #
+        # 历史里堆着一堆它自己的"我这就去读"，模型在**模仿自己**：
+        # 每一句空话都成了下一次空话的依据（负反馈循环）。
+        # 单纯改提示词压不住（实测加了工具纪律后仍然偶发）。
+        #
+        # ## 修法：一轮纠正
+        #
+        # 检测「用户让读 + 模型说要读 + 但没真调」-> 补一轮：
+        # 明确告诉它"你刚才只是说了，没有调"，让它立刻调用。
+        # 只补一次，避免无限循环；而且这轮的文本**不追加到回复**里
+        # （用户已经看过前面那句了，补一句"好的我这就调"很怪）。
+        if (
+            not idle
+            and not getattr(self, "_turn_read_tool_used", False)
+            and self._looks_like_read_request(user_text)
+            and self._looks_like_read_promise("".join(collected))
+        ):
+            log.warning(
+                "阅读自纠：模型说要去读但没调 read_book，补一轮（回复=%r）",
+                "".join(collected)[:60],
+            )
+            await self._self_correct_reading(req, say_id)
+
         final_text = "".join(collected)
         if not final_text and not idle and reason != "interrupted":
             """
@@ -2232,6 +2273,102 @@ class Conversation:
             log.warning("生成工具 schema 失败：%s", exc)
             return None
 
+    # ------------------------------------------------------- 阅读自纠（2026-11-28）
+    #
+    # 三个小工具 + 一轮补救调用。见 `_generate` 里那段长说明。
+
+    #: 用户"让它去读书"的语气词
+    _READ_REQUEST_HINTS = (
+        "读", "看书", "小说", "这本书", "那本书", "第几章", "章节",
+    )
+    #: 模型"承诺要读/正在读"的说法（说说而已）
+    _READ_PROMISE_HINTS = (
+        # ① 承诺型（还没做）
+        "这就去", "这就读", "我这就", "马上读", "稍等", "等我", "去了",
+        "真调", "接着读", "继续读", "去读", "去看看", "翻两章", "读两章",
+        # ② 声称已经做了（2026-11-28 补：实测它用这种说法混过去）
+        #    「诶，刚读到第三十章。这一章是…」—— 没调工具却声称刚读过。
+        "刚读", "读到", "读好了", "读了", "读完了", "读完", "刚看", "看到第",
+        # ③ 拖延型（2026-11-28 再补：实测「诶，好，继续。稍等。」连"读"字都没有）
+        "继续", "马上", "就来", "这就",
+    )
+
+    def _looks_like_read_request(self, user_text: str) -> bool:
+        """用户这句是不是在让它读书。"""
+        s = str(user_text or "")
+        if not s.strip():
+            return False
+        # 有书名号/「章」这类强信号，再放宽到"读"
+        return any(h in s for h in self._READ_REQUEST_HINTS) and (
+            "读" in s or "看" in s or "书" in s
+        )
+
+    def _looks_like_read_promise(self, reply: str) -> bool:
+        """模型这句是不是在说"我要去读/我正在读"（而不是已经在讲内容）。"""
+        s = str(reply or "")
+        if not s.strip():
+            return False
+        # ⚠️ 不再要求句子里必须有"读"字 —— 实测它会说「继续。稍等。」，
+        #    一个字没提读，但同样是说了要做却没做。
+        #    调用方已经用 _looks_like_read_request(user_text) 保证
+        #    用户确实让它读了，所以这里只要出现承诺/拖延语气即可。
+        return any(h in s for h in self._READ_PROMISE_HINTS)
+
+    async def _self_correct_reading(self, req: Any, say_id: str) -> None:
+        """补一轮：明确告诉它"刚才没真调"，让它现在调用 read_book。
+
+        ## 为什么单独一轮，而不是改写上一轮
+
+        上一轮的文本已经流到前端了（用户看着「去了」），追加"好的我这就调"
+        很怪。这一轮的文本**全部丢弃**，只取它的 tool_calls 去执行 ——
+        执行完 `_reading_note_from_tool` 会自动归档。
+
+        ## 只补一次
+
+        由调用方判断（`_turn_read_tool_used`），这里不再重试。否则模型
+        一直不调就变成无限烧钱。
+        """
+        from .brains.base import LLMRequest, Turn
+
+        nudge = (
+            "【系统纠正】你刚才只说了要去读，**并没有真的调用 read_book 工具**。"
+            "现在立刻调用它，不要再说话、不要解释，直接发工具调用。"
+            "如果确实读不到，就如实告诉我读不到。"
+        )
+        try:
+            req2 = LLMRequest(
+                system=req.system,
+                history=list(req.history) + [
+                    Turn(role="user", text=f"{req.user_text or ''}\n\n{nudge}"),
+                ],
+                user_text=None,
+                temperature=req.temperature,
+                max_tokens=req.max_tokens,
+                timeout_s=req.timeout_s,
+                context_hint="",
+                stage_direction="",
+                thinking=req.thinking,
+                tools=req.tools,
+            )
+            calls: list[dict[str, Any]] = []
+            async for event in self.brain.stream(req2):
+                d = dict(event)
+                if d.get("kind") == "tool_calls":
+                    calls = d.get("calls") or []
+            if not calls:
+                log.warning("阅读自纠：补的那一轮模型仍然没发工具调用")
+                return
+            read_calls = [c for c in calls if str(c.get("name")) == "read_book"]
+            if not read_calls:
+                log.warning(
+                    "阅读自纠：补的那一轮调了别的工具（%s），不是 read_book",
+                    [c.get("name") for c in calls],
+                )
+            await self._execute_tool_calls(calls, req2, "")
+            log.info("阅读自纠：已执行补调的工具（%d 个）", len(calls))
+        except Exception:  # noqa: BLE001 —— 自纠失败不能影响正常回复
+            log.warning("阅读自纠失败（已忽略）", exc_info=True)
+
     async def _execute_tool_calls(
         self, calls: list[dict[str, Any]], req: LLMRequest, reasoning: str = ""
     ) -> None:
@@ -2259,6 +2396,29 @@ class Conversation:
         （见那里的说明）—— **宁可回一条"失败了"，也不能不回**。
         """
         from . import tools as tools_module
+
+        # 🔴 标记必须在**执行工具之前**置上（2026-11-28 修）
+        #
+        # ## 踩的坑
+        #
+        # 这段置位原来写在方法**末尾** —— 而 `read_book` 的 `on_read`
+        # 回调是在工具**执行过程中**触发的。于是回调读标记时它还是 False，
+        # 归档判断永远走"不用"分支。
+        #
+        # 实测日志（三条同一毫秒）：
+        #
+        #     标记诊断：gateway=False conversation=<缺失>
+        #     阅读回调：chunk=有 归档=不用 title=美食供应商 字数=6436
+        #     网上阅读：这轮是**用户要求**读的     <- 置位反而在最后
+        #
+        # 顺序反了 1ms，功能就整周不工作 —— 而且日志看起来"该有的都有"，
+        # 特别容易误判成别的问题。
+        if any(str(c.get("name") or "") == "read_book" for c in calls):
+            self._turn_read_tool_used = True
+            self._reading_from_dialog = True
+            # 归档专用标记（和提示词那条解耦，见 __init__ 里的说明）
+            self._dialog_read_pending = True
+            log.info("网上阅读：这轮是**用户要求**读的（会讲具体内容）")
 
         tool_list = self._tool_list()
 
@@ -2304,9 +2464,7 @@ class Conversation:
         #   · 自己闲着读 -> 「用户不知道，随口提一句，别报书名」
         #
         # 混用的后果很怪：用户明明让它读书，它却说成"我自己偷偷看的"。
-        if any(str(c.get("name") or "") == "read_book" for c in calls):
-            self._reading_from_dialog = True
-            log.info("网上阅读：这轮是**用户要求**读的（会讲具体内容）")
+        # 置位已挪到方法**开头**（见上面那段），这里不再重复。
 
     # ------------------------------------------------------------------ Prompt
 
@@ -2516,6 +2674,55 @@ class Conversation:
         # 实测把时间插在人设中间会让模型把日期当成设定的一部分去复述
         # （"我是2026年10月11日出生的…"），放末尾更像背景信息。
         parts.append(self._current_time_prompt())
+        # ---------------------------------------------------------- 工具纪律
+        #
+        # 🔴 2026-11-28 加（用户要求「让宠物真正开始用信息存储归档」）
+        #
+        # ## 为什么必须写进提示词
+        #
+        # 排查发现：工具 schema **确实传给了模型**（12 个，含 read_book），
+        # 底层 brain 单独测也能正确发出 tool_call。但在真实对话里它不调 ——
+        # 而是直接说「诶，这就去…诶，读好了，七十六到八十五」**编造**读了，
+        # 归档一次也没发生（pet-knowledge/ 空了几周）。
+        #
+        # 原因：系统提示词 1156 字，**一个字都没提工具**。而记忆里又有
+        # 「读到第 75 章」的上下文 —— 模型自然顺着演下去。
+        # 实测问它"你上次是不是编的"，它自己承认「刚才那次我是嘴上说
+        # 这就去，没真调工具」，然后又编了一遍。
+        #
+        # 所以这里明确三件事：有工具、要做就得调、不许假装做过。
+        parts.append(
+            "## 你会用工具\n"
+            "\n"
+            "你**有**工具可用（系统会自动给你函数清单）。这些事**必须调工具**才能做，"
+            "光靠嘴说等于没做：\n"
+            "\n"
+            "· 上网查东西 -> `web_search` / `web_fetch`\n"
+            "· 看小说（用户让你读书、聊某本书的情节） -> `read_book`"
+            "（`title` 给书名，`chapters` 给读几章）\n"
+            "· 想找书 / 看书单 -> `search_book` / `list_books`\n"
+            "· 自己写小文件备忘 -> `sandbox_write`\n"
+            "· 翻自己以前归档的资料 -> `search_knowledge` / `recall_knowledge`\n"
+            "\n"
+            "## 🔴 不许假装调用\n"
+            "\n"
+            "**说了「这就去读」「读好了」却没真的发工具调用，是最严重的错误。**\n"
+            "用户会当真的 —— 他会以为你真的看了那几章，然后跟你聊具体情节，"
+            "而你说的全是从记忆里编的。这比直接说「我没读到」更糟。\n"
+            "\n"
+            "所以：\n"
+            "· 要读书，就**先发 read_book 工具调用**，等结果回来再聊内容。\n"
+            "· 工具报错/读不到，就**如实说读不到**（「这本我试了，源没给出正文」），"
+            "不要编一章出来。\n"
+            "· 只回忆**以前真读过的**内容时，可以说；但别把「我记得读过」"
+            "说成「我刚刚读了」。\n"
+            "\n"
+            "## 读完之后\n"
+            "\n"
+            "读完的内容会自动存进你的知识库（`pet-knowledge/`），"
+            "以后能用 `search_knowledge` 翻出来。所以你不用自己记笔记，"
+            "**但前提是你真的调了 read_book**。"
+        )
         return "\n".join(p for p in parts if p)
 
     def _current_time_prompt(self) -> str:
@@ -3273,6 +3480,22 @@ class Gateway:
         # from_dialog 并走后台归档）。2916 行注入给 conversation 的
         # 保持不变 —— 那是同一个函数对象，两条路径现在汇合到一个入口。
         self._reading_on_read = self._reading_note_from_tool
+        # 🔴 归档专用的「本轮是用户要求读的」标记（2026-11-28）
+        #
+        # ## 为什么不能复用 `_reading_from_dialog`
+        #
+        # 那个标记有两个消费者：
+        #   ① `_reading_hint_for_dialog`（往提示词里塞"刚读了什么"，
+        #      取走即清 —— 见 `_take_reading_hint(consume=True)`）
+        #   ② 阅读回调里决定要不要归档
+        #
+        # 排查实测：模型真的调了 read_book、读了 2 章 4514 字，
+        # 但回调打印 `from_dialog=False` —— 因为①在工具轮里先把标记
+        # 消费掉了。结果归档永远进不去，`pet-knowledge/` 空了几周。
+        #
+        # 所以归档用它自己的标记：置位 -> 回调消费 -> 清。
+        # 和提示词那条完全解耦。
+        self._dialog_read_pending: bool = False
         # 后台归档任务的引用集（2026-11-21 加）。见 `_archive_reading_later`：
         # 局部变量会被 GC，任务半路消失会变成"有时归档有时不归"。
         self._archive_tasks: set[Any] = set()
@@ -5557,17 +5780,38 @@ class Gateway:
         """
         self._reading_from_tool = chunk
 
-        from_dialog = bool(getattr(self, "_reading_from_dialog", False))
+        # 归档判断用**独立标记**：`_reading_from_dialog` 会被
+        # `_reading_hint_for_dialog` 提前消费掉（见 __init__ 里的排查记录）
+        #
+        # ## 🔴 两个类各有一个 `self`（2026-11-28 又踩一次）
+        #
+        # 置位发生在 `Conversation._execute_tool_calls`，那里 `self` 是
+        # **Conversation**；而本方法是 **Gateway** 的 —— 读 `self._dialog_read_pending`
+        # 读的是 Gateway 自己那份，永远是 False。
+        #
+        # 实测日志：`模型要求调用 read_book` -> `读了 2 章` -> `归档=不用`
+        # —— 工具真调了，标记却没看到。
+        #
+        # 所以两边都要查。
+        from_dialog = bool(
+            getattr(self, "_dialog_read_pending", False)
+            or getattr(self.conversation, "_dialog_read_pending", False)
+        )
         log.info(
-            "阅读回调：chunk=%s from_dialog=%s title=%s 字数=%s",
+            "阅读回调：chunk=%s 归档=%s title=%s 字数=%s",
             "有" if chunk is not None else "无",
-            from_dialog,
+            "要" if from_dialog else "不用",
             getattr(chunk, "title", "?"),
             getattr(chunk, "chars", "?"),
         )
         if from_dialog and chunk is not None:
-            # 先把标记清掉，别让下一轮误判
-            self._reading_from_dialog = False
+            # 两个标记一起清，别让下一轮误判
+            for owner in (self, self.conversation):
+                try:
+                    owner._dialog_read_pending = False
+                    owner._reading_from_dialog = False
+                except Exception:  # noqa: BLE001
+                    pass
             self._archive_reading_later(chunk)
 
     # ------------------------------------------------------------------ 事件：读书
