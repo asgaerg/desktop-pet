@@ -117,17 +117,18 @@ def knowledge_dir(root: Optional[Path] = None) -> Path:
     这和 `PET_DATA_DIR`（记忆库）、`tempfile` 前缀是同一个套路：
     **测试必须能改道**，不能真的去动用户的文件。
     """
-    import os
+    # ① 显式传入优先（自检用临时目录；单测直接构造 store 时也走这条）。
+    #
+    # ⚠️ 2026-11-28：原来这里用 `project_root() / "pet-knowledge"`，
+    #    而打包后 `project_root()` 是**只读**的 resources 目录 ——
+    #    归档写不进去（实测打包版日志里路径就是 resources 下）。
+    #    现在走 `paths.knowledge_dir()`（= 可写的 data_dir 下）。
+    if root is not None:
+        pass  # 用调用方给的
+    else:
+        from . import paths
 
-    if root is None:
-        env_dir = os.environ.get("PET_KNOWLEDGE_DIR")
-        if env_dir:
-            root = Path(env_dir)
-        else:
-            from . import paths
-
-            root = paths.project_root() / "pet-knowledge"
-    root = Path(root)
+        root = paths.knowledge_dir()
     root.mkdir(parents=True, exist_ok=True)
     for sub in CATEGORIES:
         (root / sub).mkdir(exist_ok=True)

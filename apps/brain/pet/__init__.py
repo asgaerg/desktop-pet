@@ -12,7 +12,7 @@ pet —— 桌面宠物的 Python 大脑（sidecar）。
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 #: 许可证（2026-11-12 用户要求改成「不能商用」）。
 #:

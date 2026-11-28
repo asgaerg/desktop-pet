@@ -6792,12 +6792,13 @@ function registerSettingsIpc(): void {
    * `pet-data/web-sandbox/` 里写（比如「想尝尝的东西.md」）。
    *
    * 所以这里把**两个路径都**告诉用户，并支持一键打开：
-   *   · 信息存储归档   `pet-knowledge/`
+   *   · 信息存储归档   `pet-data/pet-knowledge/`（2026-11-28 从项目根移来：
+ *                    打包后项目根是只读的 resources，写不进去）
    *   · 沙箱（它自己写的小文件） `pet-data/web-sandbox/`
    *   · 记忆库        `pet-data/memory/`
    */
   ipcMain.handle('settings:data-locations', () => ({
-    knowledgeDir: path.join(PROJECT_ROOT, 'pet-knowledge'),
+    knowledgeDir: path.join(DATA_DIR, 'pet-knowledge'),
     sandboxDir: path.join(DATA_DIR, 'web-sandbox'),
     memoryDir: path.join(DATA_DIR, 'memory'),
     petMediaDir: path.join(PROJECT_ROOT, 'pet-media'),
@@ -6821,7 +6822,7 @@ function registerSettingsIpc(): void {
    * 所以把这句话写在两处注释里。
    */
   ipcMain.handle('settings:knowledge-stats', () => {
-    const root = path.join(PROJECT_ROOT, 'pet-knowledge');
+    const root = path.join(DATA_DIR, 'pet-knowledge');
     const indexPath = path.join(root, 'index.json');
     const priceIn = 2.0; // ¥/百万 输入 —— 与 pet/pricing.py 保持一致
     const priceOut = 8.0; // ¥/百万 输出
@@ -6918,7 +6919,7 @@ function registerSettingsIpc(): void {
 
   ipcMain.handle('settings:open-data-dir', async (_event, which: string) => {
     const map: Record<string, () => string> = {
-      knowledge: () => path.join(PROJECT_ROOT, 'pet-knowledge'),
+      knowledge: () => path.join(DATA_DIR, 'pet-knowledge'),
       sandbox: () => path.join(DATA_DIR, 'web-sandbox'),
       memory: () => path.join(DATA_DIR, 'memory'),
       media: () => path.join(PROJECT_ROOT, 'pet-media'),

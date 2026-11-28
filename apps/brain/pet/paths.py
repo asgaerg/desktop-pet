@@ -51,6 +51,43 @@ def vendor_dir() -> Path:
     return data_dir() / "vendor"
 
 
+def knowledge_dir() -> Path:
+    """信息存储归档根（可写）。
+
+    ## 🔴 2026-11-28 修：打包态不能写在 resources 里
+
+    原来 `knowledge.knowledge_dir()` 用的是 `project_root() / "pet-knowledge"`。
+    开发态没问题（就是仓库根），但**打包后 `project_root()` 是
+    `<安装目录>\resources`** —— 那是 Program Files / ProgramData，
+    普通用户**没有写权限**。
+
+    实测（打包版日志）：
+
+        知识归档就绪：0 个实体 / 0 个版本
+        （C:\ProgramData\...\resources\pet-knowledge）
+
+    后果有两个：
+      · 归档要么静默失败（写不进去），要么写进安装目录（重装就没了）
+      · 设置页「数据 → 信息存储 → 打开」打开的是**只读目录**
+
+    ## 现在的规则
+
+        ① 环境变量 `PET_KNOWLEDGE_DIR`（自检用来改道）
+        ② `data_dir() / "pet-knowledge"`（可写，开发态也是它）
+
+    ⚠️ 开发态路径会从 `<repo>/pet-knowledge` 变成
+       `<repo>/apps/desktop/pet-data/pet-knowledge` —— 这是**刻意的**：
+       所有可写数据都归到 pet-data 下，和 memory / models / web-sandbox 一致。
+       已有归档要迁过去（见 tools/migrate-knowledge.py）。
+    """
+    import os
+
+    env_dir = os.environ.get("PET_KNOWLEDGE_DIR")
+    if env_dir:
+        return Path(env_dir)
+    return data_dir() / "pet-knowledge"
+
+
 def mcp_runtime_dir() -> Path:
     """websearch-mcp.exe 的运行时落点。"""
     return data_dir() / "mcp-search"
